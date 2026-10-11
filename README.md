@@ -162,6 +162,8 @@ due trace summarize run.jsonl --output json
   fields, structured answers, tracing, native passthrough, results, and errors.
 - [docs/install.md](docs/install.md): installation, including the Codex plugin.
 - [docs/dogfooding.md](docs/dogfooding.md): trying Due and reporting issues.
+- [Node caller example](examples/node-caller/README.md): capture one run safely
+  and validate a task-specific review answer using Node built-ins.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development workflow and checks.
 - `due run --help` and `due skills show NAME`: the authoritative reference for
   the installed version.

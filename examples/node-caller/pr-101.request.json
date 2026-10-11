@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "provider": "codex",
+  "timeout": "5m",
+  "schema": "examples/node-caller/review.schema.json",
+  "native_args": [
+    "--sandbox",
+    "read-only",
+    "-c",
+    "approval_policy=\"never\""
+  ],
+  "ephemeral": true
+}

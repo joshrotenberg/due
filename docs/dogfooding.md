@@ -75,6 +75,12 @@ implementing them during the freeze.
 
 ## Caller scripts and agent experience
 
+The [tested Node caller example](../examples/node-caller/README.md) implements
+the pattern reported in [#4](https://github.com/joshrotenberg/due/issues/4), with
+exclusive run directories, failure records, cancellation forwarding, and a
+task-specific review validator. Its offline tests use a fake Due executable;
+Node is needed only to run this optional example.
+
 Keep small examples of glue code agents write around Due: prompt-file loading,
 stdout/stderr capture, trace paths, exit/signal records, and cancellation handling.
 Include the caller's language/runtime and why ordinary invocation or redirection

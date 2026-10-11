@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Task-specific pull request review answer",
+  "description": "Model answer only, separate from the Due result envelope. The caller additionally checks pr against its expected PR number and checks transport success and trace delivery. A request_changes verdict is a valid answer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "verdict",
+    "summary",
+    "findings",
+    "limitations"
+  ],
+  "properties": {
+    "pr": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "request_changes"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "priority",
+          "file",
+          "line",
+          "description",
+          "validation"
+        ],
+        "properties": {
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "description": {
+            "type": "string"
+          },
+          "validation": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

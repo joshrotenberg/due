@@ -22,6 +22,16 @@ authorized, bounded task in a disposable workspace and retain the result/trace.
 One Due invocation owns one foreground run. The caller owns orchestration and
 independent verification.
 
+The optional [Node caller example](examples/node-caller/README.md) has separate
+offline lifecycle and answer-validation tests. Run them with Node 22 or later:
+
+```sh
+node --test examples/node-caller/caller.test.mjs
+```
+
+These tests launch a fake Due executable and make no provider calls. Node is not
+a dependency of the Due binary or its plugin.
+
 Keep Cargo.lock committed and preserve the exact wrapper Git revisions. Review
 dependency updates separately. The crate has `publish = false`; source readiness
 does not authorize a crates.io release or wrapper release.
