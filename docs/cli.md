@@ -390,6 +390,48 @@ validation is not a security boundary. Native settings files and profiles can
 also affect execution. Permissions, tools, MCP configuration, schemas, and budget
 controls remain provider-specific; Due does not claim equivalent policy behavior.
 
+### Unattended Codex permissions
+
+For unattended local work, combine a writable workspace sandbox with approval
+policy `never`. This permits sandboxed edits and tests while rejecting requests
+for additional approval. It is a workspace boundary, not Claude's exact-command
+or individual-file allowlist. The prompt still defines the task's narrower scope;
+independently verify which files changed.
+
+```sh
+due run --provider codex --cwd /path/to/repo --stdin --output json --timeout 5m \
+  -- --sandbox workspace-write \
+  -c 'approval_policy="never"' \
+  -c 'sandbox_workspace_write.network_access=false' \
+  -c 'sandbox_workspace_write.writable_roots=[]' \
+  -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
+  -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' < task.txt > result.json
+```
+
+This stricter recipe removes additional writable roots and the usual `/tmp` and
+`$TMPDIR` write grants. Choose the actual repository as `--cwd`. Tests needing
+other writable locations require explicit authorization for those locations.
+Workspace-write does not restrict all reads to that directory. Network restrictions
+here apply to sandboxed commands; the provider's model connection and connected
+tools have separate controls. Native requirements and execution rules still apply.
+Do not add bypass flags or enable network access just to make a denied check pass.
+See the [native sandbox guide](https://learn.chatgpt.com/docs/sandboxing) and
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+The same native argument tokens can be stored in a partial request profile's
+`native_args`. A dry run checks the invocation, not the host's effective policy.
+Verify each machine with a disposable task and harmless negative controls:
+observe an actual denied write outside the writable roots, then independently
+check the target is unchanged. A worker declining to attempt the write does not
+by itself demonstrate sandbox enforcement. Record denied checks separately from
+execution status: the agent can finish successfully after an expected denial.
+
+In a macOS smoke test with Codex CLI 0.162.0, two sandbox-denied commands were
+absent from the native `exec --json` event stream despite executing and recording
+`EPERM` in an independent probe ledger. Due cannot trace command events that the
+provider omits. Zero failed activities or zero dropped trace records does not
+prove that no permissions were denied.
+
 ### Unattended Claude permissions
 
 `--tools` controls which built-in tools Claude can call; it does not approve their use.

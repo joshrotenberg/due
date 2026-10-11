@@ -76,6 +76,25 @@ Passthrough accepts options, not another command or positional prompt. For an
 unknown option whose value begins with `-`, use `--option=value`.
 Native permissions remain in force; do not add bypass flags as a default.
 
+For unattended Codex work, use a workspace sandbox with no approval escalation:
+
+```sh
+due run --provider codex --cwd "$PWD" --stdin --output json --timeout 5m \
+  -- --sandbox workspace-write -c 'approval_policy="never"' \
+  -c 'sandbox_workspace_write.network_access=false' \
+  -c 'sandbox_workspace_write.writable_roots=[]' \
+  -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
+  -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' < task.txt
+```
+
+This grants workspace edits and sandboxed commands, not only one file or command.
+It removes extra writable roots and default temporary-directory grants; additional
+paths require explicit authorization. Reads can extend outside the workspace.
+Command networking is disabled; provider API and connected-tool permissions are
+separate. Inherited native rules and managed requirements still apply. Preserve
+them and report blocked checks without retries or expanding permission grants.
+Keep the task's narrower scope in the prompt and independently verify effects.
+
 For unattended Claude work, `--tools` exposes built-in tools but does not
 authorize their use. `acceptEdits` permits edits, not arbitrary shell commands. Grant only the
 edits and checks authorized for this task, using native permission rules:

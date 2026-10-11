@@ -73,6 +73,21 @@ version or host policy. Keep the wrapper Git pins fixed during the trial so
 reports remain comparable. Track feature requests as follow-up ideas without
 implementing them during the freeze.
 
+## Caller scripts and agent experience
+
+Keep small examples of glue code agents write around Due: prompt-file loading,
+stdout/stderr capture, trace paths, exit/signal records, and cancellation handling.
+Include the caller's language/runtime and why ordinary invocation or redirection
+was insufficient. This separates missing guidance from repeated work that a
+future CLI improvement might remove. Collect issues during the freeze before
+choosing features.
+
+When a caller launches Due, pass an argument array, close prompt stdin, handle
+spawn errors, and wait for process/output closure before consuming final files.
+Preserve exit codes and termination signals separately. Forward cancellation to
+Due and allow its cleanup to finish; use fresh artifact paths. These are caller
+responsibilities today, not an additional Due runner or service.
+
 ## Resume and possible midstream corrections
 
 The default interaction remains a bounded request followed by a result. Context
