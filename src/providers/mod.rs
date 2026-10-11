@@ -6,6 +6,7 @@ use std::{future::Future, path::PathBuf};
 use crate::{
     cli::{Provider, RunArgs},
     result::{ErrorKind, Invocation, RunError, RunResult},
+    telemetry::Progress,
 };
 
 pub struct Context {
@@ -59,7 +60,7 @@ impl Context {
     }
 }
 
-pub async fn execute<C>(run: &RunArgs, prompt: &str, cancel: C) -> RunResult
+pub async fn execute<C>(run: &RunArgs, prompt: &str, progress: &Progress, cancel: C) -> RunResult
 where
     C: Future<Output = ()> + Send,
 {
@@ -68,7 +69,7 @@ where
         Err(error) => return RunResult::new(run.provider).fail(error),
     };
     match run.provider {
-        Provider::Claude => claude::execute(run, &context, prompt, cancel).await,
-        Provider::Codex => codex::execute(run, &context, prompt, cancel).await,
+        Provider::Claude => claude::execute(run, &context, prompt, progress, cancel).await,
+        Provider::Codex => codex::execute(run, &context, prompt, progress, cancel).await,
     }
 }

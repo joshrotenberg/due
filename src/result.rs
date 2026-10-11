@@ -17,6 +17,10 @@ pub enum Status {
 #[derive(Debug, Serialize)]
 pub struct RunResult {
     pub schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<TraceSummary>,
     pub provider: Provider,
     pub status: Status,
     pub text: String,
@@ -29,6 +33,12 @@ pub struct RunResult {
     pub invocation: Option<Invocation>,
     #[serde(skip)]
     pub diagnostics: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TraceSummary {
+    pub incomplete: bool,
+    pub dropped_records: u64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -111,6 +121,8 @@ impl RunResult {
     pub fn new(provider: Provider) -> Self {
         Self {
             schema_version: 1,
+            run_id: None,
+            trace: None,
             provider,
             status: Status::Succeeded,
             text: String::new(),

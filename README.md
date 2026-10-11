@@ -51,6 +51,9 @@ are published; keep `Cargo.lock` committed for reproducible application builds.
 | `--ephemeral` | Disable native session persistence. Conflicts with `--resume`. |
 | `--dry-run` | Show executable, argv, cwd, and stdin size without launching a provider. |
 | `--binary PATH` | Override the selected provider's executable. |
+| `--trace[=text\|json]` | Live progress on stderr; bare `--trace` uses readable text. |
+| `--trace-file PATH` | Create a new JSONL progress log; can be used with or without stderr tracing. |
+| `--trace-interval 5s` | Heartbeat period while tracing, after reading the prompt. Must be positive. |
 
 Prompts always travel to the child through stdin. A prompt supplied on Due's own
 command line is still visible in Due's argv; use `--stdin` when that matters.
@@ -68,6 +71,57 @@ capabilities apply. Due performs no automatic retries.
 Resume IDs stay provider-specific. `session_id` in Due's result is Claude's native
 session ID or Codex's native thread ID. Ephemeral runs may report an ID that cannot
 be resumed. There is no local session database or implicit "latest" selection.
+
+## Live progress
+
+```sh
+due run --provider claude -p "Fix the tests" --trace
+due run --provider codex -p "Fix the tests" --trace --trace-file run.jsonl
+due run --provider codex --stdin --output json --trace=json 2>progress.jsonl
+```
+
+Tracing reports process startup, session and turn activity, tool starts and
+completion or failure, message counts, elapsed time, and the final outcome. Quiet
+periods produce a heartbeat every five seconds with the time since the last
+activity. `--trace-interval 1s` changes that period. It is a liveness indicator,
+not a percentage or a claim that the provider is making progress. Claude also
+reports the start of thinking and text blocks without their contents. Codex
+identifies command execution as tool activity; other item kinds have generic
+lifecycle events.
+
+Every JSONL record has `schema_version: 1`, a fresh UUID `run_id`, a monotonically
+increasing `seq`, Unix `timestamp_ms`, `elapsed_ms`, `provider`, and `event`.
+Available fields include native `session_id`, child `pid`/Unix `pgid`, item IDs,
+tool names, tool durations and counters, message byte counts, and `idle_ms`.
+`run_finished` includes status, exit code, error kind, usage, and available cost.
+Its `scope: "execution"` describes the normalized execution outcome before final
+stdout delivery; a later stdout write failure can independently make Due exit 1.
+The same records go to both sinks when file and JSON stderr tracing are enabled.
+The final JSON result includes the matching `run_id` and a `trace` summary.
+
+Trace records exclude prompt text, argv, paths, model-generated text, reasoning,
+tool arguments/results, and raw diagnostics. IDs and tool names are retained
+with length/character restrictions. Due uses an explicit `tracing` target
+allowlist; `RUST_LOG=trace` does not enable dependency payload logging. With
+stderr tracing enabled, native diagnostics are suppressed to keep that channel
+safe and JSONL parseable. Use `--output json` for detailed runtime errors on
+stdout; those errors and final responses can contain provider content.
+
+Trace files are created exclusively, with mode `0600` on Unix; existing files
+are never overwritten. Relative paths resolve from the caller's directory.
+File creation failures stop before launching a provider. Records use a bounded
+queue so slow logging cannot block provider cleanup; overflow drops records.
+Shutdown allows up to two seconds to drain the queue. The final JSON's
+`trace.incomplete` reports dropped records, sink failure, or incomplete draining,
+and `trace.dropped_records` counts queue drops. Sequence gaps also reveal loss.
+An unresponsive sink may miss the terminal event; tracing never changes the
+provider's exit status.
+
+Tracing is opt-in and uses the wrappers' live event APIs. Final stdout remains a
+single answer or result document. With only `--trace-file`, normal stderr
+diagnostics remain enabled, except successful Codex stderr is unavailable through
+the current wrapper streaming API. Dry runs log planning only and never spawn a
+provider.
 
 ## Native options
 
@@ -165,9 +219,11 @@ cargo test --locked
 
 Tests launch fake provider executables, not models. They exercise actual argv,
 stdin, cwd, native passthrough, resume/ephemeral mapping, dry-run, final-answer
-normalization, failures, and Unix timeout/Ctrl-C descendant cleanup. Protocol
-fixtures follow the wrappers' recorded CLI shapes. The unit of execution remains
-one noninteractive turn; no interactive UI, normalized streaming, scheduler, or
+normalization, failures, and Unix timeout/Ctrl-C descendant cleanup. Tracing tests
+also gate a live provider to verify early event delivery, heartbeat behavior,
+content omission, sink handling, and cleanup with a blocked trace consumer.
+Protocol fixtures follow the wrappers' recorded CLI shapes. The unit of execution
+remains one noninteractive turn; no interactive UI, response streaming, scheduler, or
 provider authentication flow is included.
 
 The implementation uses Clap, one shared request/result contract, and separate

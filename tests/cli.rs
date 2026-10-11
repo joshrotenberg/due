@@ -175,6 +175,10 @@ fn fresh_runs_preserve_native_argv_and_send_exact_prompt_on_stdin() {
             .args(["--output", "json", "--"])
             .args(native));
         let value = json(&output, 0, "succeeded");
+        assert!(
+            value.get("run_id").is_none(),
+            "untraced stdout must retain its existing schema"
+        );
         assert_eq!(value["provider"], provider);
         assert_eq!(value["text"], "FINAL ANSWER");
         assert!(value["error"].is_null());
@@ -742,7 +746,9 @@ fn timeout_stops_provider_and_its_child() {
             "--output",
             "json",
             "--timeout",
-            "500ms",
+            // Leave room for macOS process startup under parallel test load;
+            // the fixture's sleep is 30s, so this still verifies real timeout.
+            "2s",
         ]));
         json(&output, 124, "timed_out");
         assert_reaped(&fixture.pids());

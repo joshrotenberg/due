@@ -1,13 +1,15 @@
-use std::{future::Future, io::ErrorKind as IoErrorKind, path::Path};
+use std::{future::Future, io::ErrorKind as IoErrorKind, path::Path, sync::Arc};
 
 use codex_wrapper::{
     Codex, CodexCommand, Error, ExecCommand, ExecResumeCommand, JsonLineEvent, QueryResult,
+    TokenUsage,
 };
 
 use super::Context;
 use crate::{
     cli::{Provider, RunArgs},
     result::{ErrorKind, RunError, RunResult, Usage},
+    telemetry::Progress,
 };
 
 enum Turn {
@@ -68,9 +70,26 @@ impl Turn {
             Self::Resume(cmd) => cmd.execute_cancellable(client, cancel).await,
         }
     }
+
+    async fn stream<C, F>(&self, client: &Codex, cancel: C, handler: F) -> codex_wrapper::Result<()>
+    where
+        C: Future<Output = ()> + Send,
+        F: FnMut(JsonLineEvent),
+    {
+        match self {
+            Self::Fresh(cmd) => cmd.stream_cancellable(client, cancel, handler).await,
+            Self::Resume(cmd) => cmd.stream_cancellable(client, cancel, handler).await,
+        }
+    }
 }
 
-pub async fn execute<C>(run: &RunArgs, context: &Context, prompt: &str, cancel: C) -> RunResult
+pub async fn execute<C>(
+    run: &RunArgs,
+    context: &Context,
+    prompt: &str,
+    progress: &Progress,
+    cancel: C,
+) -> RunResult
 where
     C: Future<Output = ()> + Send,
 {
@@ -99,10 +118,26 @@ where
     if let Some(timeout) = run.timeout {
         builder = builder.timeout(timeout);
     }
+    if progress.enabled() {
+        let progress = progress.clone();
+        builder = builder.on_spawn(Arc::new(move |info| progress.spawned(info.pid, info.pgid)));
+    }
     let client = match builder.build() {
         Ok(client) => client,
         Err(error) => return failure(error, &output_path),
     };
+    if progress.enabled() {
+        let mut state = StreamState::default();
+        let outcome = command
+            .stream(&client, cancel, |event| state.observe(event, progress))
+            .await;
+        // The streaming API discards successful stderr. Failed processes still
+        // carry diagnostics in their error; the default buffered path is unchanged.
+        return match outcome {
+            Ok(()) => state.finish(&output_path),
+            Err(error) => state.fail(error, &output_path),
+        };
+    }
     match command.execute(&client, cancel).await {
         Ok(output) => {
             let mut result = parse(&output.stdout, &output_path);
@@ -110,6 +145,164 @@ where
             result
         }
         Err(error) => failure(error, &output_path),
+    }
+}
+
+#[derive(Default)]
+struct StreamState {
+    thread_id: Option<String>,
+    session_id: Option<String>,
+    usage: Option<TokenUsage>,
+    completed: bool,
+    failure_message: Option<String>,
+    // Keep only the latest message for a partial failed response, never the
+    // event history or tool contents. Successful text comes from the final file.
+    last_assistant: String,
+}
+
+impl StreamState {
+    fn observe(&mut self, event: JsonLineEvent, progress: &Progress) {
+        if self.thread_id.is_none()
+            && let Some(id) = event.thread_id().filter(|id| !id.is_empty())
+        {
+            self.thread_id = Some(id.to_owned());
+            progress.session(id);
+        }
+        if self.session_id.is_none()
+            && let Some(id) = event.session_id().filter(|id| !id.is_empty())
+        {
+            self.session_id = Some(id.to_owned());
+            if self.thread_id.is_none() {
+                progress.session(id);
+            }
+        }
+        match event.event_type.as_str() {
+            "turn.started" => progress.phase("turn_started"),
+            "turn.completed" => {
+                self.completed = true;
+                self.usage = event.usage();
+                progress.phase("turn_completed");
+            }
+            "turn.failed" => {
+                self.failure_message = Some(
+                    event
+                        .turn_failure_message()
+                        .unwrap_or("Codex reported a failed turn")
+                        .to_owned(),
+                );
+                progress.phase("turn_failed");
+            }
+            "error" => progress.phase("provider_error"),
+            "item.started" | "item.updated" | "item.completed" => {
+                let item = event.extra.get("item");
+                let id = item
+                    .and_then(|item| item.get("id"))
+                    .and_then(|id| id.as_str());
+                let kind = match event.item_type() {
+                    Some("command_execution") => "command_execution",
+                    Some("agent_message") => "agent_message",
+                    _ => "other",
+                };
+                let phase = if kind == "command_execution" {
+                    match event.event_type.as_str() {
+                        "item.started" => "tool_started",
+                        "item.updated" => "tool_updated",
+                        _ => {
+                            let exit = item
+                                .and_then(|item| item.get("exit_code"))
+                                .and_then(|code| code.as_i64());
+                            let status = item
+                                .and_then(|item| item.get("status"))
+                                .and_then(|status| status.as_str());
+                            if exit.is_some_and(|code| code != 0) || status == Some("failed") {
+                                "tool_failed"
+                            } else {
+                                "tool_completed"
+                            }
+                        }
+                    }
+                } else {
+                    match event.event_type.as_str() {
+                        "item.started" => "item_started",
+                        "item.updated" => "item_updated",
+                        _ => "item_completed",
+                    }
+                };
+                progress.item(
+                    phase,
+                    id,
+                    kind,
+                    (kind == "command_execution").then_some("command_execution"),
+                );
+                if let Some(text) = event.agent_message_text() {
+                    progress.assistant(text.len());
+                    self.last_assistant = text;
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn finish(self, output_path: &Path) -> RunResult {
+        let mut result = RunResult {
+            session_id: self.thread_id.or(self.session_id),
+            usage: self.usage.map(normalize_usage),
+            ..RunResult::new(Provider::Codex)
+        };
+        if let Some(message) = self.failure_message {
+            result.text = std::fs::read_to_string(output_path)
+                .map(normalize_final_newline)
+                .unwrap_or(self.last_assistant);
+            return result.fail(RunError::new(ErrorKind::Provider, message));
+        }
+        if !self.completed {
+            return result.fail(RunError::protocol("Codex did not emit turn.completed"));
+        }
+        match std::fs::read_to_string(output_path) {
+            Ok(text) => result.text = normalize_final_newline(text),
+            Err(error) => {
+                return result.fail(RunError::protocol(format!(
+                    "Codex did not produce a readable final-message file: {error}"
+                )));
+            }
+        }
+        result
+    }
+
+    fn fail(self, error: Error, output_path: &Path) -> RunResult {
+        let terminal_failed = self.failure_message.is_some();
+        let mut result = self.finish(output_path);
+        let mut process = match error {
+            Error::Json { source, .. } => RunResult::new(Provider::Codex)
+                .fail(RunError::protocol(format!("invalid Codex JSONL: {source}"))),
+            other => failure(other, output_path),
+        };
+        result.diagnostics = process.diagnostics;
+        let error = process
+            .error
+            .take()
+            .expect("process failure carries an error");
+        if terminal_failed && error.kind == ErrorKind::Provider {
+            // Streaming errors have no stdout. Preserve the terminal event's
+            // explanation and partial result while adding the process exit code.
+            result.error.as_mut().unwrap().provider_exit_code = error.provider_exit_code;
+            result
+        } else {
+            // Cancellation, timeout, and transport errors override an earlier
+            // native terminal event only after the wrapper has settled cleanup.
+            result.fail(error)
+        }
+    }
+}
+
+fn normalize_usage(usage: TokenUsage) -> Usage {
+    Usage {
+        input_tokens: usage.input_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        output_tokens: usage.output_tokens,
+        reasoning_output_tokens: usage.reasoning_output_tokens,
+        total_tokens: usage.total_tokens,
     }
 }
 
@@ -246,4 +439,78 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
         other => RunError::new(ErrorKind::Provider, other.to_string()),
     };
     result.fail(failure)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streamed_terminal_failure_survives_a_process_error_without_stdout() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-written.txt");
+        let state = StreamState {
+            thread_id: Some("thread-1".into()),
+            failure_message: Some("native terminal failure".into()),
+            last_assistant: "partial answer".into(),
+            ..StreamState::default()
+        };
+        let result = state.fail(
+            Error::CommandFailed {
+                command: "unused command".into(),
+                exit_code: 9,
+                stdout: String::new(),
+                stderr: "native diagnostic".into(),
+                working_dir: None,
+            },
+            &path,
+        );
+        assert_eq!(result.session_id.as_deref(), Some("thread-1"));
+        assert_eq!(result.text, "partial answer");
+        assert_eq!(result.diagnostics, "native diagnostic");
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, ErrorKind::Provider);
+        assert_eq!(error.message, "native terminal failure");
+        assert_eq!(error.provider_exit_code, Some(9));
+    }
+
+    #[test]
+    fn streamed_cancellation_and_timeout_override_native_terminal_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-written.txt");
+        for (error, expected) in [
+            (Error::Cancelled { grace_seconds: 5 }, ErrorKind::Cancelled),
+            (Error::Timeout { timeout_seconds: 5 }, ErrorKind::Timeout),
+        ] {
+            let state = StreamState {
+                failure_message: Some("earlier native failure".into()),
+                ..StreamState::default()
+            };
+            assert_eq!(state.fail(error, &path).error.unwrap().kind, expected);
+        }
+    }
+
+    #[test]
+    fn streamed_success_requires_terminal_and_reads_final_file_not_commentary() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("final-message.txt");
+        std::fs::write(&path, "final answer\n").unwrap();
+        let incomplete = StreamState::default().finish(&path);
+        assert_eq!(incomplete.error.unwrap().kind, ErrorKind::Protocol);
+        let state = StreamState {
+            completed: true,
+            last_assistant: "earlier commentary".into(),
+            ..StreamState::default()
+        };
+        let result = state.finish(&path);
+        assert!(result.error.is_none());
+        assert_eq!(result.text, "final answer");
+        std::fs::remove_file(&path).unwrap();
+        let missing_file = StreamState {
+            completed: true,
+            ..StreamState::default()
+        }
+        .finish(&path);
+        assert_eq!(missing_file.error.unwrap().kind, ErrorKind::Protocol);
+    }
 }

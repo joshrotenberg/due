@@ -39,6 +39,12 @@ pub enum Output {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TraceFormat {
+    Text,
+    Json,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Effort {
     Low,
@@ -107,6 +113,18 @@ pub struct RunArgs {
     #[arg(long, value_name = "PATH")]
     pub binary: Option<PathBuf>,
 
+    /// Show live progress on stderr; bare --trace selects text.
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "text", require_equals = true)]
+    pub trace: Option<TraceFormat>,
+
+    /// Create a new JSONL progress log (existing files are never overwritten).
+    #[arg(long, value_name = "PATH")]
+    pub trace_file: Option<PathBuf>,
+
+    /// Waiting heartbeat interval while tracing; defaults to 5s.
+    #[arg(long, value_name = "DURATION", value_parser = parse_timeout)]
+    pub trace_interval: Option<Duration>,
+
     /// Extra provider options, forwarded in order without a shell.
     #[arg(last = true, value_name = "NATIVE_ARGS", allow_hyphen_values = true)]
     pub native_args: Vec<String>,
@@ -115,7 +133,7 @@ pub struct RunArgs {
 fn parse_timeout(value: &str) -> Result<Duration, String> {
     let duration = humantime::parse_duration(value).map_err(|e| e.to_string())?;
     if duration.is_zero() {
-        return Err("timeout must be greater than zero".into());
+        return Err("duration must be greater than zero".into());
     }
     Ok(duration)
 }
