@@ -31,14 +31,33 @@ model names and supported effort levels remain provider-specific.
 With execution flags, exactly one of `--stdin` and `--prompt TEXT` is required. Both reach the child
 through stdin, but `--prompt` exposes the prompt in Due's own argv.
 
-Alternatively, use `due run --request request.json --output json`, or
-`due run --request - --output json` with the whole JSON document on stdin.
-Require top-level `schema_version: 1`, `provider`, and a literal `prompt` string.
-Optional fields are `model`, `effort`, `cwd`, `timeout`, `schema`, `resume`,
-`ephemeral`, and `native_args`. Load `due skills show contracts` for input rules.
-Request `cwd` and `schema` paths use the caller's directory, not the request directory.
-Do not combine request input with execution flags or native arguments after `--`.
-Only output, dry-run, binary, and tracing controls remain CLI options with a request.
+A request file can hold a complete task or a partial profile. Only
+`schema_version: 1` is required in the file; provider and prompt must be supplied
+after merging. Explicit CLI execution flags replace file values; absent flags
+inherit them. For example, save this as `profile.json`:
+
+```json
+{"schema_version":1,"provider":"codex","timeout":"5m","ephemeral":true}
+```
+
+```sh
+due run --request profile.json --stdin --dry-run --output json < task.txt > plan.json
+due run --request profile.json --stdin --output json \
+  --trace --trace-file run.jsonl < task.txt > result.json
+run_status=$?
+due trace summarize run.jsonl --output json > trace-summary.json
+```
+
+Use a fresh trace path. Preserve `run_status`; the summary command has its own
+exit status. Add `--schema answer.schema.json` when the assignment needs a typed
+answer. `due schema request|result|trace` exports each installed contract (choose
+one name). Load `due skills show contracts` for input and result rules.
+
+`--no-ephemeral` overrides profile true. Native arguments after `--` replace the
+whole profile list; `--clear-native-args` clears it. Paths for cwd and schema use
+the caller's directory. `--request -` reads a whole JSON document from stdin and
+cannot share stdin with `--stdin`; a CLI `--prompt` can override that document.
+Changing provider does not clear other inherited options.
 
 Add `--trace` for readable progress, or load `due skills show observe` for JSONL
 monitoring. Load `due skills show contracts` when the caller needs structured
@@ -46,8 +65,11 @@ answers or must interpret result fields. `due skills` lists the available skills
 `due skills list --output json` provides the catalog for automated selection.
 `due skills show NAME --output json` also returns a machine-readable response.
 
-Use `--dry-run` to inspect the planned invocation without launching a provider.
-It omits prompt text but shows native option values and the inline Claude schema.
+Use `--dry-run` to validate the merged task, native conflicts, cwd, and schema
+JSON without launching a provider. It works without an installed provider and
+does not verify authentication, model availability, or provider schema support.
+It omits prompt text but shows native option values and the inline Claude schema;
+requested tracing and temporary schema snapshots may still write files.
 Pass native options after `--`, for example `-- --max-turns 5` for Claude.
 Use shared flags for cwd, prompt transport, output, and session selection.
 Passthrough accepts options, not another command or positional prompt. For an
@@ -58,7 +80,10 @@ Use `--resume ID` only for the intended provider's session and authorized follow
 It requires a new prompt. `--ephemeral` disables persistence and conflicts with
 resume; an ID returned by an ephemeral run may not be resumable.
 
-After the run, inspect its exit status and result, then inspect the actual
+After the run, inspect its exit status and result. For structured answers, require
+`structured_output_present` and independently validate the value when correctness
+is a gate; `answer_schema_validation` does not claim independent validation.
+Then inspect the actual
 deliverables: changed files, diffs, generated artifacts, relevant checks, or the
 external system the task was authorized to change. A provider's narrative and
 activity records are reported evidence; label effects as verified only after

@@ -1,0 +1,322 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Due run result version 1",
+  "description": "One JSON stdout envelope from due run --output json, including plans and errors. This is the transport envelope, not a model-answer schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provider",
+    "status",
+    "text",
+    "structured_output",
+    "structured_output_present",
+    "answer_schema_validation",
+    "session_id",
+    "usage",
+    "cost_usd",
+    "duration_ms",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Present when tracing was initialized."
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "incomplete",
+        "dropped_records"
+      ],
+      "properties": {
+        "incomplete": {
+          "type": "boolean"
+        },
+        "dropped_records": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "provider": {
+      "enum": [
+        "claude",
+        "codex",
+        null
+      ],
+      "description": "Null only when intake failed before resolving a provider."
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "timed_out",
+        "cancelled",
+        "planned"
+      ]
+    },
+    "text": {
+      "type": "string"
+    },
+    "structured_output": {
+      "description": "Native structured value, or Codex final text decoded only when a common answer schema was requested. Null is ambiguous without structured_output_present."
+    },
+    "structured_output_present": {
+      "type": "boolean",
+      "description": "True exactly when structured_output is present, including an explicit JSON null. False means absent."
+    },
+    "answer_schema_validation": {
+      "enum": [
+        "not_resolved",
+        "not_requested",
+        "not_performed"
+      ],
+      "description": "Due independent answer-schema validation: not_resolved means intake failed before common schema intent could be determined; not_requested means the resolved invocation has no common answer schema; not_performed means a common schema was explicitly requested but Due did not validate the answer against it. An explicit CLI --schema preserves not_performed even if request intake fails. Providers enforce supported constraints. JSON decoding and presence checks are not schema validation, and this field never asserts provider validation succeeded."
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "usage": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/usage"
+        }
+      ]
+    },
+    "cost_usd": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/error"
+        }
+      ]
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binary",
+        "cwd",
+        "args",
+        "stdin_bytes"
+      ],
+      "properties": {
+        "binary": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stdin_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "Only dry-run plans include invocation metadata. Prompt content is omitted."
+    }
+  },
+  "$defs": {
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cached_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_write_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "reasoning_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "description": "Native counters only. Cache inclusion and overlap differ by provider; totals are never inferred."
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "message",
+        "provider_exit_code"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "invalid_input",
+            "authentication",
+            "max_turns",
+            "max_budget",
+            "configuration",
+            "session_not_found",
+            "unsupported",
+            "provider",
+            "protocol",
+            "io",
+            "timeout",
+            "cancelled",
+            "not_found"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "provider_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "structured_output_present": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "structured_output": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "planned"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "invocation"
+        ],
+        "properties": {
+          "error": {
+            "type": "null"
+          },
+          "provider": {
+            "enum": [
+              "claude",
+              "codex"
+            ]
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "invocation"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "failed",
+              "timed_out",
+              "cancelled"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "$ref": "#/$defs/error"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

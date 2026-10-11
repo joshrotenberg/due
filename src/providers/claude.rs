@@ -136,7 +136,7 @@ impl StreamState {
                 {
                     match block_type {
                         BlockType::ToolUse { id, name } => {
-                            self.tool_started(Some(&id), Some(&name), progress);
+                            self.tool_started(Some(&id), Some(&name), None, progress);
                         }
                         BlockType::Thinking => progress.phase("thinking_started"),
                         BlockType::Text => progress.phase("response_started"),
@@ -147,10 +147,13 @@ impl StreamState {
             Some("assistant") => {
                 let content = event.data.pointer("/message/content");
                 let mut bytes = content.and_then(Value::as_str).map_or(0, str::len);
+                let mut detail = content.and_then(Value::as_str);
                 if let Some(blocks) = content.and_then(Value::as_array) {
                     for block in blocks {
                         match block.get("type").and_then(Value::as_str) {
                             Some("text") => {
+                                detail =
+                                    detail.or_else(|| block.get("text").and_then(Value::as_str));
                                 bytes = bytes.saturating_add(
                                     block
                                         .get("text")
@@ -161,13 +164,14 @@ impl StreamState {
                             Some("tool_use") => self.tool_started(
                                 block.get("id").and_then(Value::as_str),
                                 block.get("name").and_then(Value::as_str),
+                                block.get("input"),
                                 progress,
                             ),
                             _ => (),
                         }
                     }
                 }
-                progress.assistant(bytes);
+                progress.assistant(bytes, detail);
             }
             Some("user") => {
                 if let Some(blocks) = event
@@ -208,12 +212,29 @@ impl StreamState {
         }
     }
 
-    fn tool_started(&mut self, id: Option<&str>, name: Option<&str>, progress: &Progress) {
+    fn tool_started(
+        &mut self,
+        id: Option<&str>,
+        name: Option<&str>,
+        input: Option<&Value>,
+        progress: &Progress,
+    ) {
         const MAX_ACTIVE_TOOLS: usize = 1024;
         let id = id.filter(|id| !id.is_empty());
+        let detail = progress
+            .detail_enabled()
+            .then(|| tool_detail(name, input))
+            .flatten();
         if let Some(id) = id {
-            if self.active_tools.contains_key(id)
-                || self.completed_tools.iter().any(|completed| completed == id)
+            if self.active_tools.contains_key(id) {
+                if input.is_some()
+                    && let Some(detail) = detail
+                {
+                    progress.activity_detail(Some(id), activity_kind(name), name, detail);
+                }
+                return;
+            }
+            if self.completed_tools.iter().any(|completed| completed == id)
                 || self.active_tools.len() >= MAX_ACTIVE_TOOLS
             {
                 return;
@@ -225,6 +246,7 @@ impl StreamState {
             id,
             activity_kind(name),
             name.filter(|name| !name.is_empty()),
+            detail,
         );
     }
 
@@ -252,7 +274,7 @@ impl StreamState {
             Some(Value::Bool(true)) => ActivityStatus::Failed,
             Some(_) => ActivityStatus::Unknown,
         };
-        progress.activity_completed(id, activity_kind(name), status, name);
+        progress.activity_completed(id, activity_kind(name), status, name, None);
     }
 
     fn finish(self, outcome: claude_wrapper::Result<claude_wrapper::CommandOutput>) -> RunResult {
@@ -310,6 +332,24 @@ impl StreamState {
             result.session_id = self.session_id;
         }
         result
+    }
+}
+
+fn tool_detail<'a>(name: Option<&'a str>, input: Option<&'a Value>) -> Option<&'a str> {
+    match name {
+        Some("Bash") => input
+            .and_then(|input| input.get("command"))
+            .and_then(Value::as_str)
+            .or(name),
+        Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => input
+            .and_then(|input| {
+                input
+                    .get("file_path")
+                    .or_else(|| input.get("notebook_path"))
+            })
+            .and_then(Value::as_str)
+            .or(name),
+        _ => name,
     }
 }
 

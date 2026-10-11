@@ -30,8 +30,10 @@ if [ "$DUE_SCHEMA_PROVIDER" = claude ]; then
     if [ "$format" = stream-json ]; then
         printf '%s\n' '{"type":"system","subtype":"init","session_id":"schema-session","tools":[]}'
     fi
-    if [ "$DUE_SCHEMA_MODE" = failure ]; then
-        printf '%s\n' '{"type":"result","subtype":"error_during_execution","session_id":"schema-session","result":"PARTIAL ANSWER","is_error":true,"errors":["fixture provider failure"],"usage":{"input_tokens":120,"output_tokens":45}}'
+    if [ "$DUE_SCHEMA_MODE" = failure ] || [ "$DUE_SCHEMA_MODE" = failure_null ]; then
+        printf '%s' '{"type":"result","subtype":"error_during_execution","session_id":"schema-session","result":"PARTIAL ANSWER","is_error":true,"errors":["fixture provider failure"],"usage":{"input_tokens":120,"output_tokens":45}'
+        if [ "$DUE_SCHEMA_MODE" = failure_null ]; then printf ',"structured_output":null'; fi
+        printf '}\n'
         exit 9
     fi
     printf '%s' '{"type":"result","subtype":"success","session_id":"schema-session","result":"A readable answer","is_error":false,"usage":{"input_tokens":120,"output_tokens":45}'
@@ -42,8 +44,11 @@ if [ "$DUE_SCHEMA_PROVIDER" = claude ]; then
 else
     printf '%s\n' '{"type":"thread.started","thread_id":"schema-session"}'
     printf '%s\n' '{"type":"turn.started"}'
-    if [ "$DUE_SCHEMA_MODE" = failure ]; then
-        if [ -n "$last_message" ]; then printf 'PARTIAL ANSWER\n' > "$last_message"; fi
+    if [ "$DUE_SCHEMA_MODE" = failure ] || [ "$DUE_SCHEMA_MODE" = failure_null ]; then
+        if [ -n "$last_message" ]; then
+            if [ "$DUE_SCHEMA_MODE" = failure_null ]; then printf 'null\n' > "$last_message";
+            else printf 'PARTIAL ANSWER\n' > "$last_message"; fi
+        fi
         printf '%s\n' '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"PARTIAL ANSWER"}}'
         printf '%s\n' '{"type":"turn.failed","error":{"message":"fixture provider failure"}}'
         exit 9

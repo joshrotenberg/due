@@ -700,3 +700,144 @@ fn unread_trace_stderr_does_not_block_cancellation_cleanup_or_final_stdout() {
         assert!(!output.stderr.is_empty());
     }
 }
+
+#[test]
+fn detail_is_opt_in_bounded_and_excludes_reasoning_prompts_and_results() {
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(provider);
+        let baseline = run(fixture.command("diverse").arg("--trace=json"));
+        let baseline_result = result(&baseline, 0, "succeeded");
+        assert!(
+            records(&baseline.stderr)
+                .iter()
+                .all(|r| r.get("detail").is_none())
+        );
+        no_secrets(&baseline.stderr);
+
+        let output = run(fixture
+            .command("diverse")
+            .args(["--trace=json", "--trace-detail"]));
+        let detailed_result = result(&output, 0, "succeeded");
+        assert_eq!(baseline_result["text"], detailed_result["text"]);
+        let events = records(&output.stderr);
+        let text = String::from_utf8(output.stderr).unwrap();
+        assert!(text.contains("SECRET_TOOL_INPUT"));
+        assert!(text.contains("FINAL TRACED ANSWER"));
+        if provider == "codex" {
+            assert!(text.contains("SECRET_FILE_PATH"));
+        }
+        for forbidden in [
+            "SECRET_PROMPT",
+            "SECRET_ENV",
+            "SECRET_PROVIDER_STDERR",
+            "SECRET_TOOL_OUTPUT",
+            "SECRET_ACTIVITY_OUTPUT",
+            "SECRET_DELTA",
+            "SECRET_REASONING_TEXT",
+            "SECRET_UNKNOWN",
+            "SECRET_PLAN_TEXT",
+        ] {
+            assert!(!text.contains(forbidden), "{provider}: {forbidden}");
+        }
+        for event in events {
+            if let Some(detail) = event.get("detail") {
+                assert!(detail["text"].as_str().unwrap().len() <= 240);
+                assert!(detail["truncated"].is_boolean());
+            }
+        }
+    }
+}
+
+#[test]
+fn detail_is_utf8_safe_and_terminal_controls_are_visible_escapes() {
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(provider);
+        let label = format!("printf \u{1b}[31m\n\t\u{202e}{}", "é🙂".repeat(100));
+        // Emit JSON as a printf argument. Replacing the label in the fixture's
+        // existing printf format string would expand JSON \n/\t escapes and
+        // create malformed native records before Due could inspect them.
+        let event = if provider == "claude" {
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"detail-controls","name":"Bash","input":{"command":label}}
+            ]}})
+        } else {
+            serde_json::json!({"type":"item.started","item":{"id":"detail-controls","type":"command_execution","command":label,"status":"in_progress"}})
+        };
+        let injection = format!("printf '%s\\n' '{event}'\ncase \"$DUE_TRACE_MODE\" in");
+        let script = fs::read_to_string(&fixture.binary).unwrap().replacen(
+            "case \"$DUE_TRACE_MODE\" in",
+            &injection,
+            1,
+        );
+        fs::write(&fixture.binary, script).unwrap();
+        let output = run(fixture
+            .command("success")
+            .args(["--trace=json", "--trace-detail"]));
+        result(&output, 0, "succeeded");
+        let events = records(&output.stderr);
+        let details: Vec<_> = events.iter().filter_map(|e| e.get("detail")).collect();
+        let command = details
+            .iter()
+            .find(|d| d["text"].as_str().unwrap().starts_with("printf"))
+            .unwrap();
+        let text = command["text"].as_str().unwrap();
+        assert!(text.len() <= 240);
+        assert_eq!(command["truncated"], true);
+        assert!(text.contains("\\u{1b}"));
+        assert!(text.contains("\\u{202e}"));
+        assert!(!text.chars().any(char::is_control));
+        let human = run(fixture
+            .command("success")
+            .args(["--trace", "--trace-detail"]));
+        result(&human, 0, "succeeded");
+        assert!(!human.stderr.contains(&0x1b));
+        assert!(
+            String::from_utf8(human.stderr)
+                .unwrap()
+                .contains("truncated")
+        );
+    }
+}
+
+#[test]
+fn empty_late_claude_detail_does_not_emit_a_record_without_detail() {
+    let fixture = Fixture::new("claude");
+    let script = fs::read_to_string(&fixture.binary)
+        .unwrap()
+        .replace("SECRET_TOOL_INPUT", "");
+    fs::write(&fixture.binary, script).unwrap();
+    let output = run(fixture
+        .command("success")
+        .args(["--trace=json", "--trace-detail"]));
+    result(&output, 0, "succeeded");
+    for event in records(&output.stderr) {
+        if event["event"] == "activity_detail" {
+            assert!(event.get("detail").is_some());
+        }
+    }
+}
+
+#[test]
+fn codex_detail_ignores_reasoning_and_unknown_content_blocks() {
+    let fixture = Fixture::new("codex");
+    let event = serde_json::json!({"type":"item.completed","item":{"id":"message-content","type":"agent_message","content":[
+        {"type":"reasoning","text":"SECRET_REASONING_BLOCK"},
+        {"type":"future_block","text":"SECRET_UNKNOWN_BLOCK"},
+        {"type":"text","text":"VISIBLE_PROGRESS"}
+    ]}});
+    let injection = format!("printf '%s\\n' '{event}'\ncase \"$DUE_TRACE_MODE\" in");
+    let script = fs::read_to_string(&fixture.binary).unwrap().replacen(
+        "case \"$DUE_TRACE_MODE\" in",
+        &injection,
+        1,
+    );
+    fs::write(&fixture.binary, script).unwrap();
+    let output = run(fixture
+        .command("success")
+        .args(["--trace=json", "--trace-detail"]));
+    result(&output, 0, "succeeded");
+    let text = String::from_utf8(output.stderr).unwrap();
+    assert!(text.contains("VISIBLE_PROGRESS"));
+    assert!(!text.contains("SECRET_REASONING_BLOCK"));
+    assert!(!text.contains("SECRET_UNKNOWN_BLOCK"));
+}

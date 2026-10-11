@@ -63,7 +63,8 @@ impl Schema {
     }
 }
 
-pub fn normalize(mut result: RunResult) -> RunResult {
+pub fn normalize(result: RunResult) -> RunResult {
+    let mut result = result.with_schema_requested(true);
     if result.invocation.is_some() {
         return result;
     }

@@ -5,28 +5,40 @@ description: Request structured answers with Due and interpret its result envelo
 
 # Use the result contract
 
-`due run --request FILE` accepts one JSON object; `--request -` reads the whole
-document from stdin. Require `schema_version: 1`, `provider: "claude"` or `"codex"`,
-and a literal non-whitespace `prompt`. Optional fields are `model`, `effort`,
+`due schema request`, `due schema result`, and `due schema trace` export the
+installed contracts as JSON Schema without a provider or network.
+`due schema trace-summary` describes offline summaries and their error envelope.
+
+`due run --request FILE` accepts a complete task or partial profile;
+`--request -` reads the document from stdin. Only `schema_version: 1` must be in
+the file. Explicit CLI execution flags replace file values; omitted flags inherit.
+Provider (`claude` or `codex`) and a non-whitespace prompt must exist after merging,
+or use `--stdin` for the prompt. Optional file fields are `model`, `effort`,
 `cwd`, `timeout`, `schema`, `resume`, `ephemeral`, and `native_args`.
 
 ```sh
-due run --request - --output json <<'JSON'
-{"schema_version":1,"provider":"claude","prompt":"Summarize this repository without changing files.","timeout":"2m"}
+due run --request - --prompt 'Summarize without changing files.' --output json <<'JSON'
+{"schema_version":1,"provider":"claude","timeout":"2m"}
 JSON
 ```
 
-Unknown/duplicate keys, unsupported versions, and bad types are invalid input.
-Nullable optional fields mean omitted; model/resume strings must be nonempty.
-Effort is low/medium/high; timeout is a positive duration string, such as `5m`.
+Malformed JSON, unknown/duplicate keys, unsupported versions, and bad JSON types
+fail even if CLI flags would replace them. Semantic checks follow merging: an
+invalid duration string can be replaced with `--timeout 5m`. Provider/prompt may
+be omitted but not null. Nullable optional fields mean absent; model/resume must
+be nonempty. Effort is low/medium/high; timeout is a positive duration.
 `ephemeral` is a boolean defaulting false; `native_args` is a string array defaulting
-empty. Neither accepts null. Non-null resume conflicts with ephemeral true.
-Request `cwd` and `schema` paths use the caller's cwd. Inputs do not recursively load
-more prompts/requests; native argument paths follow the provider's rules.
-Do not mix request input with execution flags; only `--output`, `--dry-run`,
-`--binary`, `--trace`, `--trace-file`, and `--trace-interval` accompany it.
-The request schema documents structure; Due also checks duplicates and parses
-positive durations. This input is one foreground run, not a scheduling API.
+empty. Neither accepts null. `--no-ephemeral` overrides profile true; final resume
+conflicts with ephemeral true. Native arguments after `--` replace the entire list;
+`--clear-native-args` clears it, while a bare `--` inherits it.
+
+`--prompt` and `--stdin` each replace the file prompt. `--request - --stdin` is
+invalid because both would consume stdin. Request cwd/schema paths use the
+caller's cwd, not the file directory. Native argument paths use provider rules.
+Output, binary, dry-run, and tracing controls remain CLI-only. The request schema
+checks shape; `--dry-run` also checks the merged task, native conflicts, cwd, and
+schema JSON before preparing a plan. It does not validate authentication/model
+support or the provider's schema subset. This is one foreground run.
 
 `--output json` selects Due's final result envelope; it does not require the model
 to answer in JSON. `--schema FILE` additionally asks the selected provider for an
@@ -55,8 +67,15 @@ validate constraints, convert incompatible schemas, repair answers, or retry.
 - `text` is the final answer, or available partial text on failure.
 - `structured_output` retains native Claude data even without `--schema`; Codex
   final JSON is decoded only with `--schema`. It is independent of `text`; an empty successful
-  Claude text answer falls back to the serialized structured value. JSON null
-  can mean missing data or an explicit null answer in the serialized envelope.
+  Claude text answer falls back to the serialized structured value.
+- `structured_output_present` is false for missing data and true for a supplied
+  answer, including explicit JSON null. Never use value truthiness to check presence.
+- `answer_schema_validation` is `not_requested` without the common schema option
+  or `not_performed` with it, even on planned/failed runs. Intake failures use
+  `not_resolved` when schema intent is unknown; an explicit CLI schema is known.
+  The field describes Due's
+  independent validation, not native enforcement. Validate the answer separately
+  when validity gates further work; neither presence nor execution success proves it.
 - `session_id` is the native Claude session or Codex thread ID, not a Due session.
 - `usage` holds nullable native counters; cache accounting differs by provider.
   Do not infer missing totals. `cost_usd` is available Claude cost, otherwise null.

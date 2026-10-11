@@ -73,7 +73,11 @@ where
 {
     let context = match Context::resolve(run) {
         Ok(context) => context,
-        Err(error) => return RunResult::new(run.provider).fail(error),
+        Err(error) => {
+            return RunResult::new(run.provider)
+                .with_schema_requested(run.schema.is_some())
+                .fail(error);
+        }
     };
     let result = match run.provider {
         Provider::Claude => claude::execute(run, &context, prompt, progress, cancel).await,

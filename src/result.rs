@@ -1,6 +1,6 @@
 use std::{io, path::PathBuf};
 
-use serde::Serialize;
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use crate::cli::Provider;
 
@@ -14,12 +14,10 @@ pub enum Status {
     Planned,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct RunResult {
     pub schema_version: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<TraceSummary>,
     /// Null only when a JSON request was rejected before resolving an invocation.
     pub provider: Option<Provider>,
@@ -27,15 +25,64 @@ pub struct RunResult {
     pub text: String,
     /// Native structured data, or a decoded final answer requested with --schema.
     pub structured_output: Option<serde_json::Value>,
+    /// Due does not independently validate answers against the requested schema.
+    pub answer_schema_validation: AnswerSchemaValidation,
     pub session_id: Option<String>,
     pub usage: Option<Usage>,
     pub cost_usd: Option<f64>,
     pub duration_ms: u64,
     pub error: Option<RunError>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub invocation: Option<Invocation>,
-    #[serde(skip)]
     pub diagnostics: String,
+}
+
+/// This describes Due's independent validation, not a provider's enforcement.
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerSchemaValidation {
+    /// Intake failed before common schema intent could be resolved.
+    #[serde(rename = "not_resolved")]
+    Unresolved,
+    #[default]
+    NotRequested,
+    NotPerformed,
+}
+
+impl Serialize for RunResult {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let count = 12
+            + usize::from(self.run_id.is_some())
+            + usize::from(self.trace.is_some())
+            + usize::from(self.invocation.is_some());
+        let mut fields = serializer.serialize_struct("RunResult", count)?;
+        fields.serialize_field("schema_version", &self.schema_version)?;
+        if let Some(run_id) = &self.run_id {
+            fields.serialize_field("run_id", run_id)?;
+        }
+        if let Some(trace) = &self.trace {
+            fields.serialize_field("trace", trace)?;
+        }
+        fields.serialize_field("provider", &self.provider)?;
+        fields.serialize_field("status", &self.status)?;
+        fields.serialize_field("text", &self.text)?;
+        fields.serialize_field("structured_output", &self.structured_output)?;
+        // Compute presence at serialization time so Some(Null) cannot be confused
+        // with None, and provider adapters cannot leave a separate flag stale.
+        fields.serialize_field(
+            "structured_output_present",
+            &self.structured_output.is_some(),
+        )?;
+        fields.serialize_field("answer_schema_validation", &self.answer_schema_validation)?;
+        fields.serialize_field("session_id", &self.session_id)?;
+        fields.serialize_field("usage", &self.usage)?;
+        fields.serialize_field("cost_usd", &self.cost_usd)?;
+        fields.serialize_field("duration_ms", &self.duration_ms)?;
+        fields.serialize_field("error", &self.error)?;
+        if let Some(invocation) = &self.invocation {
+            fields.serialize_field("invocation", invocation)?;
+        }
+        fields.end()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -132,7 +179,11 @@ impl RunResult {
     }
 
     pub fn rejected(error: RunError) -> Self {
-        Self::empty(None).fail(error)
+        Self {
+            answer_schema_validation: AnswerSchemaValidation::Unresolved,
+            ..Self::empty(None)
+        }
+        .fail(error)
     }
 
     fn empty(provider: Option<Provider>) -> Self {
@@ -144,6 +195,7 @@ impl RunResult {
             status: Status::Succeeded,
             text: String::new(),
             structured_output: None,
+            answer_schema_validation: AnswerSchemaValidation::NotRequested,
             session_id: None,
             usage: None,
             cost_usd: None,
@@ -152,6 +204,15 @@ impl RunResult {
             invocation: None,
             diagnostics: String::new(),
         }
+    }
+
+    pub fn with_schema_requested(mut self, requested: bool) -> Self {
+        self.answer_schema_validation = if requested {
+            AnswerSchemaValidation::NotPerformed
+        } else {
+            AnswerSchemaValidation::NotRequested
+        };
+        self
     }
 
     pub fn fail(mut self, error: RunError) -> Self {
@@ -174,5 +235,27 @@ impl RunResult {
 
     pub fn exit_code(&self) -> u8 {
         self.error.as_ref().map_or(0, RunError::exit_code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn output_presence_is_computed_without_losing_explicit_null() {
+        let mut result = RunResult::new(Provider::Claude);
+        for (output, present) in [
+            (None, false),
+            (Some(Value::Null), true),
+            (Some(json!({})), true),
+            (None, false),
+        ] {
+            result.structured_output = output.clone();
+            let encoded = serde_json::to_value(&result).unwrap();
+            assert_eq!(encoded["structured_output_present"], present);
+            assert_eq!(encoded["structured_output"], output.unwrap_or(Value::Null));
+        }
     }
 }

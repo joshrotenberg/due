@@ -449,38 +449,343 @@ fn unreadable_request_is_an_intake_failure() {
 }
 
 #[test]
-fn execution_flags_cannot_override_a_request_document() {
+fn partial_profile_overrides_are_validated_after_merging() {
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::with_script(provider, include_bytes!("fixtures/schema-agent.sh"));
+        let schema = json!({"type":"object","properties":{"answer":{"type":"integer"}}});
+        fs::write(fixture.root.path().join("answer.json"), schema.to_string()).unwrap();
+        let path = fixture.request(&json!({
+            "schema_version":1, "provider":"future-provider", "prompt":"   ",
+            "model":"", "effort":"future-effort", "cwd":"missing-directory",
+            "timeout":"invalid-duration", "schema":"missing-schema.json",
+            "resume":"", "ephemeral":true, "native_args":["--reserved-inherited"]
+        }));
+        let output = run(fixture.command("success").arg("--request").arg(path).args([
+            "--provider",
+            provider,
+            "--prompt",
+            "CLI prompt",
+            "--model",
+            "CLI-model",
+            "--effort",
+            "high",
+            "--cwd",
+            "project",
+            "--timeout",
+            "10s",
+            "--schema",
+            "answer.json",
+            "--resume",
+            "CLI-session",
+            "--no-ephemeral",
+            "--output",
+            "json",
+            "--",
+            "--custom-one",
+            "a b;$HOME",
+            "--custom-two=literal",
+        ]));
+        let value = result(&output, 0, "succeeded");
+        assert_eq!(value["provider"], provider);
+        assert_eq!(value["structured_output"], json!({"answer":42,"ok":true}));
+        assert_eq!(fixture.capture("stdin"), b"CLI prompt");
+        let argv = fixture.argv();
+        for expected in [
+            "CLI-model",
+            "CLI-session",
+            "--custom-one",
+            "a b;$HOME",
+            "--custom-two=literal",
+        ] {
+            assert!(
+                argv.iter().any(|arg| arg == expected),
+                "missing {expected}: {argv:?}"
+            );
+        }
+        for unexpected in [
+            "--reserved-inherited",
+            "--ephemeral",
+            "--no-session-persistence",
+        ] {
+            assert!(
+                !argv.iter().any(|arg| arg == unexpected),
+                "unexpected {unexpected}: {argv:?}"
+            );
+        }
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fixture.capture("schema-content")).unwrap(),
+            schema
+        );
+    }
+}
+
+#[test]
+fn partial_profile_inherits_values_and_can_explicitly_clear_native_args() {
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(provider);
+        let path = fixture.request(&json!({
+            "schema_version":1, "model":"profile-model", "effort":"medium",
+            "ephemeral":true, "native_args":["--custom-native", "profile value"]
+        }));
+        for clear in [false, true] {
+            let mut command = fixture.command("success");
+            command.arg("--request").arg(&path).args([
+                "--provider",
+                provider,
+                "--prompt",
+                "task",
+                "--output",
+                "json",
+                "--dry-run",
+            ]);
+            if clear {
+                command.arg("--clear-native-args");
+            }
+            let value = result(&run(&mut command), 0, "planned");
+            let args = value["invocation"]["args"].as_array().unwrap();
+            assert!(args.contains(&json!("profile-model")));
+            let ephemeral = if provider == "claude" {
+                "--no-session-persistence"
+            } else {
+                "--ephemeral"
+            };
+            assert!(args.contains(&json!(ephemeral)), "{args:?}");
+            assert_eq!(args.contains(&json!("--custom-native")), !clear);
+            assert!(!fixture.was_spawned());
+        }
+        let value = result(
+            &run(fixture
+                .command("success")
+                .arg("--request")
+                .arg(&path)
+                .args([
+                    "--provider",
+                    provider,
+                    "--prompt",
+                    "task",
+                    "--no-ephemeral",
+                    "--resume",
+                    "session",
+                    "--output",
+                    "json",
+                    "--dry-run",
+                ])),
+            0,
+            "planned",
+        );
+        let args = value["invocation"]["args"].as_array().unwrap();
+        assert!(args.contains(&json!("session")));
+        assert!(!args.contains(&json!("--ephemeral")));
+        assert!(!args.contains(&json!("--no-session-persistence")));
+    }
+}
+
+#[test]
+fn file_profile_prompt_can_be_replaced_from_stdin() {
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(provider);
+        let path = fixture
+            .request(&json!({"schema_version":1,"provider":provider,"prompt":"profile text"}));
+        let mut child = fixture
+            .command("success")
+            .arg("--request")
+            .arg(path)
+            .args(["--stdin", "--output", "json"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"actual stdin prompt\n")
+            .unwrap();
+        result(&finish(child), 0, "succeeded");
+        assert_eq!(fixture.capture("stdin"), b"actual stdin prompt\n");
+    }
+}
+
+#[test]
+fn stdin_profile_can_be_completed_with_cli_prompt_and_provider() {
+    let fixture = Fixture::new("codex");
+    let mut child = fixture
+        .command("success")
+        .args([
+            "--request",
+            "-",
+            "--provider",
+            "codex",
+            "--prompt",
+            "CLI prompt",
+            "--output",
+            "json",
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"schema_version":1,"timeout":"10s"}"#)
+        .unwrap();
+    result(&finish(child), 0, "succeeded");
+    assert_eq!(fixture.capture("stdin"), b"CLI prompt");
+}
+
+#[test]
+fn conflicting_stdin_consumers_fail_without_waiting_for_eof() {
+    let fixture = Fixture::new("codex");
+    let mut child = fixture
+        .command("success")
+        .args([
+            "--request",
+            "-",
+            "--stdin",
+            "--provider",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let writer = child.stdin.take().unwrap();
+    // Keeping the pipe open proves rejection occurs before attempting request input.
+    let value = result(&finish(child), 2, "failed");
+    drop(writer);
+    assert_eq!(value["error"]["kind"], "invalid_input");
+    assert!(value["provider"].is_null());
+    assert!(!fixture.was_spawned());
+}
+
+#[test]
+fn overrides_do_not_hide_bad_types_unknown_keys_or_duplicate_keys() {
+    let cases = [
+        r#"{"schema_version":1,"provider":null}"#,
+        r#"{"schema_version":1,"prompt":null}"#,
+        r#"{"schema_version":1,"timeout":12}"#,
+        r#"{"schema_version":1,"effort":true}"#,
+        r#"{"schema_version":1,"model":[]}"#,
+        r#"{"schema_version":1,"ephemeral":null}"#,
+        r#"{"schema_version":1,"native_args":null}"#,
+        r#"{"schema_version":1,"native_args":[42]}"#,
+        r#"{"schema_version":1,"unknown":true}"#,
+        r#"{"schema_version":1,"model":null,"model":"duplicate"}"#,
+        r#"{"schema_version":1,"provider":"codex","provider":"claude"}"#,
+        r#"{"schema_version":2}"#,
+    ];
+    for contents in cases {
+        let fixture = Fixture::new("codex");
+        let path = fixture.raw_request(contents);
+        let value = result(
+            &run(fixture.command("success").arg("--request").arg(path).args([
+                "--provider",
+                "codex",
+                "--prompt",
+                "override",
+                "--timeout",
+                "10s",
+                "--effort",
+                "high",
+                "--model",
+                "override",
+                "--no-ephemeral",
+                "--clear-native-args",
+                "--output",
+                "json",
+                "--dry-run",
+            ])),
+            2,
+            "failed",
+        );
+        assert_eq!(value["error"]["kind"], "invalid_input", "{contents}");
+        assert!(!fixture.was_spawned());
+    }
+}
+
+#[test]
+fn merged_native_collisions_fail_and_replacement_or_clear_resolves_them() {
+    for provider in ["claude", "codex"] {
+        for replacement in ["none", "replace", "clear"] {
+            let fixture = Fixture::new(provider);
+            let path = fixture.request(&json!({
+                "schema_version":1,"provider":provider,"prompt":"task", "native_args":["--model", "native-model"]
+            }));
+            let mut command = fixture.command("success");
+            command.arg("--request").arg(path).args([
+                "--model",
+                "shared-model",
+                "--output",
+                "json",
+                "--dry-run",
+            ]);
+            match replacement {
+                "replace" => {
+                    command.args(["--", "--custom=literal"]);
+                }
+                "clear" => {
+                    command.arg("--clear-native-args");
+                }
+                _ => (),
+            }
+            let output = run(&mut command);
+            if replacement == "none" {
+                let value = result(&output, 2, "failed");
+                assert_eq!(value["error"]["kind"], "invalid_input");
+            } else {
+                result(&output, 0, "planned");
+            }
+            assert!(!fixture.was_spawned());
+        }
+    }
+}
+
+#[test]
+fn contradictory_cli_overrides_keep_normal_clap_errors() {
     let fixture = Fixture::new("codex");
     let path = fixture.request(&json!({"schema_version":1,"provider":"codex","prompt":"task"}));
-    for extra in [
-        vec!["--provider", "codex"],
-        vec!["--prompt", "override"],
-        vec!["--stdin"],
-        vec!["--model", "other"],
-        vec!["--effort", "high"],
-        vec!["--cwd", "project"],
-        vec!["--timeout", "1s"],
-        vec!["--schema", "answer.json"],
-        vec!["--resume", "known-session"],
-        vec!["--ephemeral"],
-        vec!["--", "--custom-native"],
+    for args in [
+        vec!["--ephemeral", "--no-ephemeral"],
+        vec!["--clear-native-args", "--", "--custom"],
+        vec!["--prompt", "one", "--stdin"],
+        vec!["--trace-detail"],
     ] {
         let output = run(fixture
             .command("success")
             .arg("--request")
             .arg(&path)
             .args(["--output", "json"])
-            .args(&extra));
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "conflicting flags accepted: {extra:?}"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "clap errors must stay on stderr: {extra:?}"
-        );
+            .args(args));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
         assert!(!output.stderr.is_empty());
+        assert!(!fixture.was_spawned());
+    }
+}
+
+#[test]
+fn dry_run_checks_profile_paths_and_native_conflicts_before_spawn() {
+    for (field, bad_value) in [
+        ("cwd", json!("missing-project")),
+        ("schema", json!("missing-schema.json")),
+        ("native_args", json!(["--json"])),
+        ("timeout", json!("0s")),
+    ] {
+        let fixture = Fixture::new("codex");
+        let mut profile = json!({"schema_version":1,"provider":"codex","prompt":"task"});
+        profile[field] = bad_value;
+        let path = fixture.request(&profile);
+        let value = result(
+            &run(fixture.command("success").arg("--request").arg(path).args([
+                "--dry-run",
+                "--output",
+                "json",
+            ])),
+            2,
+            "failed",
+        );
+        assert_eq!(value["error"]["kind"], "invalid_input");
         assert!(!fixture.was_spawned());
     }
 }

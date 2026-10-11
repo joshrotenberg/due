@@ -1,11 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Due run request version 1",
-  "description": "One foreground Claude Code or Codex run. CLI output, tracing, binary, and dry-run controls are outside this document.",
-  "$comment": "Due additionally rejects duplicate keys, parses timeout using its duration parser and requires it to be positive, and validates native argument conflicts. This schema does not approximate the complete duration grammar or validate a provider's answer schema.",
+  "title": "Due partial run request/profile version 1",
+  "description": "Defaults for one foreground Claude Code or Codex run. Explicit CLI execution options override these fields; validate the merged invocation before execution. Output, tracing, binary, and dry-run controls stay on the CLI.",
+  "$comment": "This schema checks document shape before CLI overlay. Due also rejects duplicate keys and validates the final provider, nonempty prompt/model/resume, effort, positive duration, resume/ephemeral combination, paths and native argument conflicts after merging. An overwritten semantic value need not be valid, but bad JSON types, unknown keys and unsupported schema_version always fail. This schema does not validate provider answer-schema constraints.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "provider", "prompt"],
+  "required": [
+    "schema_version"
+  ],
   "properties": {
     "schema_version": {
       "type": "integer",
@@ -13,61 +15,66 @@
     },
     "provider": {
       "type": "string",
-      "enum": ["claude", "codex"]
+      "description": "Provider for the final merged invocation must be claude or codex. May be omitted when --provider supplies it; null is invalid."
     },
     "prompt": {
       "type": "string",
-      "minLength": 1,
-      "pattern": "\\S",
-      "description": "Literal prompt text containing a non-whitespace character; no recursive file or stdin references."
+      "description": "Literal prompt text, with no recursive file or stdin references. Final merged prompt must contain a non-whitespace character. May be omitted when --prompt or --stdin supplies it; null is invalid."
     },
     "model": {
-      "type": ["string", "null"],
-      "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Native model name or alias; omitted or null keeps the provider default."
     },
     "effort": {
-      "type": ["string", "null"],
-      "enum": ["low", "medium", "high", null]
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Final merged effort is low, medium or high. Omitted or null keeps the provider default."
     },
     "cwd": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Child working directory, resolved from the caller's cwd; omitted or null uses the caller's cwd."
     },
     "timeout": {
-      "type": ["string", "null"],
-      "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Positive duration accepted by Due, for example 30s or 5m. Runtime validation checks syntax and positivity. Omitted or null means no deadline."
     },
     "schema": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Model-answer JSON Schema filename, resolved from the caller's cwd; omitted or null requests no answer schema."
     },
     "resume": {
-      "type": ["string", "null"],
-      "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Native session or thread ID. A non-null value conflicts with ephemeral true."
     },
     "ephemeral": {
       "type": "boolean",
-      "default": false
+      "default": false,
+      "description": "Native session persistence opt-out. --ephemeral or --no-ephemeral explicitly overrides this setting. Final true conflicts with a resume ID."
     },
     "native_args": {
       "type": "array",
-      "items": {"type": "string"},
-      "default": [],
-      "description": "Ordered provider option tokens subject to Due's passthrough rules; no shell evaluation."
-    }
-  },
-  "allOf": [
-    {
-      "if": {
-        "required": ["resume"],
-        "properties": {"resume": {"type": "string"}}
+      "items": {
+        "type": "string"
       },
-      "then": {
-        "properties": {"ephemeral": {"const": false}}
-      }
+      "default": [],
+      "description": "Ordered provider option tokens. CLI options after -- replace this entire list; --clear-native-args discards it. Final merged tokens are validated without shell evaluation."
     }
-  ]
+  }
 }

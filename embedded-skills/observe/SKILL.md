@@ -44,12 +44,36 @@ Queues are bounded and shutdown drains for at most two seconds. Sink failure or
 slow consumers can lose records, including the terminal event, without changing
 the provider outcome. Do not infer success or failure from missing trace records.
 
-Traces omit prompts, schemas, argv, paths, assistant text, reasoning, tool inputs,
+Default traces omit prompts, schemas, argv, paths, assistant text, reasoning, tool inputs,
 tool results, and raw diagnostics. They retain restricted IDs/tool names and counts.
 Stderr tracing suppresses native diagnostics; detailed errors remain in the final
 JSON result and may contain provider content. With file-only tracing, ordinary
 stderr diagnostics remain enabled, except successful Codex stderr is unavailable
 through the current wrapper streaming API.
+
+For additional visibility, `--trace-detail` opts into bounded command/file/tool
+labels and user-facing assistant messages where the provider exposes them. It
+requires `--trace` or `--trace-file`. Details may include paths, arguments, or
+provider content; reasoning/thinking, prompts, and raw tool results are excluded.
+Truncated details are marked, and text rendering escapes terminal controls.
+Default traces remain metadata-only.
+
+Summarize an existing JSONL log offline:
+
+```sh
+due trace summarize run.jsonl
+due trace summarize run.jsonl --output json
+due schema trace
+due schema trace-summary
+```
+
+The summary groups multiple runs and surfaces observed outcomes, counters,
+sequence gaps, missing boundaries, and unmatched activities. Unknown event kinds
+are retained as observations. Missing terminal records leave the outcome unknown;
+never infer an execution failure from log incompleteness. The summarizer's exit
+status reports whether it read/parsed the log, not the recorded agent outcome.
+Malformed or oversized records fail; no partial summary is reported as complete.
+Retain the final result's delivery metadata too: a log cannot reveal every sink loss.
 
 Ctrl-C and `--timeout` await wrapper cleanup. On Unix, SIGINT asks the provider to
 stop its tool sessions; output drains during a two-second grace, followed by a

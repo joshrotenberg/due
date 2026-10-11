@@ -87,6 +87,11 @@ fn result(output: &Output, exit: i32, status: &str) -> Value {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["status"], status);
+    assert!(value["structured_output_present"].is_boolean());
+    assert!(
+        ["not_resolved", "not_requested", "not_performed"]
+            .contains(&value["answer_schema_validation"].as_str().unwrap())
+    );
     value
 }
 
@@ -117,6 +122,8 @@ fn shared_schema_maps_for_fresh_resumed_traced_and_buffered_runs() {
                 }
                 let value = result(&run(&mut command), 0, "succeeded");
                 assert_eq!(value["structured_output"], json!({"answer":42,"ok":true}));
+                assert_eq!(value["structured_output_present"], true);
+                assert_eq!(value["answer_schema_validation"], "not_performed");
                 assert_eq!(value["session_id"], "schema-session");
                 assert_eq!(value["usage"]["input_tokens"], 120);
                 assert_eq!(
@@ -184,6 +191,8 @@ fn a_schema_dry_run_plans_without_requiring_a_provider_result() {
         );
         assert!(value["invocation"]["args"].is_array());
         assert!(value["structured_output"].is_null());
+        assert_eq!(value["structured_output_present"], false);
+        assert_eq!(value["answer_schema_validation"], "not_performed");
         assert!(!fixture.dir.path().join("argv").exists());
     }
 }
@@ -295,5 +304,90 @@ fn requested_output_protocol_failures_preserve_metadata_and_provider_errors_win(
                 }
             }
         }
+    }
+}
+
+#[test]
+fn explicit_null_is_present_with_or_without_common_schema_in_both_transports() {
+    for provider in ["claude", "codex"] {
+        for traced in [false, true] {
+            for requested in [false, true] {
+                let fixture = Fixture::new(provider);
+                let mut command = fixture.command("success");
+                command.env("DUE_SCHEMA_PAYLOAD", "null");
+                if requested {
+                    command.arg("--schema").arg(fixture.schema("true"));
+                }
+                if traced {
+                    command.arg("--trace=json");
+                }
+                let value = result(&run(&mut command), 0, "succeeded");
+                assert!(value["structured_output"].is_null());
+                assert_eq!(
+                    value["structured_output_present"],
+                    provider == "claude" || requested
+                );
+                assert_eq!(
+                    value["answer_schema_validation"],
+                    if requested {
+                        "not_performed"
+                    } else {
+                        "not_requested"
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn missing_output_and_native_failure_remain_distinct_from_explicit_null() {
+    for provider in ["claude", "codex"] {
+        for traced in [false, true] {
+            for mode in ["missing", "failure", "failure_null"] {
+                let fixture = Fixture::new(provider);
+                let mut command = fixture.command(mode);
+                command.arg("--schema").arg(fixture.schema("true"));
+                if traced {
+                    command.arg("--trace=json");
+                }
+                let value = result(&run(&mut command), 1, "failed");
+                assert_eq!(value["structured_output_present"], mode == "failure_null");
+                assert!(value["structured_output"].is_null());
+                assert_eq!(value["answer_schema_validation"], "not_performed");
+                assert_eq!(
+                    value["error"]["kind"],
+                    if mode == "missing" {
+                        "protocol"
+                    } else {
+                        "provider"
+                    }
+                );
+                if mode != "missing" {
+                    assert_eq!(value["error"]["provider_exit_code"], 9);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn answer_schema_metadata_never_claims_independent_validation() {
+    // The provider fixture returns a number for a requested object schema.
+    // Due transports/decodes it, but intentionally has no second schema validator.
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(provider);
+        let value = result(
+            &run(fixture
+                .command("success")
+                .arg("--schema")
+                .arg(fixture.schema(r#"{"type":"object"}"#))
+                .env("DUE_SCHEMA_PAYLOAD", "42")),
+            0,
+            "succeeded",
+        );
+        assert_eq!(value["structured_output"], 42);
+        assert_eq!(value["structured_output_present"], true);
+        assert_eq!(value["answer_schema_validation"], "not_performed");
     }
 }

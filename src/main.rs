@@ -1,10 +1,12 @@
 mod cli;
+mod contracts;
 mod providers;
 mod request;
 mod result;
 mod schema;
 mod skills;
 mod telemetry;
+mod trace_summary;
 mod validate;
 
 use std::{
@@ -23,16 +25,22 @@ async fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Run(run) => run_command(*run).await,
         Command::Skills(args) => skills::execute(&args),
+        Command::Schema(args) => contracts::execute(&args),
+        Command::Trace(args) => trace_summary::execute(&args),
     }
 }
 
 async fn run_command(input: RunCommand) -> ExitCode {
     let start = Instant::now();
     let output = input.output;
+    let explicit_schema = input.schema.is_some();
     let run = match request::resolve(input) {
         Ok(run) => run,
         Err(error) => {
             let mut result = RunResult::rejected(error);
+            if explicit_schema {
+                result = result.with_schema_requested(true);
+            }
             result.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             return finish_output(output, &result, true);
         }
@@ -40,7 +48,9 @@ async fn run_command(input: RunCommand) -> ExitCode {
     let (progress, guard) = match telemetry::start(&run) {
         Ok(tracing) => tracing,
         Err(error) => {
-            let mut result = RunResult::new(run.provider).fail(error);
+            let mut result = RunResult::new(run.provider)
+                .with_schema_requested(run.schema.is_some())
+                .fail(error);
             result.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             return finish_output(run.output, &result, true);
         }
@@ -68,6 +78,7 @@ async fn run_command(input: RunCommand) -> ExitCode {
         }
         Err(error) => RunResult::new(run.provider).fail(error),
     };
+    result = result.with_schema_requested(run.schema.is_some());
     result.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     result.run_id = progress.run_id().map(str::to_owned);
     progress.finished(&result);

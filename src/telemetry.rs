@@ -54,7 +54,7 @@ pub enum ActivityStatus {
     Unknown,
 }
 
-/// The sole source of trace records. Native payloads never enter this API.
+/// The sole source of trace records. Only explicit, bounded detail labels may enter.
 #[derive(Clone, Default)]
 pub struct Progress(Option<Arc<Run>>);
 
@@ -62,6 +62,7 @@ struct Run {
     id: String,
     provider: Provider,
     start: Instant,
+    detail: bool,
     span: tracing::Span,
     state: Mutex<State>,
     dropped: Arc<AtomicU64>,
@@ -94,6 +95,11 @@ pub struct TraceGuard {
 
 pub fn start(run: &RunArgs) -> Result<(Progress, Option<TraceGuard>), RunError> {
     if run.trace.is_none() && run.trace_file.is_none() {
+        if run.trace_detail {
+            return Err(RunError::invalid(
+                "--trace-detail requires --trace or --trace-file",
+            ));
+        }
         if run.trace_interval.is_some() {
             return Err(RunError::invalid(
                 "--trace-interval requires --trace or --trace-file",
@@ -157,6 +163,7 @@ pub fn start(run: &RunArgs) -> Result<(Progress, Option<TraceGuard>), RunError> 
         id,
         provider: run.provider,
         start: now,
+        detail: run.trace_detail,
         span,
         state: Mutex::new(State {
             seq: 0,
@@ -186,6 +193,10 @@ pub fn start(run: &RunArgs) -> Result<(Progress, Option<TraceGuard>), RunError> 
 impl Progress {
     pub fn enabled(&self) -> bool {
         self.0.is_some()
+    }
+
+    pub fn detail_enabled(&self) -> bool {
+        self.0.as_ref().is_some_and(|run| run.detail)
     }
 
     pub fn run_id(&self) -> Option<&str> {
@@ -231,9 +242,16 @@ impl Progress {
         self.emit(event, true, |_, _| ());
     }
 
-    pub fn activity_started(&self, id: Option<&str>, kind: ActivityKind, tool: Option<&str>) {
+    pub fn activity_started(
+        &self,
+        id: Option<&str>,
+        kind: ActivityKind,
+        tool: Option<&str>,
+        detail: Option<&str>,
+    ) {
         self.emit("activity_started", true, |state, fields| {
             activity_fields(fields, id, kind, tool);
+            self.detail_fields(fields, detail);
             state.activities_started += 1;
             if let Some(id) = id
                 && state.active_activities.len() < 1024
@@ -251,9 +269,11 @@ impl Progress {
         kind: ActivityKind,
         status: ActivityStatus,
         tool: Option<&str>,
+        detail: Option<&str>,
     ) {
         self.emit("activity_completed", true, |state, fields| {
             activity_fields(fields, id, kind, tool);
+            self.detail_fields(fields, detail);
             fields.insert("status".into(), json!(status));
             state.activities_completed += 1;
             if status == ActivityStatus::Failed {
@@ -268,10 +288,36 @@ impl Progress {
         });
     }
 
-    pub fn assistant(&self, bytes: usize) {
+    /// Late native tool inputs can supply a label after the start event. This
+    /// is supplemental metadata, not another start or completion.
+    pub fn activity_detail(
+        &self,
+        id: Option<&str>,
+        kind: ActivityKind,
+        tool: Option<&str>,
+        detail: &str,
+    ) {
+        if self.detail_enabled() && !detail.is_empty() {
+            self.emit("activity_detail", true, |_, fields| {
+                activity_fields(fields, id, kind, tool);
+                self.detail_fields(fields, Some(detail));
+            });
+        }
+    }
+
+    fn detail_fields(&self, fields: &mut Map<String, Value>, detail: Option<&str>) {
+        if self.detail_enabled()
+            && let Some(detail) = detail.filter(|text| !text.is_empty())
+        {
+            fields.insert("detail".into(), safe_detail(detail));
+        }
+    }
+
+    pub fn assistant(&self, bytes: usize, detail: Option<&str>) {
         self.emit("message_completed", true, |state, fields| {
             state.messages += 1;
             fields.insert("message_bytes".into(), json!(bytes));
+            self.detail_fields(fields, detail);
         });
     }
 
@@ -388,6 +434,29 @@ fn activity_fields(
     }
 }
 
+/// At most 240 UTF-8 bytes, with terminal controls rendered as visible escapes.
+/// Work stops at the boundary even if the native label is very large.
+fn safe_detail(value: &str) -> Value {
+    const MAX_BYTES: usize = 240;
+    let mut text = String::new();
+    let mut truncated = false;
+    for ch in value.chars() {
+        let escaped = if ch.is_control()
+            || matches!(ch, '\u{2028}' | '\u{2029}' | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        {
+            ch.escape_unicode().to_string()
+        } else {
+            ch.to_string()
+        };
+        if text.len() + escaped.len() > MAX_BYTES {
+            truncated = true;
+            break;
+        }
+        text.push_str(&escaped);
+    }
+    json!({"text":text,"truncated":truncated})
+}
+
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -499,6 +568,9 @@ fn human_record(record: &str) -> String {
                     .unwrap_or_else(|| item.to_string())
             ));
         }
+    }
+    if let Some(detail) = value.get("detail") {
+        line.push_str(&format!(" detail={detail}"));
     }
     line.push('\n');
     line

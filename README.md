@@ -10,6 +10,7 @@ due run --provider claude -p "Explain this repository" --effort high
 due run --provider codex -p "Explain this repository" --effort high
 cat task.txt | due run --provider codex --stdin --output json
 due run --request examples/run-request.json --output json
+due run --request examples/profile.json --stdin --output json < task.txt
 
 due run --provider claude -p "Fix the tests" -- --max-turns 5
 due run --provider codex -p "Fix the tests" -- --sandbox workspace-write
@@ -37,6 +38,11 @@ due skills show run                # Scope, execution, and verifying effects
 due skills show contracts          # Structured answers and result semantics
 due skills show observe            # Progress, trace loss, and cancellation
 due skills show contracts --output json
+due schema request                # Installed input contract as JSON Schema
+due schema result                 # Installed result envelope contract
+due schema trace                  # Installed progress record contract
+due schema trace-summary          # Installed offline summary contract
+due trace summarize run.jsonl --output json
 ```
 
 `skills show` prints a complete Agent Skills `SKILL.md` by default. JSON catalog
@@ -81,10 +87,10 @@ committed for reproducible application builds.
 
 | Option | Behavior |
 | --- | --- |
-| `--request FILE\|-` | Read one versioned JSON request from a file or stdin, instead of execution flags. |
-| `--provider claude\|codex` | Required with execution flags; selects the native CLI. |
-| `-p, --prompt TEXT` | Prompt text. Without `--request`, exactly one of this and `--stdin` is required. |
-| `--stdin` | Read the entire UTF-8 prompt from stdin. Empty prompts are rejected. |
+| `--request FILE\|-` | Read a versioned JSON request or partial profile; explicit CLI values override it. |
+| `--provider claude\|codex` | Select the native CLI; required after merging request and flags. |
+| `-p, --prompt TEXT` | Prompt text, replacing any profile prompt; conflicts with `--stdin`. |
+| `--stdin` | Read the entire UTF-8 prompt, replacing any profile prompt; conflicts with `--request -`. |
 | `--model ID` | Native model name/alias. Omit to keep the provider default. |
 | `--effort low\|medium\|high` | Native effort level. Support and computation vary by provider/model. |
 | `-C, --cwd DIR` | Child working directory, resolved from the caller's cwd. |
@@ -92,16 +98,22 @@ committed for reproducible application builds.
 | `--output text\|json` | Final answer text by default, or one versioned JSON result. |
 | `--schema FILE` | Request a structured answer using a JSON Schema; preserve it as a JSON value in the result. |
 | `--resume ID` | Continue a native session/thread with the supplied prompt. |
-| `--ephemeral` | Disable native session persistence. Conflicts with `--resume`. |
-| `--dry-run` | Show executable, argv, cwd, and stdin size without launching a provider. |
+| `--ephemeral` / `--no-ephemeral` | Explicitly disable / allow native session persistence, overriding the profile. Ephemeral conflicts with resume. |
+| `--clear-native-args` | Replace profile native arguments with an empty list. Conflicts with arguments after `--`. |
+| `--dry-run` | Validate the merged request and show executable, argv, cwd, and stdin size without launching a provider. |
 | `--binary PATH` | Override the selected provider's executable. |
 | `--trace[=text\|json]` | Live progress on stderr; bare `--trace` uses readable text. |
 | `--trace-file PATH` | Create a new JSONL progress log; can be used with or without stderr tracing. |
 | `--trace-interval 5s` | Heartbeat period while tracing, after reading the prompt. Must be positive. |
+| `--trace-detail` | Opt into bounded command/file/tool labels and assistant messages when a trace sink is enabled. May contain provider content. |
 
 Prompts always travel to the child through stdin. A prompt supplied on Due's own
 command line is still visible in Due's argv; use `--stdin` when that matters.
-Dry runs omit prompt contents and work even when the provider is not installed.
+Dry runs validate input shape, the merged task, native-option conflicts, working
+directory, and answer-schema JSON. They omit prompt contents and work even when
+the provider is not installed. They do not check authentication, model support,
+native option compatibility, or provider-specific schema constraints. A dry run
+may create an explicitly requested trace file and a temporary schema snapshot.
 Provider options themselves are shown in dry-run output, including an inline
 Claude schema, so secrets in native options or schemas are not redacted.
 
@@ -120,23 +132,35 @@ Resume IDs stay provider-specific. `session_id` in Due's result is Claude's nati
 session ID or Codex's native thread ID. Ephemeral runs may report an ID that cannot
 be resumed. There is no local session database or implicit "latest" selection.
 
-## JSON requests
+## JSON requests and profiles
 
-Agent callers can supply one JSON object instead of assembling execution flags:
+A request file supplies defaults for one invocation. Explicit execution flags
+replace its values; omitted flags retain them. This supports both complete tasks
+and reusable partial profiles:
 
-```sh
-due run --request examples/run-request.json --output json
-cat examples/run-request.json | due run --request - --output json --trace
-due run --request examples/run-request.json --dry-run --output json
+```json
+{"schema_version":1,"provider":"codex","timeout":"5m","ephemeral":true}
 ```
 
-The [request schema](schemas/run-request.schema.json) describes the input shape;
-the [example](examples/run-request.json) requests a read-only repository summary.
-The required fields are `schema_version: 1`, `provider` (`claude` or `codex`),
-and a literal, non-whitespace `prompt` string. Optional execution fields are:
+```sh
+due run --request examples/profile.json --stdin --output json < task.txt
+due run --request examples/profile.json --provider claude -p "Review the diff" \
+  --timeout 2m --dry-run --output json
+due run --request task.json --no-ephemeral --resume native-session-id --output json
+cat task.json | due run --request - -p "Use this replacement prompt" --output json
+```
 
-| Field | Accepted value or default |
+Only `schema_version: 1` is required in the file. A provider and non-whitespace
+prompt must be present after merging, or use `--stdin` for the prompt.
+The [request schema](schemas/run-request.schema.json) describes the profile's
+structural shape; `due schema request` exports the installed version offline.
+The [full request](examples/run-request.json) and [profile](examples/profile.json)
+are examples. There is no profile search path, inheritance chain, or config store.
+
+| Field | Accepted final value or default |
 | --- | --- |
+| `provider` | `claude` or `codex`; may be omitted but cannot be null. |
+| `prompt` | Non-whitespace literal string; may be omitted but cannot be null. |
 | `model` | Nonempty native model string; omitted or null keeps the provider default. |
 | `effort` | `low`, `medium`, `high`, or null. |
 | `cwd` | Working directory string or null; defaults to the caller's directory. |
@@ -144,30 +168,55 @@ and a literal, non-whitespace `prompt` string. Optional execution fields are:
 | `schema` | Answer-schema filename string or null. |
 | `resume` | Nonempty native session ID string or null. |
 | `ephemeral` | Boolean, default false; true conflicts with a non-null `resume`. |
-| `native_args` | Ordered array of strings, default empty, using the same passthrough rules. |
+| `native_args` | Ordered array of strings, default empty. |
 
-Unknown or duplicate keys, unsupported versions, and wrong types are rejected.
-`ephemeral` and `native_args` cannot be null. All fields are top-level; there are
-no nested option groups or recursive prompt/request inputs. `--request -` consumes
-the whole stdin stream as JSON; the prompt comes from that document's `prompt`.
+Unknown or duplicate keys, unsupported versions, malformed JSON, and wrong JSON
+types fail before merging, even if a flag would replace the field. Semantic
+checks apply after merging: for example, `--timeout 2m` can replace a profile's
+invalid duration string. The request schema therefore documents structure;
+`--dry-run` also validates the resolved task. Duration parsing is not approximated
+with a schema regex.
+
+`--ephemeral` and `--no-ephemeral` explicitly override the profile's boolean.
+Native arguments after `--` replace the **entire** `native_args` list; they do not
+append. `--clear-native-args` provides an empty replacement. A bare `--` inherits
+the list. Switching providers keeps other inherited values, which must remain
+valid for the selected provider; Due does not silently discard options.
+
+`--prompt` or `--stdin` replaces the profile prompt. `--request -` reads all stdin
+as JSON, so it cannot be combined with `--stdin`; use a file or `--prompt` instead.
 Request `cwd` and `schema` paths resolve from the caller's directory, not the
-request file's directory. Paths inside `native_args` follow the native CLI's rules.
-`schema` names the model-answer schema; it is distinct from the request schema.
+request file's directory. Native argument paths follow the native CLI's rules.
+`schema` names the model-answer schema, distinct from Due's request schema.
 
-Do not mix `--request` with provider, prompt, stdin, model, effort, cwd, timeout,
-schema, resume, ephemeral, or trailing native-argument flags. Only `--output`,
-`--dry-run`, `--binary`, `--trace`, `--trace-file`, and `--trace-interval` accompany
-a request; they are local CLI controls and are not request fields. Output still
-defaults to text. The machine schema documents structural constraints; Due also
-checks duplicate keys, parses durations, and requires a positive timeout at intake.
-The schema intentionally does not approximate the full duration grammar with a regex.
+`--output`, `--dry-run`, `--binary`, and tracing flags are local CLI controls,
+not request fields. Output still defaults to text. Request intake errors in JSON
+mode use the result envelope with `provider: null`, `error.kind: invalid_input`,
+and exit 2. After resolution, runtime errors identify the selected provider.
+Clap syntax errors use stderr and exit 2. Intake precedes tracing, so intake
+failures may print a plain diagnostic even with `--trace=json` and create no log.
 
-Request intake errors with `--output json` use the existing result envelope with
-`provider: null`, `error.kind: invalid_input`, and exit 2. After resolution, runtime
-errors identify the selected provider. Clap syntax errors use stderr and exit 2.
-Request intake precedes tracing: a failure may print a plain stderr diagnostic
-even with `--trace=json`, and no trace file is created.
-A request describes one run; it does not collect or verify side effects.
+## A calling-agent workflow
+
+Save a bounded assignment as `task.txt`, choose a fresh trace path, then validate
+and execute the same merged input:
+
+```sh
+due run --request examples/profile.json --stdin --dry-run --output json \
+  < task.txt > plan.json
+due run --request examples/profile.json --stdin --output json \
+  --trace --trace-file run.jsonl < task.txt > result.json
+run_status=$?
+due trace summarize run.jsonl --output json > trace-summary.json
+# Retain run_status alongside result.json; the summarizer has its own exit status.
+```
+
+Inspect the run exit/status first. If the task requests structured data, check
+`structured_output_present` and independently validate `structured_output` against
+the answer schema. Then inspect the actual diff/artifacts and run the relevant
+checks. The trace explains observed activity; neither it nor a successful answer
+proves the changes are correct. A reviewer is a separate explicit Due invocation
+with its own prompt, result, and trace. The caller owns any follow-up or repair.
 
 ## Structured answers
 
@@ -200,7 +249,16 @@ not implement an additional schema validator, convert between provider subsets,
 or repair/retry responses. Missing Claude structured data or invalid Codex final
 JSON after an otherwise successful schema run is a `protocol` error. Existing
 provider, timeout, or cancellation failures retain their category and any
-available response data. Trace logs contain neither schemas nor responses.
+available response data. Default trace logs contain neither schemas nor responses.
+
+`structured_output_present` distinguishes an absent answer (`false`) from an
+explicit JSON null (`true` with `structured_output: null`).
+`answer_schema_validation` is `not_requested` without the common `--schema`, or
+`not_performed` with it, including dry runs and resolved failures. Intake failures use `not_resolved` when
+Due cannot determine schema intent; an explicit CLI `--schema` still yields
+`not_performed`. It describes independent
+validation by Due, not the provider's enforcement or a review verdict. If answer
+validity is a gate, the caller must run its own schema validator.
 
 ## Live progress
 
@@ -237,8 +295,8 @@ stdout delivery; a later stdout write failure can independently make Due exit 1.
 The same records go to both sinks when file and JSON stderr tracing are enabled.
 The final JSON result includes the matching `run_id` and a `trace` summary.
 
-Trace records exclude prompt text, argv, paths, model-generated text, reasoning,
-tool arguments/results, and raw diagnostics. IDs and tool names are retained
+Default trace records exclude prompt text, argv, paths, model-generated text,
+reasoning, tool arguments/results, and raw diagnostics. IDs and tool names are retained
 with length/character restrictions. Due uses an explicit `tracing` target
 allowlist; `RUST_LOG=trace` does not enable dependency payload logging. With
 stderr tracing enabled, native diagnostics are suppressed to keep that channel
@@ -254,6 +312,31 @@ Shutdown allows up to two seconds to drain the queue. The final JSON's
 and `trace.dropped_records` counts queue drops. Sequence gaps also reveal loss.
 An unresponsive sink may miss the terminal event; tracing never changes the
 provider's exit status.
+
+Use `--trace-detail` with `--trace` or `--trace-file` to include supported command,
+file/tool labels and user-facing assistant messages. Details are bounded and
+marked when truncated; text output escapes terminal controls. They may contain
+paths, command arguments, or other provider content, so enable them deliberately.
+Reasoning/thinking, prompts, and raw tool results are never detail sources.
+
+Inspect a saved trace without starting a provider:
+
+```sh
+due trace summarize run.jsonl
+due trace summarize run.jsonl --output json
+```
+
+The summary groups records by run, reports observed execution outcomes and
+activities, and surfaces sequence gaps or missing boundaries. It tolerates
+unknown event kinds for forward compatibility. A missing terminal event leaves
+the execution outcome unknown; it does not turn an incomplete log into a failed
+agent run. The summary command's exit status describes reading and parsing the
+log, not whether the recorded agent succeeded. Malformed or oversized records
+fail instead of silently disappearing. Memory is bounded: at most 1 MiB per line,
+128 runs, 256 event types per run, and 4,096 unmatched activity IDs per run; split
+larger logs before summarizing. `due schema trace-summary` exports the summary
+and error contract. A summary cannot detect every sink loss;
+retain the final result's trace-delivery metadata too.
 
 Tracing is opt-in and uses the wrappers' live event APIs. Final stdout remains a
 single answer or result document. With only `--trace-file`, normal stderr
@@ -279,7 +362,7 @@ due run --provider codex -p "Review this" -- -c 'model_reasoning_effort="xhigh"'
 Due reserves prompt transport, output format/final-message destination, cwd,
 session selection, persistence, help, and version controls. Use shared options for
 those operations. Native model/effort options conflict only when their shared
-equivalent was explicitly supplied. The same rule applies to common `--schema`
+equivalent is present in the merged task. The same rule applies to common `--schema`
 versus Claude `--json-schema` or Codex `--output-schema`. Checks cover aliases, attached short values,
 `--flag=value`, and Codex `-c`/`--config` overrides, including quoted TOML keys.
 
@@ -320,6 +403,8 @@ argument syntax errors go to stderr with exit code 2.
   "status": "succeeded",
   "text": "The final answer",
   "structured_output": null,
+  "structured_output_present": false,
+  "answer_schema_validation": "not_requested",
   "session_id": "native-thread-id",
   "usage": null,
   "cost_usd": null,
@@ -327,6 +412,10 @@ argument syntax errors go to stderr with exit code 2.
   "error": null
 }
 ```
+
+`due schema result` exports the result JSON Schema; `due schema trace` exports
+the JSONL record schema. All exports are embedded, offline, and match the installed
+CLI version. `schema_version` versions each data contract.
 
 `status` is `succeeded`, `failed`, `timed_out`, `cancelled`, or `planned`. Dry runs
 add `invocation` with `binary`, `cwd`, `args`, and `stdin_bytes`. Errors contain

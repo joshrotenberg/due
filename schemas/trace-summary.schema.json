@@ -1,0 +1,303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Due offline trace summary",
+  "description": "Observed records only; null status means absent or conflicting terminal records. Forward sequence gaps are observed gaps, not unique lost-record counts. Details are never echoed.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "runs": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": "string"
+              },
+              "provider": {
+                "enum": [
+                  "claude",
+                  "codex"
+                ]
+              },
+              "session_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_id_changes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "pid": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "pgid": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "records": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "event_counts": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "status": {
+                "enum": [
+                  null,
+                  "planned",
+                  "succeeded",
+                  "failed",
+                  "cancelled",
+                  "timed_out"
+                ]
+              },
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "terminal_records": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "terminal_conflict": {
+                "type": "boolean"
+              },
+              "run_started_observed": {
+                "type": "boolean"
+              },
+              "delivery": {
+                "type": "object",
+                "properties": {
+                  "sequence_gap_records": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "non_increasing_sequences": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "reported_dropped_records": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "sequence_gap_records",
+                  "non_increasing_sequences",
+                  "reported_dropped_records"
+                ],
+                "additionalProperties": false
+              },
+              "activities": {
+                "type": "object",
+                "properties": {
+                  "started": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "completed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "failed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unmatched_starts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "uniqueItems": true
+                  },
+                  "completions_without_observed_start": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "starts_without_id": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "completions_without_id": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "duplicate_starts": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "completion_status_counts": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "by_kind": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "object",
+                      "properties": {
+                        "started": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "completed": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "completion_status_counts": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        }
+                      },
+                      "required": [
+                        "started",
+                        "completed",
+                        "completion_status_counts"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "started",
+                  "completed",
+                  "failed",
+                  "unmatched_starts",
+                  "completions_without_observed_start",
+                  "starts_without_id",
+                  "completions_without_id",
+                  "duplicate_starts",
+                  "completion_status_counts",
+                  "by_kind"
+                ],
+                "additionalProperties": false
+              },
+              "messages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reported_counts": {
+                "type": "object",
+                "properties": {
+                  "activities_started": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "activities_completed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "activities_failed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "messages": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "activities_started",
+                  "activities_completed",
+                  "activities_failed",
+                  "messages"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "run_id",
+              "provider",
+              "session_id",
+              "session_id_changes",
+              "pid",
+              "pgid",
+              "records",
+              "event_counts",
+              "elapsed_ms",
+              "status",
+              "exit_code",
+              "terminal_records",
+              "terminal_conflict",
+              "run_started_observed",
+              "delivery",
+              "activities",
+              "messages",
+              "reported_counts"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "records",
+        "runs"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "io",
+                "invalid_input"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "error"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

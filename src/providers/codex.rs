@@ -206,7 +206,7 @@ impl StreamState {
             "item.started" | "item.updated" | "item.completed" => {
                 emit_activity(&event, progress);
                 if let Some(text) = event.agent_message_text() {
-                    progress.assistant(text.len());
+                    progress.assistant(text.len(), assistant_detail(&event));
                     self.last_assistant = text;
                 }
             }
@@ -266,6 +266,24 @@ impl StreamState {
     }
 }
 
+// Detail must use explicit user-facing text fields, independently of the
+// wrapper's permissive final-message compatibility fallback.
+fn assistant_detail(event: &JsonLineEvent) -> Option<&str> {
+    if event.item_type() != Some("agent_message") {
+        return None;
+    }
+    let item = event.extra.get("item")?;
+    item.get("text")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            item.get("content")?.as_array()?.iter().find_map(|block| {
+                (block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+                    .then(|| block.get("text").and_then(serde_json::Value::as_str))
+                    .flatten()
+            })
+        })
+}
+
 fn activity_kind(item_type: &str) -> Option<ActivityKind> {
     Some(match item_type {
         // These are assistant content, not tools or observable actions.
@@ -314,10 +332,22 @@ fn emit_activity(event: &JsonLineEvent, progress: &Progress) {
         "mcp_tool_call" => Some("mcp_tool_call"),
         _ => None,
     };
-    if event.event_type == "item.started" {
-        progress.activity_started(id, kind, tool);
+    let detail = if progress.detail_enabled() {
+        match item_type {
+            "command_execution" => item.get("command").and_then(serde_json::Value::as_str),
+            "file_change" => item
+                .pointer("/changes/0/path")
+                .and_then(serde_json::Value::as_str),
+            "mcp_tool_call" => item.get("tool").and_then(serde_json::Value::as_str),
+            _ => None,
+        }
     } else {
-        progress.activity_completed(id, kind, activity_status(item), tool);
+        None
+    };
+    if event.event_type == "item.started" {
+        progress.activity_started(id, kind, tool, detail);
+    } else {
+        progress.activity_completed(id, kind, activity_status(item), tool, detail);
     }
 }
 
