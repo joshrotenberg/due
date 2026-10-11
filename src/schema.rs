@@ -67,7 +67,7 @@ pub fn normalize(mut result: RunResult) -> RunResult {
     if result.invocation.is_some() {
         return result;
     }
-    if result.provider == Provider::Codex {
+    if result.provider == Some(Provider::Codex) {
         match serde_json::from_str::<Value>(&result.text) {
             Ok(value) => result.structured_output = Some(value),
             Err(error) if result.error.is_none() => {

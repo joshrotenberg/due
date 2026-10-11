@@ -5,6 +5,29 @@ description: Request structured answers with Due and interpret its result envelo
 
 # Use the result contract
 
+`due run --request FILE` accepts one JSON object; `--request -` reads the whole
+document from stdin. Require `schema_version: 1`, `provider: "claude"` or `"codex"`,
+and a literal non-whitespace `prompt`. Optional fields are `model`, `effort`,
+`cwd`, `timeout`, `schema`, `resume`, `ephemeral`, and `native_args`.
+
+```sh
+due run --request - --output json <<'JSON'
+{"schema_version":1,"provider":"claude","prompt":"Summarize this repository without changing files.","timeout":"2m"}
+JSON
+```
+
+Unknown/duplicate keys, unsupported versions, and bad types are invalid input.
+Nullable optional fields mean omitted; model/resume strings must be nonempty.
+Effort is low/medium/high; timeout is a positive duration string, such as `5m`.
+`ephemeral` is a boolean defaulting false; `native_args` is a string array defaulting
+empty. Neither accepts null. Non-null resume conflicts with ephemeral true.
+Request `cwd` and `schema` paths use the caller's cwd. Inputs do not recursively load
+more prompts/requests; native argument paths follow the provider's rules.
+Do not mix request input with execution flags; only `--output`, `--dry-run`,
+`--binary`, `--trace`, `--trace-file`, and `--trace-interval` accompany it.
+The request schema documents structure; Due also checks duplicates and parses
+positive durations. This input is one foreground run, not a scheduling API.
+
 `--output json` selects Due's final result envelope; it does not require the model
 to answer in JSON. `--schema FILE` additionally asks the selected provider for an
 answer matching its supported JSON Schema constraints. Use both for agent callers.
@@ -53,6 +76,10 @@ Exit codes are 0 for success/planning, 1 for execution failures, 2 for invalid
 input, 124 for timeout, 127 for a missing executable, and 130 for cancellation.
 After argument parsing, JSON mode emits one result even on runtime failure;
 CLI syntax errors instead follow normal stderr/exit-2 behavior.
+Request intake errors use `provider: null`, `invalid_input`, and exit 2. Runtime
+errors after resolution identify the selected provider in the same envelope.
+Intake precedes tracing: errors may print plain stderr even with `--trace=json`,
+and no trace file is created when intake fails.
 Dry runs have `status: planned` and an `invocation`, with no provider execution.
 
 A valid schema or successful execution does not verify artifacts or side effects.

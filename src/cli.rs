@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -17,7 +17,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run one noninteractive turn, optionally continuing an existing session.
-    Run(Box<RunArgs>),
+    Run(Box<RunCommand>),
     /// Discover and read agent skills embedded in this binary; no provider is started.
     Skills(SkillsArgs),
 }
@@ -47,7 +47,7 @@ pub enum SkillsCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Claude,
@@ -76,7 +76,8 @@ pub enum TraceFormat {
     Json,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,
     Medium,
@@ -95,16 +96,24 @@ impl Effort {
 
 #[derive(Debug, Args)]
 #[command(
-    group(ArgGroup::new("prompt_source").required(true).args(["prompt", "stdin"])),
-    after_help = "Examples:\n  due run --provider claude -p 'Explain this repository'\n  due run --provider codex --stdin --output json --trace\n  due run --provider codex -p 'Summarize' --schema answer.schema.json --output json\n  due run --provider claude -p 'Fix tests' -- --max-turns 5\n\nStdout carries the final answer/result; stderr carries diagnostics or progress.\n`--output json` wraps the result; `--schema` requests structured model data.\nProvider settings and permissions apply. Native options follow `--`.\nFor agent workflows, read `due skills show run`, `contracts`, or `observe`."
+    group(ArgGroup::new("prompt_source").args(["prompt", "stdin"])),
+    group(ArgGroup::new("execution_flags").multiple(true).args([
+        "provider", "prompt", "stdin", "model", "effort", "cwd", "timeout", "schema",
+        "resume", "ephemeral", "native_args"
+    ])),
+    after_help = "Examples:\n  due run --provider claude -p 'Explain this repository'\n  due run --provider codex --stdin --output json --trace\n  due run --provider codex -p 'Summarize' --schema answer.schema.json --output json\n  due run --provider claude -p 'Fix tests' -- --max-turns 5\n  due run --request task.json --output json\n  due run --request - --output json --trace\n\nStdout carries the final answer/result; stderr carries diagnostics or progress.\n`--output json` wraps the result; `--schema` requests structured model data.\n`--request` replaces execution flags; output, trace, binary, and dry-run stay CLI controls.\nProvider settings and permissions apply. Native options follow `--`.\nFor agent workflows, read `due skills show run`, `contracts`, or `observe`."
 )]
-pub struct RunArgs {
+pub struct RunCommand {
+    /// Read one versioned JSON request from a file, or - for stdin.
+    #[arg(long, value_name = "FILE|-", conflicts_with = "execution_flags")]
+    pub request: Option<PathBuf>,
+
     /// Provider CLI to invoke; its existing authentication and settings apply.
-    #[arg(long, value_enum)]
-    pub provider: Provider,
+    #[arg(long, value_enum, required_unless_present = "request")]
+    pub provider: Option<Provider>,
 
     /// Prompt text (always sent to the provider through stdin).
-    #[arg(short = 'p', long, value_name = "TEXT", allow_hyphen_values = true)]
+    #[arg(short = 'p', long, value_name = "TEXT", allow_hyphen_values = true, required_unless_present_any = ["request", "stdin"])]
     pub prompt: Option<String>,
 
     /// Read the complete prompt from stdin.
@@ -168,7 +177,28 @@ pub struct RunArgs {
     pub native_args: Vec<String>,
 }
 
-fn parse_timeout(value: &str) -> Result<Duration, String> {
+/// Fully resolved execution options, shared by both input forms.
+#[derive(Debug)]
+pub struct RunArgs {
+    pub provider: Provider,
+    pub prompt: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub cwd: Option<PathBuf>,
+    pub timeout: Option<Duration>,
+    pub output: Output,
+    pub schema: Option<PathBuf>,
+    pub resume: Option<String>,
+    pub ephemeral: bool,
+    pub dry_run: bool,
+    pub binary: Option<PathBuf>,
+    pub trace: Option<TraceFormat>,
+    pub trace_file: Option<PathBuf>,
+    pub trace_interval: Option<Duration>,
+    pub native_args: Vec<String>,
+}
+
+pub(crate) fn parse_timeout(value: &str) -> Result<Duration, String> {
     let duration = humantime::parse_duration(value).map_err(|e| e.to_string())?;
     if duration.is_zero() {
         return Err("duration must be greater than zero".into());

@@ -499,6 +499,7 @@ mod tests {
             else {
                 panic!("expected run command");
             };
+            let run = crate::request::resolve(*run).unwrap();
             let command = Turn::new(&run, "prompt", "/tmp/final-message", Some("/tmp/schema"));
             let argv = command.args();
             let schema = argv

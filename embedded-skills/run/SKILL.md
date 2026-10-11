@@ -6,6 +6,7 @@ description: Run one bounded Claude Code or Codex task through Due and independe
 # Run a task
 
 Due wraps one noninteractive `claude -p` or `codex exec` invocation.
+It is one foreground CLI run; the caller and OS own concurrency and scheduling.
 Use the provider the user selected, with its installed CLI, authentication,
 settings, and native permissions. Due does not grant additional authorization
 or make the providers' permission policies equivalent.
@@ -27,8 +28,17 @@ PROMPT
 Replace the example scope with the actual assignment. `--provider claude` uses
 the same shared options. Omit `--model` and `--effort` to retain native defaults;
 model names and supported effort levels remain provider-specific.
-Exactly one of `--stdin` and `--prompt TEXT` is required. Both reach the child
+With execution flags, exactly one of `--stdin` and `--prompt TEXT` is required. Both reach the child
 through stdin, but `--prompt` exposes the prompt in Due's own argv.
+
+Alternatively, use `due run --request request.json --output json`, or
+`due run --request - --output json` with the whole JSON document on stdin.
+Require top-level `schema_version: 1`, `provider`, and a literal `prompt` string.
+Optional fields are `model`, `effort`, `cwd`, `timeout`, `schema`, `resume`,
+`ephemeral`, and `native_args`. Load `due skills show contracts` for input rules.
+Request `cwd` and `schema` paths use the caller's directory, not the request directory.
+Do not combine request input with execution flags or native arguments after `--`.
+Only output, dry-run, binary, and tracing controls remain CLI options with a request.
 
 Add `--trace` for readable progress, or load `due skills show observe` for JSONL
 monitoring. Load `due skills show contracts` when the caller needs structured

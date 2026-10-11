@@ -1,5 +1,6 @@
 mod cli;
 mod providers;
+mod request;
 mod result;
 mod schema;
 mod skills;
@@ -14,7 +15,7 @@ use std::{
 
 use clap::Parser;
 
-use cli::{Cli, Command, Output, RunArgs};
+use cli::{Cli, Command, Output, RunArgs, RunCommand};
 use result::{RunError, RunResult};
 
 #[tokio::main]
@@ -25,14 +26,23 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run_command(run: RunArgs) -> ExitCode {
+async fn run_command(input: RunCommand) -> ExitCode {
     let start = Instant::now();
+    let output = input.output;
+    let run = match request::resolve(input) {
+        Ok(run) => run,
+        Err(error) => {
+            let mut result = RunResult::rejected(error);
+            result.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            return finish_output(output, &result, true);
+        }
+    };
     let (progress, guard) = match telemetry::start(&run) {
         Ok(tracing) => tracing,
         Err(error) => {
-            let result = RunResult::new(run.provider).fail(error);
-            let _ = render(&run, &result, false);
-            return ExitCode::from(result.exit_code());
+            let mut result = RunResult::new(run.provider).fail(error);
+            result.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            return finish_output(run.output, &result, true);
         }
     };
     progress.started(&run);
@@ -64,14 +74,21 @@ async fn run_command(run: RunArgs) -> ExitCode {
     if let Some(guard) = guard {
         result.trace = Some(guard.finish());
     }
-    let exit_code = result.exit_code();
-    if let Err(error) = render(&run, &result, progress.enabled()) {
-        if error.kind() != io::ErrorKind::BrokenPipe && run.trace.is_none() {
+    finish_output(
+        run.output,
+        &result,
+        run.trace.is_none() || !progress.enabled(),
+    )
+}
+
+fn finish_output(output: Output, result: &RunResult, diagnostics: bool) -> ExitCode {
+    if let Err(error) = render(output, result, diagnostics) {
+        if error.kind() != io::ErrorKind::BrokenPipe && diagnostics {
             eprintln!("due: failed to write output: {error}");
         }
         return ExitCode::from(1);
     }
-    ExitCode::from(exit_code)
+    ExitCode::from(result.exit_code())
 }
 
 fn prepare_prompt(run: &RunArgs) -> Result<String, RunError> {
@@ -87,10 +104,10 @@ fn prepare_prompt(run: &RunArgs) -> Result<String, RunError> {
     Ok(prompt)
 }
 
-fn render(run: &RunArgs, result: &RunResult, trace_active: bool) -> io::Result<()> {
+fn render(output: Output, result: &RunResult, diagnostics: bool) -> io::Result<()> {
     // Native diagnostics can contain prompt or tool content. Stderr tracing
     // deliberately emits only safe progress; JSON stdout retains error details.
-    if run.trace.is_none() || !trace_active {
+    if diagnostics {
         let mut stderr = io::stderr().lock();
         if !result.diagnostics.is_empty() {
             write!(stderr, "{}", result.diagnostics)?;
@@ -105,7 +122,7 @@ fn render(run: &RunArgs, result: &RunResult, trace_active: bool) -> io::Result<(
         }
     }
     let mut stdout = io::stdout().lock();
-    match run.output {
+    match output {
         Output::Json => {
             serde_json::to_writer(&mut stdout, result)?;
             writeln!(stdout)?;

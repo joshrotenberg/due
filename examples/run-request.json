@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "provider": "claude",
+  "prompt": "Summarize this repository without changing files or external systems. Report the main components and the paths you inspected; stop after the summary.",
+  "cwd": ".",
+  "timeout": "2m",
+  "ephemeral": false,
+  "native_args": []
+}

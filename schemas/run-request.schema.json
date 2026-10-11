@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Due run request version 1",
+  "description": "One foreground Claude Code or Codex run. CLI output, tracing, binary, and dry-run controls are outside this document.",
+  "$comment": "Due additionally rejects duplicate keys, parses timeout using its duration parser and requires it to be positive, and validates native argument conflicts. This schema does not approximate the complete duration grammar or validate a provider's answer schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "provider", "prompt"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "provider": {
+      "type": "string",
+      "enum": ["claude", "codex"]
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "Literal prompt text containing a non-whitespace character; no recursive file or stdin references."
+    },
+    "model": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Native model name or alias; omitted or null keeps the provider default."
+    },
+    "effort": {
+      "type": ["string", "null"],
+      "enum": ["low", "medium", "high", null]
+    },
+    "cwd": {
+      "type": ["string", "null"],
+      "description": "Child working directory, resolved from the caller's cwd; omitted or null uses the caller's cwd."
+    },
+    "timeout": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Positive duration accepted by Due, for example 30s or 5m. Runtime validation checks syntax and positivity. Omitted or null means no deadline."
+    },
+    "schema": {
+      "type": ["string", "null"],
+      "description": "Model-answer JSON Schema filename, resolved from the caller's cwd; omitted or null requests no answer schema."
+    },
+    "resume": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Native session or thread ID. A non-null value conflicts with ephemeral true."
+    },
+    "ephemeral": {
+      "type": "boolean",
+      "default": false
+    },
+    "native_args": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "Ordered provider option tokens subject to Due's passthrough rules; no shell evaluation."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["resume"],
+        "properties": {"resume": {"type": "string"}}
+      },
+      "then": {
+        "properties": {"ephemeral": {"const": false}}
+      }
+    }
+  ]
+}

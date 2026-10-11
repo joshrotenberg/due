@@ -2,11 +2,14 @@
 
 One command-line interface for Claude Code and Codex. Run a single turn with a
 common set of options, then pass provider-specific options after `--`.
+Each CLI invocation owns one foreground provider run; the caller and operating
+system own concurrency, scheduling, and any later retry.
 
 ```sh
 due run --provider claude -p "Explain this repository" --effort high
 due run --provider codex -p "Explain this repository" --effort high
 cat task.txt | due run --provider codex --stdin --output json
+due run --request examples/run-request.json --output json
 
 due run --provider claude -p "Fix the tests" -- --max-turns 5
 due run --provider codex -p "Fix the tests" -- --sandbox workspace-write
@@ -74,8 +77,9 @@ are published; keep `Cargo.lock` committed for reproducible application builds.
 
 | Option | Behavior |
 | --- | --- |
-| `--provider claude\|codex` | Required; selects the native CLI. |
-| `-p, --prompt TEXT` | Prompt text. Exactly one of this and `--stdin` is required. |
+| `--request FILE\|-` | Read one versioned JSON request from a file or stdin, instead of execution flags. |
+| `--provider claude\|codex` | Required with execution flags; selects the native CLI. |
+| `-p, --prompt TEXT` | Prompt text. Without `--request`, exactly one of this and `--stdin` is required. |
 | `--stdin` | Read the entire UTF-8 prompt from stdin. Empty prompts are rejected. |
 | `--model ID` | Native model name/alias. Omit to keep the provider default. |
 | `--effort low\|medium\|high` | Native effort level. Support and computation vary by provider/model. |
@@ -107,6 +111,55 @@ capabilities apply. Due performs no automatic retries.
 Resume IDs stay provider-specific. `session_id` in Due's result is Claude's native
 session ID or Codex's native thread ID. Ephemeral runs may report an ID that cannot
 be resumed. There is no local session database or implicit "latest" selection.
+
+## JSON requests
+
+Agent callers can supply one JSON object instead of assembling execution flags:
+
+```sh
+due run --request examples/run-request.json --output json
+cat examples/run-request.json | due run --request - --output json --trace
+due run --request examples/run-request.json --dry-run --output json
+```
+
+The [request schema](schemas/run-request.schema.json) describes the input shape;
+the [example](examples/run-request.json) requests a read-only repository summary.
+The required fields are `schema_version: 1`, `provider` (`claude` or `codex`),
+and a literal, non-whitespace `prompt` string. Optional execution fields are:
+
+| Field | Accepted value or default |
+| --- | --- |
+| `model` | Nonempty native model string; omitted or null keeps the provider default. |
+| `effort` | `low`, `medium`, `high`, or null. |
+| `cwd` | Working directory string or null; defaults to the caller's directory. |
+| `timeout` | Positive duration string such as `30s` or `5m`, or null for no deadline. |
+| `schema` | Answer-schema filename string or null. |
+| `resume` | Nonempty native session ID string or null. |
+| `ephemeral` | Boolean, default false; true conflicts with a non-null `resume`. |
+| `native_args` | Ordered array of strings, default empty, using the same passthrough rules. |
+
+Unknown or duplicate keys, unsupported versions, and wrong types are rejected.
+`ephemeral` and `native_args` cannot be null. All fields are top-level; there are
+no nested option groups or recursive prompt/request inputs. `--request -` consumes
+the whole stdin stream as JSON; the prompt comes from that document's `prompt`.
+Request `cwd` and `schema` paths resolve from the caller's directory, not the
+request file's directory. Paths inside `native_args` follow the native CLI's rules.
+`schema` names the model-answer schema; it is distinct from the request schema.
+
+Do not mix `--request` with provider, prompt, stdin, model, effort, cwd, timeout,
+schema, resume, ephemeral, or trailing native-argument flags. Only `--output`,
+`--dry-run`, `--binary`, `--trace`, `--trace-file`, and `--trace-interval` accompany
+a request; they are local CLI controls and are not request fields. Output still
+defaults to text. The machine schema documents structural constraints; Due also
+checks duplicate keys, parses durations, and requires a positive timeout at intake.
+The schema intentionally does not approximate the full duration grammar with a regex.
+
+Request intake errors with `--output json` use the existing result envelope with
+`provider: null`, `error.kind: invalid_input`, and exit 2. After resolution, runtime
+errors identify the selected provider. Clap syntax errors use stderr and exit 2.
+Request intake precedes tracing: a failure may print a plain stderr diagnostic
+even with `--trace=json`, and no trace file is created.
+A request describes one run; it does not collect or verify side effects.
 
 ## Structured answers
 
@@ -271,7 +324,8 @@ argument syntax errors go to stderr with exit code 2.
 add `invocation` with `binary`, `cwd`, `args`, and `stdin_bytes`. Errors contain
 `kind`, `message`, and nullable `provider_exit_code`. Runtime failures retain
 available session, cost, and partial-text data; availability depends on what the
-provider and wrapper returned.
+provider and wrapper returned. Request intake failures have `provider: null`;
+results after provider resolution identify `claude` or `codex`.
 
 Error kinds are `invalid_input`, `authentication`, `max_turns`, `max_budget`,
 `configuration`, `session_not_found`, `unsupported`, `provider`, `protocol`, `io`,
@@ -322,6 +376,7 @@ Shared features translate provider differences or improve execution reliability;
 agent lifetimes, queues, automatic retries, context catalogs, configuration
 hierarchies, and repository management belong to the caller.
 
-The plugin and embedded skills use the same single-run operation; they add
-guidance without an MCP server or a retained agent runtime. JSON request input
-and independently observed effect receipts remain future increments.
+The CLI, plugin, and embedded skills use the same foreground operation; they add
+no MCP server, queue, scheduler, or retained agent runtime. Request input describes
+one execution. Artifacts and external effects still need the caller's independent
+verification; Due does not collect verified effect receipts.

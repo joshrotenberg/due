@@ -21,7 +21,8 @@ pub struct RunResult {
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<TraceSummary>,
-    pub provider: Provider,
+    /// Null only when a JSON request was rejected before resolving an invocation.
+    pub provider: Option<Provider>,
     pub status: Status,
     pub text: String,
     /// Native structured data, or a decoded final answer requested with --schema.
@@ -127,6 +128,14 @@ impl RunError {
 
 impl RunResult {
     pub fn new(provider: Provider) -> Self {
+        Self::empty(Some(provider))
+    }
+
+    pub fn rejected(error: RunError) -> Self {
+        Self::empty(None).fail(error)
+    }
+
+    fn empty(provider: Option<Provider>) -> Self {
         Self {
             schema_version: 1,
             run_id: None,
