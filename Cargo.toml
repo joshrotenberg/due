@@ -1,0 +1,23 @@
+[package]
+name = "due"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "One command-line interface for Claude Code and Codex"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "2237110acc22cf66247391b1714986f3eddfce4c", default-features = false, features = ["async", "json"] }
+codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "2356b3d74df6de57de60197588b310a57f25b7fe" }
+clap = { version = "4.5", features = ["derive"] }
+humantime = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+which = "8"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
