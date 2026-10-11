@@ -119,7 +119,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 [[package]]
 name = "claude-wrapper"
 version = "0.14.5"
-source = "git+https://github.com/joshrotenberg/claude-wrapper?rev=2237110acc22cf66247391b1714986f3eddfce4c#2237110acc22cf66247391b1714986f3eddfce4c"
+source = "git+https://github.com/joshrotenberg/claude-wrapper?rev=79ffb151fd422468ef4ae988e64a20329e3bf454#79ffb151fd422468ef4ae988e64a20329e3bf454"
 dependencies = [
  "libc",
  "serde",
@@ -133,7 +133,7 @@ dependencies = [
 [[package]]
 name = "codex-wrapper"
 version = "0.4.4"
-source = "git+https://github.com/joshrotenberg/codex-wrapper?rev=2356b3d74df6de57de60197588b310a57f25b7fe#2356b3d74df6de57de60197588b310a57f25b7fe"
+source = "git+https://github.com/joshrotenberg/codex-wrapper?rev=1c0bbfa2a66024d094a8117ec83bca0d6b41232c#1c0bbfa2a66024d094a8117ec83bca0d6b41232c"
 dependencies = [
  "libc",
  "serde",

@@ -8,8 +8,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "2237110acc22cf66247391b1714986f3eddfce4c", default-features = false, features = ["async", "json"] }
-codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "2356b3d74df6de57de60197588b310a57f25b7fe" }
+claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
+codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "1c0bbfa2a66024d094a8117ec83bca0d6b41232c" }
 clap = { version = "4.5", features = ["derive"] }
 humantime = "2"
 serde = { version = "1", features = ["derive"] }

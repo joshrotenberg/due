@@ -51,8 +51,11 @@ JSON result and may contain provider content. With file-only tracing, ordinary
 stderr diagnostics remain enabled, except successful Codex stderr is unavailable
 through the current wrapper streaming API.
 
-Ctrl-C and `--timeout` await wrapper cleanup; on Unix the owned process group is
-terminated. Cleanup can extend beyond the deadline. Cancellation is not rollback.
+Ctrl-C and `--timeout` await wrapper cleanup. On Unix, SIGINT asks the provider to
+stop its tool sessions; output drains during a two-second grace, followed by a
+forced kill of the remaining owned group and direct-child reaping. Detached tool
+cleanup depends on the provider's cooperation; group kill alone cannot reach it.
+Cleanup can extend beyond the deadline. Cancellation is not rollback.
 Inspect artifacts and authorized external effects independently after interruption
 or completion; trace events describe observations, not a verified effect inventory.
 Do not retry automatically. Use `due skills show contracts` to interpret the

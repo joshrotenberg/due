@@ -66,12 +66,16 @@ cargo build --release --locked
 cargo install --path . --locked
 ```
 
-The MVP pins the passthrough additions in
-[claude-wrapper #817](https://github.com/joshrotenberg/claude-wrapper/pull/817) and
-[codex-wrapper #148](https://github.com/joshrotenberg/codex-wrapper/pull/148) by full
-Git commit. The first build needs GitHub and crates.io access. It does not depend
-on local wrapper checkouts. Move to released crate versions once those additions
-are published; keep `Cargo.lock` committed for reproducible application builds.
+The MVP pins full Git commits containing passthrough support
+([claude-wrapper #817](https://github.com/joshrotenberg/claude-wrapper/pull/817),
+[codex-wrapper #148](https://github.com/joshrotenberg/codex-wrapper/pull/148)) and
+cooperative shutdown
+([claude-wrapper #818](https://github.com/joshrotenberg/claude-wrapper/pull/818),
+[codex-wrapper #149](https://github.com/joshrotenberg/codex-wrapper/pull/149)).
+The first build needs GitHub and crates.io access. It does not depend on local
+wrapper checkouts. Keep the Git pins while the wrappers are exercised through
+Due; releases can follow once their behavior is settled. Keep `Cargo.lock`
+committed for reproducible application builds.
 
 ## Shared options
 
@@ -103,10 +107,14 @@ Claude schema, so secrets in native options or schemas are not redacted.
 
 Relative executable paths and PATH lookups resolve before `--cwd` changes the
 child's directory. The execution timeout starts when the provider runs, after the
-complete prompt has been read. Shutdown waits for wrapper cleanup and may extend
-beyond the deadline. Ctrl-C similarly awaits cleanup before returning. On Unix,
-the wrappers terminate the owned process group; elsewhere their process cleanup
-capabilities apply. Due performs no automatic retries.
+complete prompt has been read. On Unix, Ctrl-C and timeouts ask the native CLI to
+interrupt with SIGINT, while the wrappers drain its output for a two-second grace
+period. They then force-stop the remaining owned process group and reap the direct
+child before Due returns. Shutdown may extend beyond the execution deadline.
+Native interruption lets the CLI clean up tool processes in separate groups;
+forced group termination alone cannot reach those processes. Cleanup of escaped
+processes still depends on native cooperation. Other platforms use the wrappers'
+available process cleanup. Due performs no automatic retries.
 
 Resume IDs stay provider-specific. `session_id` in Due's result is Claude's native
 session ID or Codex's native thread ID. Ephemeral runs may report an ID that cannot

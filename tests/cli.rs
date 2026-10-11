@@ -796,3 +796,46 @@ fn ctrl_c_stops_provider_and_its_child() {
         assert_reaped(&pids);
     }
 }
+
+#[test]
+fn cooperative_native_shutdown_keeps_the_original_stop_outcome() {
+    for provider in ["claude", "codex"] {
+        for traced in [false, true] {
+            for cancel in [false, true] {
+                let fixture = Fixture::new(provider);
+                let mut command = fixture.command("interruptible");
+                command.args([
+                    "--prompt",
+                    "x",
+                    "--output",
+                    "json",
+                    "--timeout",
+                    if cancel { "30s" } else { "2s" },
+                ]);
+                if traced {
+                    command.arg("--trace=json");
+                }
+                let mut child = command.spawn().unwrap();
+                wait_for(&fixture.root.path().join("pids"), &mut child);
+                let pids = fixture.pids();
+                if cancel {
+                    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+                }
+                let output = finish(child);
+                let (code, status, kind) = if cancel {
+                    (130, "cancelled", "cancelled")
+                } else {
+                    (124, "timed_out", "timeout")
+                };
+                let result = json(&output, code, status);
+                assert_eq!(result["error"]["kind"], kind);
+                assert_eq!(
+                    fs::read_to_string(fixture.root.path().join("interrupt")).unwrap(),
+                    "SIGINT\n",
+                    "{provider}: native cleanup handler did not run"
+                );
+                assert_reaped(&pids);
+            }
+        }
+    }
+}

@@ -3,12 +3,15 @@ use std::{
     future::Future,
     io::ErrorKind as IoErrorKind,
     sync::Arc,
+    time::Duration,
 };
 
 use claude_wrapper::streaming::{
     BlockType, PartialMessageEvent, StreamEvent, stream_query_cancellable,
 };
-use claude_wrapper::{Claude, ClaudeCommand, Error, OutputFormat, QueryCommand, QueryResult};
+use claude_wrapper::{
+    Claude, ClaudeCommand, Error, OutputFormat, QueryCommand, QueryResult, TerminationSignal,
+};
 use serde_json::Value;
 
 use super::Context;
@@ -61,7 +64,11 @@ where
     }
     let mut builder = Claude::builder()
         .binary(&context.binary)
-        .working_dir(&context.cwd);
+        .working_dir(&context.cwd)
+        // Let the native CLI stop tool processes in their own groups before
+        // the wrapper forces the remaining owned group to stop.
+        .termination_signal(TerminationSignal::Interrupt)
+        .kill_grace(Duration::from_secs(2));
     if let Some(timeout) = run.timeout {
         builder = builder.timeout(timeout);
     }

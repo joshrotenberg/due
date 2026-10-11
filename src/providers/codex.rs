@@ -1,8 +1,8 @@
-use std::{future::Future, io::ErrorKind as IoErrorKind, path::Path, sync::Arc};
+use std::{future::Future, io::ErrorKind as IoErrorKind, path::Path, sync::Arc, time::Duration};
 
 use codex_wrapper::{
     Codex, CodexCommand, Error, ExecCommand, ExecResumeCommand, JsonLineEvent, QueryResult,
-    TokenUsage,
+    TerminationSignal, TokenUsage,
 };
 
 use super::Context;
@@ -125,7 +125,11 @@ where
     }
     let mut builder = Codex::builder()
         .binary(&context.binary)
-        .working_dir(&context.cwd);
+        .working_dir(&context.cwd)
+        // The CLI owns tool groups that a forced provider-group kill cannot
+        // reach. Give its interrupt handler a bounded chance to clean them up.
+        .termination_signal(TerminationSignal::Interrupt)
+        .termination_grace(Duration::from_secs(2));
     if let Some(timeout) = run.timeout {
         builder = builder.timeout(timeout);
     }

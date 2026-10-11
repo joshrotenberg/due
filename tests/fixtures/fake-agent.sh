@@ -49,6 +49,16 @@ case "$DUE_TEST_MODE" in
         printf '%s\n' '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.01)"],"num_turns":1,"total_cost_usd":0.1273986,"session_id":"cap-session"}'
         exit 1
         ;;
+    interruptible)
+        # Native CLIs use SIGINT to clean up tool sessions. A successful exit
+        # during that cleanup must not erase Due's latched stop reason.
+        trap 'printf "SIGINT\n" > "$DUE_TEST_DIR/interrupt"; /bin/kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; exit 0' INT
+        /bin/sleep 30 &
+        child=$!
+        printf '%s\n%s\n' "$$" "$child" > "$DUE_TEST_DIR/pids"
+        wait "$child"
+        exit 0
+        ;;
     blocked)
         /bin/sleep 30 &
         child=$!
