@@ -72,3 +72,29 @@ reviews and CI reduce risk; they do not establish behavior under every provider
 version or host policy. Keep the wrapper Git pins fixed during the trial so
 reports remain comparable. Track feature requests as follow-up ideas without
 implementing them during the freeze.
+
+## Resume and possible midstream corrections
+
+The default interaction remains a bounded request followed by a result. Context
+can carry across requests without making ongoing conversation the default.
+
+- **Resume** starts a new request using the provider's saved context, for refinement,
+  follow-up work, or a correction after a run. Due already supports `--resume`
+  with an explicit native session ID; the session must be persisted and resumable.
+- **Midstream correction** would amend an active request when monitoring reveals
+  information worth acting on. This is a future option, not current Due behavior
+  or an exception to the feature freeze.
+
+These uses overlap, but their lifecycles differ. Any future midstream mechanism
+must make acceptance and when the correction takes effect observable in the
+trace. Sending a message alone is not evidence that the worker acted on it, and
+an amendment cannot undo earlier side effects. Two-way communication would not
+by itself require an MCP server or change the one-run, one-agent scope.
+
+During the trial, record cases where a worker needed clarification, monitoring
+revealed a useful correction, or a follow-up benefited from saved context. Note
+when the information became available, whether a new/resumed request was enough,
+and any avoidable interruption or wasted work. Repeated small clarifications or
+substantial work after a known correction would justify revisiting steering.
+Continue using bounded assignments and explicit follow-ups while collecting that
+evidence; inspect effects before resuming interrupted work.
