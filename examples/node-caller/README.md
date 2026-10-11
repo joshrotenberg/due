@@ -73,6 +73,11 @@ a fresh `validated.json` with the verdict and validation evidence; existing file
 are never replaced. Independent inspection of the diff, tests, and authorized
 effects is still required. Neither this launcher nor Due proves a review correct.
 
+The bundled answer schema omits an explicit dialect declaration for native
+provider compatibility. Claude Code 2.1.296 rejected a Draft 2020-12 `$schema`
+URI during this trial. Due's `--dry-run` checks schema JSON shape, not native
+schema support; these fake-provider tests do not establish native compatibility.
+
 The included `pr-101.request.json` uses a schema path relative to this repository
 root, so run it from there. Copy/edit the request and prompt for the actual PR:
 set request `cwd` to the intended local repository, replace the prompt's
