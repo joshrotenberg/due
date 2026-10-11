@@ -76,6 +76,30 @@ Passthrough accepts options, not another command or positional prompt. For an
 unknown option whose value begins with `-`, use `--option=value`.
 Native permissions remain in force; do not add bypass flags as a default.
 
+For unattended Claude work, `--tools` exposes built-in tools but does not
+authorize their use. `acceptEdits` permits edits, not arbitrary shell commands. Grant only the
+edits and checks authorized for this task, using native permission rules:
+
+```sh
+due run --provider claude --cwd "$PWD" --stdin --output json --timeout 3m \
+  -- --permission-mode dontAsk --permission-prompts none \
+  --tools Read,Edit,Bash \
+  --allowedTools 'Edit(/receipt.py)' 'Bash(python3 -B -m unittest -v)' < task.txt
+```
+
+This example grants one file edit and one test command. Replace both with the
+actual authorized scope, and tell the worker to run the exact command from cwd.
+The leading slash in this CLI Edit rule anchors it to the starting directory.
+`dontAsk` denies actions that need further approval; normal permitted reads and
+inherited rules still apply. Deny/ask rules override allows. The optional
+`--permission-prompts none` requires Claude Code 2.1.259+ and tells the worker not
+to retry unresolved approvals. Check the installed provider's help for support.
+Store the same tokens in a profile's `native_args` for repeatable use. Supplying
+arguments after `--` replaces that entire list, including permission rules.
+This supplements native policy; it does not sandbox repository code executed by
+an approved test command. Do not change global policy to make a run pass.
+If a check is denied, report it as blocked even if the Due execution succeeds.
+
 Use `--resume ID` only for the intended provider's session and authorized follow-up.
 It requires a new prompt. `--ephemeral` disables persistence and conflicts with
 resume; an ID returned by an ephemeral run may not be resumable.

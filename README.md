@@ -74,6 +74,10 @@ after `--` and are forwarded without a shell:
 due run --provider claude --stdin -- --permission-mode acceptEdits --max-turns 5
 ```
 
+`acceptEdits` does not approve arbitrary shell commands. For unattended Claude
+work, grant the task's edits and checks explicitly and deny unresolved approval
+requests; see [unattended permissions](docs/cli.md#unattended-claude-permissions).
+
 ## Profiles and dry runs
 
 `--request FILE` reads a versioned JSON request. It can be a complete task or a

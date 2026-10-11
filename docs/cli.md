@@ -390,6 +390,63 @@ validation is not a security boundary. Native settings files and profiles can
 also affect execution. Permissions, tools, MCP configuration, schemas, and budget
 controls remain provider-specific; Due does not claim equivalent policy behavior.
 
+### Unattended Claude permissions
+
+`--tools` controls which built-in tools Claude can call; it does not approve their use.
+`acceptEdits` permits file edits, but shell commands such as tests still need an
+allow rule. Due forwards these native settings and does not answer approval
+requests.
+
+For a bounded repair to `receipt.py` with Python unit tests, use a partial profile:
+
+```json
+{
+  "schema_version": 1,
+  "provider": "claude",
+  "timeout": "3m",
+  "ephemeral": true,
+  "native_args": [
+    "--permission-mode", "dontAsk",
+    "--permission-prompts", "none",
+    "--tools", "Read,Edit,Bash",
+    "--allowedTools", "Edit(/receipt.py)", "Bash(python3 -B -m unittest -v)"
+  ]
+}
+```
+
+Save as `claude-profile.json`, then supply the repository and assignment:
+
+```sh
+due run --request claude-profile.json --cwd /path/to/repo --stdin \
+  --output json --trace --trace-file run.jsonl < task.txt > result.json
+```
+
+Adapt the file and command grants to the authorized task. Tell the worker to run
+that exact test command from the supplied cwd, without wrappers or redirects.
+In CLI permission rules, `/receipt.py` is anchored to Claude's starting directory
+(Due's `--cwd`), not the filesystem root. Quote each rule when passing it through
+the shell. Arguments after `--` replace a profile's **whole** native argument list.
+
+`dontAsk` denies actions that would need approval; ordinary permitted reads and
+inherited allows still apply. Existing deny/ask rules take precedence over allows.
+`--permission-prompts none` also tells Claude nobody can answer prompts or approve
+retries; it requires Claude Code 2.1.259 or later. Check the installed native CLI
+before reusing a profile on another machine. See Claude's
+[permission rules](https://code.claude.com/docs/en/permissions) and
+[unattended-run guidance](https://code.claude.com/docs/en/headless#turn-off-permission-prompts-in-unattended-runs).
+
+These grants supplement native policy; they are not an isolated sandbox. An
+approved test command executes repository code with the process's existing
+filesystem/network restrictions. Only grant commands appropriate to that task.
+No global settings changes or permission bypass flags are needed.
+
+Inspect the result envelope and actual effects after the run. A successful Due
+execution can still contain blocked tests: require the expected checks to have
+run, validate their reported result, and independently inspect the diff and tests.
+If permission is denied, report the partial outcome instead of changing policy
+or retrying automatically. A dry run validates Due's invocation, not Claude's
+permission decisions.
+
 ## Results and errors
 
 Text mode prints only the successful final answer, with a terminal newline.
