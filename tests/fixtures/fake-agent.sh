@@ -27,6 +27,18 @@ case "$DUE_TEST_MODE" in
         printf 'Not authenticated. Run `claude login`.\n' >&2
         exit 3
         ;;
+    codex_auth)
+        printf 'Missing bearer or basic authentication\n' >&2
+        exit 3
+        ;;
+    codex_config)
+        printf 'Error loading config.toml: fixture invalid configuration\n' >&2
+        exit 3
+        ;;
+    codex_session)
+        printf 'no rollout found for thread id fixture-missing-session\n' >&2
+        exit 3
+        ;;
     max_turns)
         # Captured shape from claude-wrapper/src/error.rs MAX_TURNS_STDOUT.
         printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":2,"session_id":"cap-session","total_cost_usd":0.08,"terminal_reason":"max_turns","errors":["Reached maximum number of turns (1)"]}'

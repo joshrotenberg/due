@@ -6,12 +6,14 @@ use std::{future::Future, path::PathBuf};
 use crate::{
     cli::{Provider, RunArgs},
     result::{ErrorKind, Invocation, RunError, RunResult},
+    schema::Schema,
     telemetry::Progress,
 };
 
 pub struct Context {
     pub binary: PathBuf,
     pub cwd: PathBuf,
+    pub schema: Option<Schema>,
 }
 
 impl Context {
@@ -47,7 +49,12 @@ impl Context {
                 }
             }
         };
-        Ok(Self { binary, cwd })
+        let schema = run.schema.as_deref().map(Schema::load).transpose()?;
+        Ok(Self {
+            binary,
+            cwd,
+            schema,
+        })
     }
 
     pub fn invocation(&self, args: Vec<String>, prompt: &str) -> Invocation {
@@ -68,8 +75,13 @@ where
         Ok(context) => context,
         Err(error) => return RunResult::new(run.provider).fail(error),
     };
-    match run.provider {
+    let result = match run.provider {
         Provider::Claude => claude::execute(run, &context, prompt, progress, cancel).await,
         Provider::Codex => codex::execute(run, &context, prompt, progress, cancel).await,
+    };
+    if context.schema.is_some() {
+        crate::schema::normalize(result)
+    } else {
+        result
     }
 }

@@ -24,6 +24,8 @@ pub struct RunResult {
     pub provider: Provider,
     pub status: Status,
     pub text: String,
+    /// Native structured data, or a decoded final answer requested with --schema.
+    pub structured_output: Option<serde_json::Value>,
     pub session_id: Option<String>,
     pub usage: Option<Usage>,
     pub cost_usd: Option<f64>,
@@ -65,6 +67,12 @@ pub struct Invocation {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     InvalidInput,
+    Authentication,
+    MaxTurns,
+    MaxBudget,
+    Configuration,
+    SessionNotFound,
+    Unsupported,
     Provider,
     Protocol,
     Io,
@@ -126,6 +134,7 @@ impl RunResult {
             provider,
             status: Status::Succeeded,
             text: String::new(),
+            structured_output: None,
             session_id: None,
             usage: None,
             cost_usd: None,

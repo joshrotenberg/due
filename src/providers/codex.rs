@@ -9,7 +9,7 @@ use super::Context;
 use crate::{
     cli::{Provider, RunArgs},
     result::{ErrorKind, RunError, RunResult, Usage},
-    telemetry::Progress,
+    telemetry::{ActivityKind, ActivityStatus, Progress},
 };
 
 enum Turn {
@@ -18,7 +18,7 @@ enum Turn {
 }
 
 impl Turn {
-    fn new(run: &RunArgs, prompt: &str, output_path: &str) -> Self {
+    fn new(run: &RunArgs, prompt: &str, output_path: &str, schema_path: Option<&str>) -> Self {
         // The wrapper has separate typed builders because native exec/resume
         // accept different option sets. Keep that distinction at this boundary.
         if let Some(id) = &run.resume {
@@ -31,6 +31,9 @@ impl Turn {
             }
             if let Some(effort) = run.effort {
                 command = command.config(format!("model_reasoning_effort=\"{}\"", effort.as_str()));
+            }
+            if let Some(path) = schema_path {
+                command = command.output_schema(path);
             }
             Self::Resume(command.extra_args(&run.native_args))
         } else {
@@ -45,6 +48,9 @@ impl Turn {
             }
             if run.ephemeral {
                 command = command.ephemeral();
+            }
+            if let Some(path) = schema_path {
+                command = command.output_schema(path);
             }
             Self::Fresh(command.extra_args(&run.native_args))
         }
@@ -108,7 +114,12 @@ where
             "Codex requires a UTF-8 temporary directory path",
         ));
     };
-    let command = Turn::new(run, prompt, path);
+    let command = Turn::new(
+        run,
+        prompt,
+        path,
+        context.schema.as_ref().map(|schema| schema.path()),
+    );
     if run.dry_run {
         return RunResult::planned(Provider::Codex, context.invocation(command.args(), prompt));
     }
@@ -154,7 +165,7 @@ struct StreamState {
     session_id: Option<String>,
     usage: Option<TokenUsage>,
     completed: bool,
-    failure_message: Option<String>,
+    terminal_error: Option<RunError>,
     // Keep only the latest message for a partial failed response, never the
     // event history or tool contents. Successful text comes from the final file.
     last_assistant: String,
@@ -184,56 +195,12 @@ impl StreamState {
                 progress.phase("turn_completed");
             }
             "turn.failed" => {
-                self.failure_message = Some(
-                    event
-                        .turn_failure_message()
-                        .unwrap_or("Codex reported a failed turn")
-                        .to_owned(),
-                );
+                self.terminal_error = Some(terminal_error(&event));
                 progress.phase("turn_failed");
             }
             "error" => progress.phase("provider_error"),
             "item.started" | "item.updated" | "item.completed" => {
-                let item = event.extra.get("item");
-                let id = item
-                    .and_then(|item| item.get("id"))
-                    .and_then(|id| id.as_str());
-                let kind = match event.item_type() {
-                    Some("command_execution") => "command_execution",
-                    Some("agent_message") => "agent_message",
-                    _ => "other",
-                };
-                let phase = if kind == "command_execution" {
-                    match event.event_type.as_str() {
-                        "item.started" => "tool_started",
-                        "item.updated" => "tool_updated",
-                        _ => {
-                            let exit = item
-                                .and_then(|item| item.get("exit_code"))
-                                .and_then(|code| code.as_i64());
-                            let status = item
-                                .and_then(|item| item.get("status"))
-                                .and_then(|status| status.as_str());
-                            if exit.is_some_and(|code| code != 0) || status == Some("failed") {
-                                "tool_failed"
-                            } else {
-                                "tool_completed"
-                            }
-                        }
-                    }
-                } else {
-                    match event.event_type.as_str() {
-                        "item.started" => "item_started",
-                        "item.updated" => "item_updated",
-                        _ => "item_completed",
-                    }
-                };
-                progress.item(
-                    phase,
-                    id,
-                    kind,
-                    (kind == "command_execution").then_some("command_execution"),
-                );
+                emit_activity(&event, progress);
                 if let Some(text) = event.agent_message_text() {
                     progress.assistant(text.len());
                     self.last_assistant = text;
@@ -249,11 +216,11 @@ impl StreamState {
             usage: self.usage.map(normalize_usage),
             ..RunResult::new(Provider::Codex)
         };
-        if let Some(message) = self.failure_message {
+        if let Some(error) = self.terminal_error {
             result.text = std::fs::read_to_string(output_path)
                 .map(normalize_final_newline)
                 .unwrap_or(self.last_assistant);
-            return result.fail(RunError::new(ErrorKind::Provider, message));
+            return result.fail(error);
         }
         if !self.completed {
             return result.fail(RunError::protocol("Codex did not emit turn.completed"));
@@ -270,7 +237,7 @@ impl StreamState {
     }
 
     fn fail(self, error: Error, output_path: &Path) -> RunResult {
-        let terminal_failed = self.failure_message.is_some();
+        let terminal_failed = self.terminal_error.is_some();
         let mut result = self.finish(output_path);
         let mut process = match error {
             Error::Json { source, .. } => RunResult::new(Provider::Codex)
@@ -292,6 +259,61 @@ impl StreamState {
             // native terminal event only after the wrapper has settled cleanup.
             result.fail(error)
         }
+    }
+}
+
+fn activity_kind(item_type: &str) -> Option<ActivityKind> {
+    Some(match item_type {
+        // These are assistant content, not tools or observable actions.
+        "agent_message" | "reasoning" => return None,
+        "command_execution" => ActivityKind::Command,
+        "file_change" => ActivityKind::FileChange,
+        "mcp_tool_call" => ActivityKind::McpCall,
+        "web_search" => ActivityKind::WebSearch,
+        "todo_list" | "plan" => ActivityKind::PlanUpdate,
+        "status_update" => ActivityKind::StatusUpdate,
+        _ => ActivityKind::Unknown,
+    })
+}
+
+fn activity_status(item: &serde_json::Value) -> ActivityStatus {
+    match (
+        item.get("status").and_then(serde_json::Value::as_str),
+        item.get("exit_code").and_then(serde_json::Value::as_i64),
+    ) {
+        (Some("cancelled"), _) => ActivityStatus::Cancelled,
+        (_, Some(code)) if code != 0 => ActivityStatus::Failed,
+        (Some("failed"), _) => ActivityStatus::Failed,
+        (Some("completed" | "succeeded"), _) | (_, Some(0)) => ActivityStatus::Succeeded,
+        _ => ActivityStatus::Unknown,
+    }
+}
+
+fn emit_activity(event: &JsonLineEvent, progress: &Progress) {
+    if !matches!(event.event_type.as_str(), "item.started" | "item.completed") {
+        return;
+    }
+    let Some(item_type) = event.item_type() else {
+        return;
+    };
+    let Some(kind) = activity_kind(item_type) else {
+        return;
+    };
+    let Some(item) = event.extra.get("item") else {
+        return;
+    };
+    let id = item.get("id").and_then(serde_json::Value::as_str);
+    // Keep tool names static: native command text, MCP identifiers, search
+    // queries, paths, and unfamiliar item type strings never enter the trace.
+    let tool = match item_type {
+        "command_execution" => Some("command_execution"),
+        "mcp_tool_call" => Some("mcp_tool_call"),
+        _ => None,
+    };
+    if event.event_type == "item.started" {
+        progress.activity_started(id, kind, tool);
+    } else {
+        progress.activity_completed(id, kind, activity_status(item), tool);
     }
 }
 
@@ -356,12 +378,7 @@ fn parse(stdout: &str, output_path: &Path) -> RunResult {
                     .find_map(JsonLineEvent::agent_message_text)
                     .unwrap_or_default()
             });
-        return result.fail(RunError::new(
-            ErrorKind::Provider,
-            failed
-                .turn_failure_message()
-                .unwrap_or("Codex reported a failed turn"),
-        ));
+        return result.fail(terminal_error(failed));
     }
     if !query.events.iter().any(JsonLineEvent::is_turn_completed) {
         return result.fail(RunError::protocol("Codex did not emit turn.completed"));
@@ -388,6 +405,25 @@ fn normalize_final_newline(mut text: String) -> String {
     text
 }
 
+fn terminal_error(event: &JsonLineEvent) -> RunError {
+    // This machine-readable code is captured by the pinned wrapper. Unknown
+    // API codes and prose (including rollout-budget text) stay provider errors.
+    let kind = match event
+        .turn_failure_api_error()
+        .and_then(|failure| failure.code)
+        .as_deref()
+    {
+        Some("invalid_json_schema") => ErrorKind::Configuration,
+        _ => ErrorKind::Provider,
+    };
+    RunError::new(
+        kind,
+        event
+            .turn_failure_message()
+            .unwrap_or("Codex reported a failed turn"),
+    )
+}
+
 fn failure(error: Error, output_path: &Path) -> RunResult {
     let mut result = RunResult::new(Provider::Codex);
     let failure = match error {
@@ -405,27 +441,31 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
                 result = parsed;
             }
             result.diagnostics = stderr;
-            let message = result.error.take().map(|e| e.message).unwrap_or_else(|| {
-                if result.diagnostics.trim().is_empty() {
-                    format!("Codex exited with status {exit_code}")
-                } else {
-                    result.diagnostics.trim().to_owned()
-                }
-            });
-            RunError::new(ErrorKind::Provider, message).with_exit_code(exit_code)
+            result
+                .error
+                .take()
+                .unwrap_or_else(|| {
+                    let message = if result.diagnostics.trim().is_empty() {
+                        format!("Codex exited with status {exit_code}")
+                    } else {
+                        result.diagnostics.trim().to_owned()
+                    };
+                    RunError::new(ErrorKind::Provider, message)
+                })
+                .with_exit_code(exit_code)
         }
         Error::Auth {
             message, exit_code, ..
-        }
-        | Error::Config {
+        } => RunError::new(ErrorKind::Authentication, message).with_exit_code(exit_code),
+        Error::Config {
             message, exit_code, ..
         }
         | Error::NotTrustedDirectory {
             message, exit_code, ..
-        }
-        | Error::SessionNotFound {
+        } => RunError::new(ErrorKind::Configuration, message).with_exit_code(exit_code),
+        Error::SessionNotFound {
             message, exit_code, ..
-        } => RunError::new(ErrorKind::Provider, message).with_exit_code(exit_code),
+        } => RunError::new(ErrorKind::SessionNotFound, message).with_exit_code(exit_code),
         Error::NotFound => RunError::new(ErrorKind::NotFound, "codex was not found on PATH"),
         Error::Timeout { timeout_seconds } => RunError::new(
             ErrorKind::Timeout,
@@ -444,6 +484,190 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn schema_path_is_forwarded_for_fresh_and_resumed_turns() {
+        for resume in [false, true] {
+            let mut args = vec!["due", "run", "--provider", "codex", "--prompt", "prompt"];
+            if resume {
+                args.extend(["--resume", "thread-1"]);
+            }
+            let crate::cli::Cli {
+                command: crate::cli::Command::Run(run),
+            } = crate::cli::Cli::try_parse_from(args).unwrap();
+            let command = Turn::new(&run, "prompt", "/tmp/final-message", Some("/tmp/schema"));
+            let argv = command.args();
+            let schema = argv
+                .iter()
+                .position(|arg| arg == "--output-schema")
+                .unwrap();
+            assert_eq!(argv[schema + 1], "/tmp/schema");
+            assert_eq!(argv.last().unwrap(), "-");
+            if resume {
+                let session = argv.iter().position(|arg| arg == "thread-1").unwrap();
+                assert!(schema < session);
+            }
+            assert!(
+                !Turn::new(&run, "prompt", "/tmp/final-message", None)
+                    .args()
+                    .iter()
+                    .any(|arg| arg == "--output-schema")
+            );
+        }
+    }
+
+    #[test]
+    fn native_activity_kinds_do_not_treat_assistant_content_as_activity() {
+        for (native, expected) in [
+            ("command_execution", ActivityKind::Command),
+            ("file_change", ActivityKind::FileChange),
+            ("mcp_tool_call", ActivityKind::McpCall),
+            ("web_search", ActivityKind::WebSearch),
+            ("todo_list", ActivityKind::PlanUpdate),
+            ("plan", ActivityKind::PlanUpdate),
+            ("status_update", ActivityKind::StatusUpdate),
+            ("future_native_item", ActivityKind::Unknown),
+        ] {
+            assert_eq!(activity_kind(native), Some(expected));
+        }
+        assert_eq!(activity_kind("agent_message"), None);
+        assert_eq!(activity_kind("reasoning"), None);
+    }
+
+    #[test]
+    fn activity_completion_requires_native_outcome_evidence() {
+        use serde_json::json;
+        for (item, expected) in [
+            (json!({}), ActivityStatus::Unknown),
+            (json!({"status":"in_progress"}), ActivityStatus::Unknown),
+            (json!({"status":"future_status"}), ActivityStatus::Unknown),
+            (json!({"exit_code":"0"}), ActivityStatus::Unknown),
+            (json!({"exit_code":0}), ActivityStatus::Succeeded),
+            (json!({"status":"completed"}), ActivityStatus::Succeeded),
+            (json!({"status":"succeeded"}), ActivityStatus::Succeeded),
+            (
+                json!({"status":"failed","exit_code":0}),
+                ActivityStatus::Failed,
+            ),
+            (
+                json!({"status":"completed","exit_code":1}),
+                ActivityStatus::Failed,
+            ),
+            (
+                json!({"status":"cancelled","exit_code":1}),
+                ActivityStatus::Cancelled,
+            ),
+        ] {
+            assert_eq!(activity_status(&item), expected);
+        }
+    }
+
+    #[test]
+    fn typed_wrapper_errors_preserve_common_categories_and_exit_codes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-written.txt");
+        for (error, expected) in [
+            (
+                Error::Auth {
+                    message: "login required".into(),
+                    command: "unused".into(),
+                    exit_code: 7,
+                    working_dir: None,
+                },
+                ErrorKind::Authentication,
+            ),
+            (
+                Error::Config {
+                    message: "invalid config".into(),
+                    command: "unused".into(),
+                    exit_code: 7,
+                    working_dir: None,
+                },
+                ErrorKind::Configuration,
+            ),
+            (
+                Error::NotTrustedDirectory {
+                    message: "directory not trusted".into(),
+                    command: "unused".into(),
+                    exit_code: 7,
+                    working_dir: None,
+                },
+                ErrorKind::Configuration,
+            ),
+            (
+                Error::SessionNotFound {
+                    message: "session does not exist".into(),
+                    command: "unused".into(),
+                    exit_code: 7,
+                    working_dir: None,
+                },
+                ErrorKind::SessionNotFound,
+            ),
+        ] {
+            let error = failure(error, &path).error.unwrap();
+            assert_eq!(error.kind, expected);
+            assert_eq!(error.provider_exit_code, Some(7));
+            assert_eq!(error.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn only_verified_terminal_codes_are_classified_across_execution_modes() {
+        use serde_json::json;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-written.txt");
+        for (code, expected) in [
+            ("invalid_json_schema", ErrorKind::Configuration),
+            ("future_schema_error", ErrorKind::Provider),
+        ] {
+            let message = json!({
+                "type":"error",
+                "error":{"type":"invalid_request_error","code":code},
+                "status":400
+            })
+            .to_string();
+            let event: JsonLineEvent = serde_json::from_value(json!({
+                "type":"turn.failed", "error":{"message":message}
+            }))
+            .unwrap();
+            assert_eq!(terminal_error(&event).kind, expected);
+            let stdout = serde_json::to_string(&event).unwrap();
+            let buffered = failure(
+                Error::CommandFailed {
+                    command: "unused".into(),
+                    exit_code: 9,
+                    stdout,
+                    stderr: String::new(),
+                    working_dir: None,
+                },
+                &path,
+            );
+            let mut state = StreamState::default();
+            state.observe(event, &Progress::default());
+            let streamed = state.fail(
+                Error::CommandFailed {
+                    command: "unused".into(),
+                    exit_code: 9,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    working_dir: None,
+                },
+                &path,
+            );
+            for result in [buffered, streamed] {
+                let error = result.error.unwrap();
+                assert_eq!(error.kind, expected);
+                assert_eq!(error.message, message);
+                assert_eq!(error.provider_exit_code, Some(9));
+            }
+        }
+        let plain: JsonLineEvent = serde_json::from_value(json!({
+            "type":"turn.failed", "error":{"message":"invalid_json_schema"}
+        }))
+        .unwrap();
+        assert_eq!(terminal_error(&plain).kind, ErrorKind::Provider);
+    }
 
     #[test]
     fn streamed_terminal_failure_survives_a_process_error_without_stdout() {
@@ -451,7 +675,10 @@ mod tests {
         let path = directory.path().join("not-written.txt");
         let state = StreamState {
             thread_id: Some("thread-1".into()),
-            failure_message: Some("native terminal failure".into()),
+            terminal_error: Some(RunError::new(
+                ErrorKind::Provider,
+                "native terminal failure",
+            )),
             last_assistant: "partial answer".into(),
             ..StreamState::default()
         };
@@ -483,7 +710,7 @@ mod tests {
             (Error::Timeout { timeout_seconds: 5 }, ErrorKind::Timeout),
         ] {
             let state = StreamState {
-                failure_message: Some("earlier native failure".into()),
+                terminal_error: Some(RunError::new(ErrorKind::Provider, "earlier native failure")),
                 ..StreamState::default()
             };
             assert_eq!(state.fail(error, &path).error.unwrap().kind, expected);

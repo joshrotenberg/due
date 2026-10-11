@@ -228,7 +228,7 @@ fn tracing_is_live_heartbeats_while_quiet_and_dual_sinks_are_identical() {
                 .recv_timeout(remaining)
                 .expect("live trace was not flushed before provider completion");
             let event: Value = serde_json::from_str(&line).unwrap();
-            tool_started |= event["event"] == "tool_started";
+            tool_started |= event["event"] == "activity_started";
             // A startup heartbeat is insufficient: prove another heartbeat
             // arrives during the deliberately quiet in-flight tool.
             heartbeat |= tool_started && event["event"] == "heartbeat";
@@ -238,13 +238,13 @@ fn tracing_is_live_heartbeats_while_quiet_and_dual_sinks_are_identical() {
             "provider ended before gate release"
         );
         let live_file = fs::read(fixture.trace()).unwrap();
-        assert!(String::from_utf8_lossy(&live_file).contains("tool_started"));
+        assert!(String::from_utf8_lossy(&live_file).contains("activity_started"));
         let last_complete_line = live_file.iter().rposition(|byte| *byte == b'\n').unwrap();
         let live_records = records(&live_file[..=last_complete_line]);
         assert!(
             !live_records
                 .iter()
-                .any(|event| event["event"] == "tool_completed" || event["event"] == "tool_failed"),
+                .any(|event| event["event"] == "activity_completed"),
             "a streamed tool-input block ending does not mean the tool executed"
         );
         fs::write(fixture.dir.path().join("release"), b"go").unwrap();
@@ -269,8 +269,8 @@ fn tracing_is_live_heartbeats_while_quiet_and_dual_sinks_are_identical() {
             "process_started",
             "session_started",
             "turn_started",
-            "tool_started",
-            "tool_completed",
+            "activity_started",
+            "activity_completed",
             "message_completed",
             "turn_completed",
         ] {
@@ -286,22 +286,24 @@ fn tracing_is_live_heartbeats_while_quiet_and_dual_sinks_are_identical() {
         assert!(process["pid"].as_u64().is_some_and(|pid| pid > 0));
         let tool = file_records
             .iter()
-            .find(|event| event["event"] == "tool_started")
+            .find(|event| event["event"] == "activity_started")
             .unwrap();
         assert_eq!(
             file_records
                 .iter()
-                .filter(|event| event["event"] == "tool_started")
+                .filter(|event| event["event"] == "activity_started")
                 .count(),
             1,
             "partial and complete assistant messages must not duplicate tool starts"
         );
         let complete = file_records
             .iter()
-            .find(|event| event["event"] == "tool_completed")
+            .find(|event| event["event"] == "activity_completed")
             .unwrap();
-        assert_eq!(tool["item_id"], complete["item_id"]);
-        assert!(!tool["item_id"].is_null());
+        assert_eq!(tool["activity_id"], complete["activity_id"]);
+        assert!(!tool["activity_id"].is_null());
+        assert_eq!(tool["activity"], "command");
+        assert_eq!(complete["status"], "succeeded");
         no_secrets(&output.stderr);
         no_secrets(&file_bytes);
     }
@@ -422,19 +424,93 @@ fn a_failed_tool_can_be_followed_by_a_successful_turn() {
         check_trace(&events, provider, &value["run_id"], "succeeded", 0);
         let started = events
             .iter()
-            .find(|event| event["event"] == "tool_started")
+            .find(|event| event["event"] == "activity_started")
             .unwrap();
         let failed = events
             .iter()
-            .find(|event| event["event"] == "tool_failed")
+            .find(|event| event["event"] == "activity_completed" && event["status"] == "failed")
             .expect("failed tool must be distinguishable from successful completion");
-        assert_eq!(started["item_id"], failed["item_id"]);
-        assert!(!failed["item_id"].is_null());
+        assert_eq!(started["activity_id"], failed["activity_id"]);
+        assert!(!failed["activity_id"].is_null());
         assert!(
             events
                 .iter()
                 .any(|event| event["event"] == "turn_completed")
         );
+        no_secrets(&output.stderr);
+    }
+}
+
+#[test]
+fn provider_activities_share_categories_ids_and_completion_outcomes() {
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(provider);
+        let output = run(fixture.command("diverse").arg("--trace=json"));
+        let value = result(&output, 0, "succeeded");
+        let events = records(&output.stderr);
+        check_trace(&events, provider, &value["run_id"], "succeeded", 0);
+        let expected: &[&str] = if provider == "claude" {
+            &[
+                "command",
+                "file_change",
+                "mcp_call",
+                "web_search",
+                "plan_update",
+                "tool_call",
+            ]
+        } else {
+            &[
+                "command",
+                "file_change",
+                "mcp_call",
+                "web_search",
+                "plan_update",
+                "status_update",
+                "unknown",
+            ]
+        };
+        for activity in expected {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event["event"] == "activity_started"
+                        && event["activity"] == *activity),
+                "{provider} did not classify {activity}: {events:?}"
+            );
+        }
+        for completed in events
+            .iter()
+            .filter(|event| event["event"] == "activity_completed")
+        {
+            let id = &completed["activity_id"];
+            assert!(id.is_string());
+            assert!(
+                events
+                    .iter()
+                    .any(|started| started["event"] == "activity_started"
+                        && started["activity_id"] == *id
+                        && started["activity"] == completed["activity"])
+            );
+            assert!(
+                ["succeeded", "failed", "cancelled", "unknown"]
+                    .contains(&completed["status"].as_str().unwrap())
+            );
+        }
+        if provider == "codex" {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event["event"] == "activity_completed"
+                        && event["status"] == "cancelled")
+            );
+            assert!(events.iter().any(
+                |event| event["event"] == "activity_completed" && event["status"] == "unknown"
+            ));
+        }
+        assert!(!events.iter().any(|event| {
+            ["tool_started", "tool_completed", "tool_failed"]
+                .contains(&event["event"].as_str().unwrap())
+        }));
         no_secrets(&output.stderr);
     }
 }

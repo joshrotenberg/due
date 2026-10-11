@@ -57,6 +57,27 @@ case "$DUE_TRACE_MODE" in
         ;;
 esac
 
+if [ "$DUE_TRACE_MODE" = diverse ]; then
+    if [ "$DUE_TRACE_PROVIDER" = claude ]; then
+        for activity_spec in activity-file:Edit activity-mcp:mcp__fixture__lookup activity-web:WebSearch activity-plan:TodoWrite activity-tool:MysteryFutureTool; do
+            activity_id="${activity_spec%%:*}"
+            activity_tool="${activity_spec#*:}"
+            printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"%s","name":"%s","input":{"content":"SECRET_ACTIVITY_INPUT"}}]}}\n' "$activity_id" "$activity_tool"
+            printf '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"%s","content":"SECRET_ACTIVITY_OUTPUT","is_error":false}]}}\n' "$activity_id"
+        done
+    else
+        for activity_kind in file_change mcp_tool_call web_search todo_list status_update future_native_item; do
+            printf '{"type":"item.started","item":{"id":"activity-%s","type":"%s","status":"in_progress","arguments":"SECRET_ACTIVITY_INPUT","tool":"lookup"}}\n' "$activity_kind" "$activity_kind"
+            activity_status=completed
+            if [ "$activity_kind" = future_native_item ]; then activity_status=future_status; fi
+            printf '{"type":"item.completed","item":{"id":"activity-%s","type":"%s","status":"%s","payload":"SECRET_ACTIVITY_OUTPUT","tool":"lookup","items":[{"text":"SECRET_PLAN_TEXT","completed":false}],"changes":[{"path":"SECRET_FILE_PATH","kind":"update"}]}}\n' "$activity_kind" "$activity_kind" "$activity_status"
+        done
+        printf '%s\n' '{"type":"item.started","item":{"id":"activity-cancelled","type":"command_execution","command":"SECRET_COMMAND","status":"in_progress"}}'
+        printf '%s\n' '{"type":"item.completed","item":{"id":"activity-cancelled","type":"command_execution","command":"SECRET_COMMAND","status":"cancelled"}}'
+        printf '%s\n' '{"type":"item.completed","item":{"id":"reasoning-private","type":"reasoning","text":"SECRET_REASONING_TEXT"}}'
+    fi
+fi
+
 if [ "$DUE_TRACE_PROVIDER" = claude ]; then
     tool_error=false
     if [ "$DUE_TRACE_MODE" = tool_failure ]; then tool_error=true; fi

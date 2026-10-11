@@ -47,6 +47,7 @@ are published; keep `Cargo.lock` committed for reproducible application builds.
 | `-C, --cwd DIR` | Child working directory, resolved from the caller's cwd. |
 | `--timeout 30s` | Execution deadline; supports durations such as `5m`. No default. |
 | `--output text\|json` | Final answer text by default, or one versioned JSON result. |
+| `--schema FILE` | Request a structured answer using a JSON Schema; preserve it as a JSON value in the result. |
 | `--resume ID` | Continue a native session/thread with the supplied prompt. |
 | `--ephemeral` | Disable native session persistence. Conflicts with `--resume`. |
 | `--dry-run` | Show executable, argv, cwd, and stdin size without launching a provider. |
@@ -58,8 +59,8 @@ are published; keep `Cargo.lock` committed for reproducible application builds.
 Prompts always travel to the child through stdin. A prompt supplied on Due's own
 command line is still visible in Due's argv; use `--stdin` when that matters.
 Dry runs omit prompt contents and work even when the provider is not installed.
-Provider options themselves are shown in dry-run output, so secrets in native
-options are not redacted.
+Provider options themselves are shown in dry-run output, including an inline
+Claude schema, so secrets in native options or schemas are not redacted.
 
 Relative executable paths and PATH lookups resolve before `--cwd` changes the
 child's directory. The execution timeout starts when the provider runs, after the
@@ -72,6 +73,39 @@ Resume IDs stay provider-specific. `session_id` in Due's result is Claude's nati
 session ID or Codex's native thread ID. Ephemeral runs may report an ID that cannot
 be resumed. There is no local session database or implicit "latest" selection.
 
+## Structured answers
+
+`--output json` serializes Due's result envelope. `--schema FILE` additionally
+asks the model for an answer with a particular structure:
+
+```sh
+due run --provider claude -p "Summarize this repository" \
+  --schema examples/summary.schema.json --output json
+due run --provider codex -p "Summarize this repository" \
+  --schema examples/summary.schema.json --output json
+```
+
+Both produce the same result fields, including `structured_output` as a JSON
+value. The common schema option also works with `--resume`. `text` remains the
+native final answer; for compatibility, an empty successful Claude answer uses
+the serialized structured value as its text fallback. Native structured Claude
+data is retained even without `--schema`, and even when accompanying nonempty
+text. Codex text is decoded only when the common `--schema` option was supplied;
+ordinary text that happens to look like JSON is left as text.
+
+Schema paths resolve relative to the caller's directory, independently of
+`--cwd`. Due checks that the file contains a JSON object or boolean and captures
+its contents once. Claude receives that JSON inline; Codex receives a private
+temporary snapshot kept alive until execution settles. Missing files, invalid
+JSON, and common/native schema-option conflicts fail before spawning.
+
+The selected provider enforces its supported JSON Schema constraints. Due does
+not implement an additional schema validator, convert between provider subsets,
+or repair/retry responses. Missing Claude structured data or invalid Codex final
+JSON after an otherwise successful schema run is a `protocol` error. Existing
+provider, timeout, or cancellation failures retain their category and any
+available response data. Trace logs contain neither schemas nor responses.
+
 ## Live progress
 
 ```sh
@@ -80,19 +114,27 @@ due run --provider codex -p "Fix the tests" --trace --trace-file run.jsonl
 due run --provider codex --stdin --output json --trace=json 2>progress.jsonl
 ```
 
-Tracing reports process startup, session and turn activity, tool starts and
+Tracing reports process startup, session and turn activity, action starts and
 completion or failure, message counts, elapsed time, and the final outcome. Quiet
 periods produce a heartbeat every five seconds with the time since the last
 activity. `--trace-interval 1s` changes that period. It is a liveness indicator,
 not a percentage or a claim that the provider is making progress. Claude also
-reports the start of thinking and text blocks without their contents. Codex
-identifies command execution as tool activity; other item kinds have generic
-lifecycle events.
+reports the start of thinking and text blocks without their contents.
+
+Both adapters emit `activity_started` and `activity_completed` using the common
+`activity` categories `command`, `file_change`, `mcp_call`, `web_search`,
+`plan_update`, `status_update`, `tool_call`, and `unknown`. For example, Claude
+`Bash` and Codex `command_execution` both become `command`. Completion has a
+`status` of `succeeded`, `failed`, `cancelled`, or `unknown`; absent native status
+is not invented. Starts or completion may be absent when the provider does not
+report them. Activity and message counts describe observed events, not equivalent
+units of work across providers. Assistant content is not counted as activity.
 
 Every JSONL record has `schema_version: 1`, a fresh UUID `run_id`, a monotonically
 increasing `seq`, Unix `timestamp_ms`, `elapsed_ms`, `provider`, and `event`.
-Available fields include native `session_id`, child `pid`/Unix `pgid`, item IDs,
-tool names, tool durations and counters, message byte counts, and `idle_ms`.
+Available fields include native `session_id`, child `pid`/Unix `pgid`,
+`activity_id`, tool names, `activity_duration_ms`, activity counters, message
+byte counts, and `idle_ms`.
 `run_finished` includes status, exit code, error kind, usage, and available cost.
 Its `scope: "execution"` describes the normalized execution outcome before final
 stdout delivery; a later stdout write failure can independently make Due exit 1.
@@ -141,7 +183,8 @@ due run --provider codex -p "Review this" -- -c 'model_reasoning_effort="xhigh"'
 Due reserves prompt transport, output format/final-message destination, cwd,
 session selection, persistence, help, and version controls. Use shared options for
 those operations. Native model/effort options conflict only when their shared
-equivalent was explicitly supplied. Checks cover aliases, attached short values,
+equivalent was explicitly supplied. The same rule applies to common `--schema`
+versus Claude `--json-schema` or Codex `--output-schema`. Checks cover aliases, attached short values,
 `--flag=value`, and Codex `-c`/`--config` overrides, including quoted TOML keys.
 
 Passthrough accepts options, not another prompt or command. A second `--`, a bare
@@ -180,6 +223,7 @@ argument syntax errors go to stderr with exit code 2.
   "provider": "codex",
   "status": "succeeded",
   "text": "The final answer",
+  "structured_output": null,
   "session_id": "native-thread-id",
   "usage": null,
   "cost_usd": null,
@@ -193,6 +237,16 @@ add `invocation` with `binary`, `cwd`, `args`, and `stdin_bytes`. Errors contain
 `kind`, `message`, and nullable `provider_exit_code`. Runtime failures retain
 available session, cost, and partial-text data; availability depends on what the
 provider and wrapper returned.
+
+Error kinds are `invalid_input`, `authentication`, `max_turns`, `max_budget`,
+`configuration`, `session_not_found`, `unsupported`, `provider`, `protocol`, `io`,
+`timeout`, `cancelled`, and `not_found`. Typed wrapper failures and verified
+native error codes supply these categories; unrecognized native failures remain
+`provider`. No message parsing is added by Due. `unsupported` covers a reported
+unsupported CLI version. Provider error categories still exit 1; callers can
+inspect `error.kind` for recovery decisions without parsing prose. Partial
+metadata is retained whenever the wrapper makes it available; some classified
+buffered Claude errors expose only session and cost.
 
 Usage fields are nullable native counters: `input_tokens`, `cached_input_tokens`,
 `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, and
@@ -227,7 +281,11 @@ remains one noninteractive turn; no interactive UI, response streaming, schedule
 provider authentication flow is included.
 
 The implementation uses Clap, one shared request/result contract, and separate
-provider adapters over the existing wrappers' cancellable execution APIs.
+provider adapters over the existing wrappers' cancellable execution APIs. Its
+scope is one invocation, one provider run, one result, and optional observation.
+Shared features translate provider differences or improve execution reliability;
+agent lifetimes, queues, automatic retries, context catalogs, configuration
+hierarchies, and repository management belong to the caller.
 
 Next planned extension: a thin [agent plugin](https://agent-plugins.org) exposing
 Due's single-run operation for subagent delegation.

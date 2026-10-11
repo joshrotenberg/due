@@ -110,6 +110,7 @@ fn claude_conflict(run: &RunArgs, name: &str, token: &str) -> Option<&'static st
         "--help" | "--version" => Some("does not run a model turn"),
         "--model" if run.model.is_some() => Some("conflicts with --model"),
         "--effort" if run.effort.is_some() => Some("conflicts with --effort"),
+        "--json-schema" if run.schema.is_some() => Some("conflicts with --schema"),
         _ => {
             if !token.starts_with("--") {
                 for letter in token[1..].chars() {
@@ -137,6 +138,7 @@ fn codex_conflict(run: &RunArgs, name: &str, token: &str) -> Option<&'static str
         }
         "--help" | "--version" => Some("does not run a model turn"),
         "--model" if run.model.is_some() => Some("conflicts with --model"),
+        "--output-schema" if run.schema.is_some() => Some("conflicts with --schema"),
         "--cd" => Some("is reserved; use --cwd before --"),
         _ => {
             if token.starts_with("--") || !token.starts_with('-') {
@@ -245,6 +247,7 @@ fn check_config(run: &RunArgs, value: &str) -> Result<(), RunError> {
         let conflict = match key.as_str() {
             "model" => run.model.is_some(),
             "model_reasoning_effort" => run.effort.is_some(),
+            "output_schema" | "json_schema" => run.schema.is_some(),
             "cwd" => true,
             "prompt"
             | "input_format"

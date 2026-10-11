@@ -541,7 +541,14 @@ fn classified_claude_failures_preserve_native_exit_code_and_cap_metadata() {
         }
         let output = run(&mut command);
         let value = json(&output, 1, "failed");
-        assert_eq!(value["error"]["kind"], "provider");
+        assert_eq!(
+            value["error"]["kind"],
+            if mode == "auth" {
+                "authentication"
+            } else {
+                mode
+            }
+        );
         if mode == "auth" {
             assert_eq!(value["error"]["provider_exit_code"], 3);
             assert!(
@@ -558,6 +565,23 @@ fn classified_claude_failures_preserve_native_exit_code_and_cap_metadata() {
                 if mode == "max_turns" { 0.08 } else { 0.1273986 }
             );
         }
+    }
+}
+
+#[test]
+fn codex_classified_failures_use_shared_error_categories() {
+    for (mode, kind) in [
+        ("codex_auth", "authentication"),
+        ("codex_config", "configuration"),
+        ("codex_session", "session_not_found"),
+    ] {
+        let fixture = Fixture::new("codex");
+        let output = run(fixture
+            .command(mode)
+            .args(["--prompt", "x", "--output", "json"]));
+        let value = json(&output, 1, "failed");
+        assert_eq!(value["error"]["kind"], kind);
+        assert_eq!(value["error"]["provider_exit_code"], 3);
     }
 }
 

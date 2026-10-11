@@ -97,6 +97,10 @@ pub struct RunArgs {
     #[arg(long, value_enum, default_value = "text")]
     pub output: Output,
 
+    /// Request a structured answer using this JSON Schema file.
+    #[arg(long, value_name = "FILE")]
+    pub schema: Option<PathBuf>,
+
     /// Continue this provider's native session/thread ID with the prompt.
     #[arg(long, value_name = "ID", conflicts_with = "ephemeral", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     pub resume: Option<String>,

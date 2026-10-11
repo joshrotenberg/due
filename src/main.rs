@@ -1,6 +1,7 @@
 mod cli;
 mod providers;
 mod result;
+mod schema;
 mod telemetry;
 mod validate;
 

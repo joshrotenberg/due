@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tracing::{
     Subscriber,
@@ -29,6 +30,29 @@ use crate::{
 
 const TARGET: &str = "due::progress";
 const QUEUE_CAPACITY: usize = 1024;
+
+/// Categories describe observed native activity, not equal units of work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    Command,
+    FileChange,
+    McpCall,
+    WebSearch,
+    PlanUpdate,
+    StatusUpdate,
+    ToolCall,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityStatus {
+    Succeeded,
+    Failed,
+    Cancelled,
+    Unknown,
+}
 
 /// The sole source of trace records. Native payloads never enter this API.
 #[derive(Clone, Default)]
@@ -49,11 +73,11 @@ struct State {
     session: Option<String>,
     pid: Option<u32>,
     pgid: Option<u32>,
-    tools_started: u64,
-    tools_completed: u64,
-    tools_failed: u64,
+    activities_started: u64,
+    activities_completed: u64,
+    activities_failed: u64,
     messages: u64,
-    active_tools: HashMap<String, Instant>,
+    active_activities: HashMap<String, Instant>,
 }
 
 enum Message {
@@ -140,11 +164,11 @@ pub fn start(run: &RunArgs) -> Result<(Progress, Option<TraceGuard>), RunError> 
             session: None,
             pid: None,
             pgid: None,
-            tools_started: 0,
-            tools_completed: 0,
-            tools_failed: 0,
+            activities_started: 0,
+            activities_completed: 0,
+            activities_failed: 0,
             messages: 0,
-            active_tools: HashMap::new(),
+            active_activities: HashMap::new(),
         }),
         dropped: Arc::clone(&dropped),
     })));
@@ -207,42 +231,39 @@ impl Progress {
         self.emit(event, true, |_, _| ());
     }
 
-    pub fn item(
+    pub fn activity_started(&self, id: Option<&str>, kind: ActivityKind, tool: Option<&str>) {
+        self.emit("activity_started", true, |state, fields| {
+            activity_fields(fields, id, kind, tool);
+            state.activities_started += 1;
+            if let Some(id) = id
+                && state.active_activities.len() < 1024
+            {
+                state
+                    .active_activities
+                    .insert(identifier(id), Instant::now());
+            }
+        });
+    }
+
+    pub fn activity_completed(
         &self,
-        event: &'static str,
         id: Option<&str>,
-        kind: &'static str,
+        kind: ActivityKind,
+        status: ActivityStatus,
         tool: Option<&str>,
     ) {
-        self.emit(event, true, |state, fields| {
-            fields.insert("kind".into(), json!(kind));
-            if let Some(id) = id {
-                fields.insert("item_id".into(), json!(identifier(id)));
+        self.emit("activity_completed", true, |state, fields| {
+            activity_fields(fields, id, kind, tool);
+            fields.insert("status".into(), json!(status));
+            state.activities_completed += 1;
+            if status == ActivityStatus::Failed {
+                state.activities_failed += 1;
             }
-            if let Some(tool) = tool {
-                fields.insert("tool".into(), json!(identifier(tool)));
-            }
-            match event {
-                "tool_started" => {
-                    state.tools_started += 1;
-                    if let Some(id) = id
-                        && state.active_tools.len() < 1024
-                    {
-                        state.active_tools.insert(identifier(id), Instant::now());
-                    }
-                }
-                "tool_completed" | "tool_failed" => {
-                    state.tools_completed += 1;
-                    if event == "tool_failed" {
-                        state.tools_failed += 1;
-                    }
-                    if let Some(start) =
-                        id.and_then(|id| state.active_tools.remove(&identifier(id)))
-                    {
-                        fields.insert("tool_duration_ms".into(), json!(millis(start.elapsed())));
-                    }
-                }
-                _ => (),
+            if let Some(start) = id.and_then(|id| state.active_activities.remove(&identifier(id))) {
+                fields.insert(
+                    "activity_duration_ms".into(),
+                    json!(millis(start.elapsed())),
+                );
             }
         });
     }
@@ -323,9 +344,12 @@ impl Progress {
             "idle_ms".into(),
             json!(millis(now.duration_since(state.last_activity))),
         );
-        fields.insert("tools_started".into(), json!(state.tools_started));
-        fields.insert("tools_completed".into(), json!(state.tools_completed));
-        fields.insert("tools_failed".into(), json!(state.tools_failed));
+        fields.insert("activities_started".into(), json!(state.activities_started));
+        fields.insert(
+            "activities_completed".into(),
+            json!(state.activities_completed),
+        );
+        fields.insert("activities_failed".into(), json!(state.activities_failed));
         fields.insert("messages".into(), json!(state.messages));
         fields.insert(
             "dropped_records".into(),
@@ -346,6 +370,21 @@ impl Progress {
         let record = Value::Object(fields).to_string();
         run.span
             .in_scope(|| tracing::info!(target: TARGET, record = record.as_str()));
+    }
+}
+
+fn activity_fields(
+    fields: &mut Map<String, Value>,
+    id: Option<&str>,
+    kind: ActivityKind,
+    tool: Option<&str>,
+) {
+    fields.insert("activity".into(), json!(kind));
+    if let Some(id) = id {
+        fields.insert("activity_id".into(), json!(identifier(id)));
+    }
+    if let Some(tool) = tool {
+        fields.insert("tool".into(), json!(identifier(tool)));
     }
 }
 
@@ -442,10 +481,10 @@ fn human_record(record: &str) -> String {
     for field in [
         "pid",
         "session_id",
-        "item_id",
-        "kind",
+        "activity_id",
+        "activity",
         "tool",
-        "tool_duration_ms",
+        "activity_duration_ms",
         "state",
         "idle_ms",
         "status",

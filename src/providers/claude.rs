@@ -1,4 +1,9 @@
-use std::{collections::HashMap, future::Future, io::ErrorKind as IoErrorKind, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    future::Future,
+    io::ErrorKind as IoErrorKind,
+    sync::Arc,
+};
 
 use claude_wrapper::streaming::{
     BlockType, PartialMessageEvent, StreamEvent, stream_query_cancellable,
@@ -10,7 +15,7 @@ use super::Context;
 use crate::{
     cli::{Effort, Provider, RunArgs},
     result::{ErrorKind, RunError, RunResult, Usage},
-    telemetry::Progress,
+    telemetry::{ActivityKind, ActivityStatus, Progress},
 };
 
 pub async fn execute<C>(
@@ -41,6 +46,9 @@ where
     }
     if run.ephemeral {
         command = command.no_session_persistence();
+    }
+    if let Some(schema) = &context.schema {
+        command = command.json_schema(schema.json());
     }
     command = command.extra_args(&run.native_args);
     if progress.enabled() {
@@ -92,6 +100,7 @@ struct StreamState {
     terminal: Option<Value>,
     session_id: Option<String>,
     active_tools: HashMap<String, String>,
+    completed_tools: VecDeque<String>,
     turn_started: bool,
 }
 
@@ -163,19 +172,7 @@ impl StreamState {
                         if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                             continue;
                         }
-                        let id = block.get("tool_use_id").and_then(Value::as_str);
-                        let name = id.and_then(|id| self.active_tools.remove(id));
-                        let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
-                        progress.item(
-                            if failed {
-                                "tool_failed"
-                            } else {
-                                "tool_completed"
-                            },
-                            id,
-                            "tool",
-                            name.as_deref().filter(|name| !name.is_empty()),
-                        );
+                        self.tool_completed(block, progress);
                     }
                 }
             }
@@ -208,18 +205,47 @@ impl StreamState {
         const MAX_ACTIVE_TOOLS: usize = 1024;
         let id = id.filter(|id| !id.is_empty());
         if let Some(id) = id {
-            if self.active_tools.contains_key(id) || self.active_tools.len() >= MAX_ACTIVE_TOOLS {
+            if self.active_tools.contains_key(id)
+                || self.completed_tools.iter().any(|completed| completed == id)
+                || self.active_tools.len() >= MAX_ACTIVE_TOOLS
+            {
                 return;
             }
             self.active_tools
                 .insert(id.to_owned(), name.unwrap_or_default().to_owned());
         }
-        progress.item(
-            "tool_started",
+        progress.activity_started(
             id,
-            "tool",
+            activity_kind(name),
             name.filter(|name| !name.is_empty()),
         );
+    }
+
+    fn tool_completed(&mut self, block: &Value, progress: &Progress) {
+        const MAX_COMPLETED_TOOLS: usize = 1024;
+        let id = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        if let Some(id) = id {
+            if self.completed_tools.iter().any(|completed| completed == id) {
+                return;
+            }
+            if self.completed_tools.len() == MAX_COMPLETED_TOOLS {
+                self.completed_tools.pop_front();
+            }
+            self.completed_tools.push_back(id.to_owned());
+        }
+        let name = id.and_then(|id| self.active_tools.remove(id));
+        let name = name.as_deref().filter(|name| !name.is_empty());
+        // Native tool_result omits is_error on success. An unexpected field
+        // type is unknown rather than a fabricated successful completion.
+        let status = match block.get("is_error") {
+            None | Some(Value::Bool(false)) => ActivityStatus::Succeeded,
+            Some(Value::Bool(true)) => ActivityStatus::Failed,
+            Some(_) => ActivityStatus::Unknown,
+        };
+        progress.activity_completed(id, activity_kind(name), status, name);
     }
 
     fn finish(self, outcome: claude_wrapper::Result<claude_wrapper::CommandOutput>) -> RunResult {
@@ -236,21 +262,36 @@ impl StreamState {
             Err(error) => {
                 let mut failed = failure(error);
                 match terminal {
-                    Some(mut result)
-                        if !matches!(
-                            result.error.as_ref().map(|error| error.kind),
-                            Some(ErrorKind::Protocol)
-                        ) =>
-                    {
+                    Some(mut result) => {
                         // Stream callbacks own valid JSON events; the wrapper's
                         // error stdout contains only non-JSON diagnostics. Merge
                         // the retained terminal result with the process failure.
                         let mut error = failed.error.take().expect("failure carries an error");
-                        if error.kind == ErrorKind::Provider
-                            && let Some(terminal_error) = result.error.take()
+                        if let Some(terminal_error) = result.error.take()
+                            && ((error.kind == ErrorKind::Provider
+                                && terminal_error.kind != ErrorKind::Protocol)
+                                || (matches!(
+                                    terminal_error.kind,
+                                    ErrorKind::MaxTurns | ErrorKind::MaxBudget
+                                ) && matches!(
+                                    error.kind,
+                                    ErrorKind::Authentication
+                                        | ErrorKind::MaxTurns
+                                        | ErrorKind::MaxBudget
+                                )))
                         {
-                            error.message = terminal_error.message;
+                            // Buffered execution classifies explicit cap results
+                            // before stderr auth heuristics. Streaming must keep
+                            // that precedence despite its empty error stdout.
+                            let exit_code = error.provider_exit_code;
+                            error = terminal_error;
+                            error.provider_exit_code = exit_code;
                         }
+                        result.session_id = result.session_id.or(failed.session_id);
+                        result.cost_usd = result.cost_usd.or(failed.cost_usd);
+                        result.usage = result.usage.or(failed.usage);
+                        result.structured_output =
+                            result.structured_output.or(failed.structured_output);
                         result.diagnostics = failed.diagnostics;
                         result.fail(error)
                     }
@@ -262,6 +303,20 @@ impl StreamState {
             result.session_id = self.session_id;
         }
         result
+    }
+}
+
+fn activity_kind(name: Option<&str>) -> ActivityKind {
+    match name {
+        Some("Bash") => ActivityKind::Command,
+        Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => ActivityKind::FileChange,
+        Some("WebSearch" | "WebFetch") => ActivityKind::WebSearch,
+        Some("TodoWrite" | "TaskCreate" | "TaskUpdate" | "EnterPlanMode" | "ExitPlanMode") => {
+            ActivityKind::PlanUpdate
+        }
+        Some(name) if name.starts_with("mcp__") => ActivityKind::McpCall,
+        Some("") | None => ActivityKind::Unknown,
+        Some(_) => ActivityKind::ToolCall,
     }
 }
 
@@ -294,6 +349,12 @@ fn parse_document(document: &Value) -> RunResult {
             }
         },
         value => value,
+    };
+    // Preserve the native value independently of readable text, even when the
+    // terminal record reports failure or cannot otherwise be normalized.
+    let result = RunResult {
+        structured_output: value.get("structured_output").cloned(),
+        ..result
     };
     if value.get("type").and_then(Value::as_str) != Some("result")
         || value.get("is_error").and_then(Value::as_bool).is_none()
@@ -356,13 +417,15 @@ fn parse_document(document: &Value) -> RunResult {
                     result.text.clone()
                 }
             });
-        return result.fail(RunError::new(ErrorKind::Provider, message));
+        let kind = match value.get("subtype").and_then(Value::as_str) {
+            Some("error_max_turns") => ErrorKind::MaxTurns,
+            Some("error_max_budget_usd") => ErrorKind::MaxBudget,
+            _ => ErrorKind::Provider,
+        };
+        return result.fail(RunError::new(kind, message));
     }
     if result.text.is_empty() {
-        if let Some(structured) = value
-            .get("structured_output")
-            .filter(|value| !value.is_null())
-        {
+        if let Some(structured) = &result.structured_output {
             result.text = structured.to_string();
         } else if value.get("result").and_then(Value::as_str).is_none() {
             return result.fail(RunError::protocol(
@@ -388,20 +451,26 @@ fn failure(error: Error) -> RunResult {
                 Some(ErrorKind::Protocol)
             ) {
                 result = parsed;
+            } else {
+                result.structured_output = parsed.structured_output;
             }
             result.diagnostics = stderr;
-            let message = result.error.take().map(|e| e.message).unwrap_or_else(|| {
-                if result.diagnostics.trim().is_empty() {
-                    format!("Claude exited with status {exit_code}")
-                } else {
-                    result.diagnostics.trim().to_owned()
-                }
-            });
-            RunError::new(ErrorKind::Provider, message).with_exit_code(exit_code)
+            result
+                .error
+                .take()
+                .unwrap_or_else(|| {
+                    let message = if result.diagnostics.trim().is_empty() {
+                        format!("Claude exited with status {exit_code}")
+                    } else {
+                        result.diagnostics.trim().to_owned()
+                    };
+                    RunError::new(ErrorKind::Provider, message)
+                })
+                .with_exit_code(exit_code)
         }
         Error::Auth {
             message, exit_code, ..
-        } => RunError::new(ErrorKind::Provider, message).with_exit_code(exit_code),
+        } => RunError::new(ErrorKind::Authentication, message).with_exit_code(exit_code),
         Error::MaxTurnsExceeded {
             session_id,
             cost_usd,
@@ -410,7 +479,7 @@ fn failure(error: Error) -> RunResult {
         } => {
             result.session_id = session_id;
             result.cost_usd = cost_usd;
-            RunError::new(ErrorKind::Provider, "Claude reached its maximum turn count")
+            RunError::new(ErrorKind::MaxTurns, "Claude reached its maximum turn count")
                 .with_exit_code(exit_code)
         }
         Error::MaxBudgetExceeded {
@@ -421,8 +490,18 @@ fn failure(error: Error) -> RunResult {
         } => {
             result.session_id = session_id;
             result.cost_usd = cost_usd;
-            RunError::new(ErrorKind::Provider, "Claude reached its spending limit")
+            RunError::new(ErrorKind::MaxBudget, "Claude reached its spending limit")
                 .with_exit_code(exit_code)
+        }
+        Error::Json { source, .. } => RunError::protocol(format!("invalid Claude JSON: {source}")),
+        unsupported @ (Error::VersionMismatch { .. } | Error::UntestedCliVersion { .. }) => {
+            RunError::new(ErrorKind::Unsupported, unsupported.to_string())
+        }
+        configuration @ Error::DangerousNotAllowed { .. } => {
+            RunError::new(ErrorKind::Configuration, configuration.to_string())
+        }
+        budget @ Error::BudgetExceeded { .. } => {
+            RunError::new(ErrorKind::MaxBudget, budget.to_string())
         }
         Error::NotFound => RunError::new(ErrorKind::NotFound, "claude was not found on PATH"),
         Error::Timeout { timeout_seconds } => RunError::new(
@@ -522,5 +601,178 @@ mod tests {
         );
         let missing = StreamState::default().finish(Ok(output()));
         assert_eq!(missing.error.unwrap().kind, ErrorKind::Protocol);
+    }
+
+    #[test]
+    fn structured_output_is_independent_of_readable_text_and_failure() {
+        for is_error in [false, true] {
+            let native = json!({
+                "type": "result", "is_error": is_error, "result": "A readable answer",
+                "structured_output": {"answer": 42, "ok": true}
+            });
+            let result = parse_document(&native);
+            assert_eq!(result.text, "A readable answer");
+            assert_eq!(
+                result.structured_output,
+                Some(json!({"answer": 42, "ok": true}))
+            );
+            assert_eq!(result.error.is_some(), is_error);
+        }
+        let malformed = json!({
+            "type": "result", "is_error": "invalid", "structured_output": [1, 2, 3]
+        });
+        let result = StreamState {
+            terminal: Some(malformed),
+            ..StreamState::default()
+        }
+        .finish(Err(Error::Cancelled));
+        assert_eq!(result.error.unwrap().kind, ErrorKind::Cancelled);
+        assert_eq!(result.structured_output, Some(json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn explicit_structured_null_is_a_value_and_missing_output_is_a_protocol_error() {
+        let result = parse_document(&json!({
+            "type": "result", "is_error": false, "structured_output": null
+        }));
+        assert!(result.error.is_none());
+        assert_eq!(result.structured_output, Some(Value::Null));
+        assert_eq!(result.text, "null");
+        let missing = parse_document(&json!({"type": "result", "is_error": false}));
+        assert_eq!(missing.error.unwrap().kind, ErrorKind::Protocol);
+        assert!(missing.structured_output.is_none());
+    }
+
+    #[test]
+    fn native_terminal_failure_kinds_survive_buffered_and_streamed_process_failures() {
+        for (subtype, expected) in [
+            ("error_max_turns", ErrorKind::MaxTurns),
+            ("error_max_budget_usd", ErrorKind::MaxBudget),
+            ("error_during_execution", ErrorKind::Provider),
+            ("error_future_subtype", ErrorKind::Provider),
+        ] {
+            let mut native = terminal();
+            native["subtype"] = json!(subtype);
+            native["structured_output"] = json!({"partial": true});
+            let process_error = |stdout: String| Error::CommandFailed {
+                command: "unused command".into(),
+                exit_code: 9,
+                stdout,
+                stderr: "native diagnostic".into(),
+                working_dir: None,
+            };
+            let buffered = failure(process_error(native.to_string()));
+            let streamed = StreamState {
+                terminal: Some(native),
+                ..StreamState::default()
+            }
+            .finish(Err(process_error(String::new())));
+            for result in [buffered, streamed] {
+                let error = result.error.unwrap();
+                assert_eq!(error.kind, expected);
+                assert_eq!(error.provider_exit_code, Some(9));
+                assert_eq!(result.session_id.as_deref(), Some("session-1"));
+                assert_eq!(result.structured_output, Some(json!({"partial": true})));
+            }
+        }
+    }
+
+    #[test]
+    fn wrapper_typed_errors_keep_their_categories() {
+        for (stdout, stderr, expected) in [
+            (
+                r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#,
+                "",
+                ErrorKind::MaxTurns,
+            ),
+            (
+                r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true}"#,
+                "",
+                ErrorKind::MaxBudget,
+            ),
+            (
+                "",
+                "Not logged in. Please run /login",
+                ErrorKind::Authentication,
+            ),
+        ] {
+            let error = Error::from_command_failure(
+                "unused command".into(),
+                1,
+                stdout.into(),
+                stderr.into(),
+                None,
+            );
+            let result = failure(error);
+            let error = result.error.unwrap();
+            assert_eq!(error.kind, expected);
+            assert_eq!(error.provider_exit_code, Some(1));
+        }
+    }
+
+    #[test]
+    fn explicit_streamed_cap_result_precedes_auth_like_stderr() {
+        let mut native = terminal();
+        native["subtype"] = json!("error_max_turns");
+        let state = StreamState {
+            terminal: Some(native),
+            ..StreamState::default()
+        };
+        let error = Error::from_command_failure(
+            "unused command".into(),
+            1,
+            String::new(),
+            "Not logged in. Please run /login".into(),
+            None,
+        );
+        assert!(matches!(error, Error::Auth { .. }));
+        let result = state.finish(Err(error));
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, ErrorKind::MaxTurns);
+        assert_eq!(error.provider_exit_code, Some(1));
+        assert_eq!(result.session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn partial_terminal_does_not_erase_metadata_carried_by_a_typed_failure() {
+        let state = StreamState {
+            terminal: Some(json!({
+                "type": "result", "subtype": "error_max_budget_usd", "is_error": true
+            })),
+            ..StreamState::default()
+        };
+        let error = Error::from_command_failure(
+            "unused command".into(),
+            1,
+            json!({
+                "type": "result", "subtype": "error_max_budget_usd", "is_error": true,
+                "session_id": "session-carried-by-error", "total_cost_usd": 0.25
+            })
+            .to_string(),
+            String::new(),
+            None,
+        );
+        let result = state.finish(Err(error));
+        assert_eq!(result.error.unwrap().kind, ErrorKind::MaxBudget);
+        assert_eq!(
+            result.session_id.as_deref(),
+            Some("session-carried-by-error")
+        );
+        assert_eq!(result.cost_usd, Some(0.25));
+    }
+
+    #[test]
+    fn known_tool_names_share_activity_kinds_without_inspecting_inputs() {
+        for (tool, expected) in [
+            (Some("Bash"), ActivityKind::Command),
+            (Some("Edit"), ActivityKind::FileChange),
+            (Some("mcp__fixture__lookup"), ActivityKind::McpCall),
+            (Some("WebSearch"), ActivityKind::WebSearch),
+            (Some("TodoWrite"), ActivityKind::PlanUpdate),
+            (Some("MysteryFutureTool"), ActivityKind::ToolCall),
+            (None, ActivityKind::Unknown),
+        ] {
+            assert_eq!(activity_kind(tool), expected);
+        }
     }
 }
