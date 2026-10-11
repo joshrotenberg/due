@@ -135,7 +135,7 @@ due trace summarize run.jsonl --output json
 | `2` | Invalid invocation, input, or conflicting options |
 | `124` | Execution timeout |
 | `127` | Provider executable not found |
-| `130` | Cancelled by Ctrl-C |
+| `130` | Cancelled by Ctrl-C or Unix SIGTERM/SIGHUP |
 
 ## Limits
 

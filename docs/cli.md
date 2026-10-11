@@ -109,14 +109,19 @@ represent the actual invocation without lossy path conversion.
 
 Relative executable paths and PATH lookups resolve before `--cwd` changes the
 child's directory. The execution timeout starts when the provider runs, after the
-complete prompt has been read. On Unix, Ctrl-C and timeouts ask the native CLI to
-interrupt with SIGINT, while the wrappers drain its output for a two-second grace
+complete prompt has been read. On Unix, Ctrl-C, SIGTERM, SIGHUP, and timeouts ask
+the native CLI to interrupt with SIGINT, while the wrappers drain its output for a two-second grace
 period. They then force-stop the remaining owned process group and reap the direct
 child before Due returns. Shutdown may extend beyond the execution deadline.
 Native interruption lets the CLI clean up tool processes in separate groups;
 forced group termination alone cannot reach those processes. Cleanup of escaped
 processes still depends on native cooperation. Other platforms use the wrappers'
 available process cleanup. Due performs no automatic retries.
+
+Handled signals produce a cancelled result and exit 130 after cleanup; timeouts
+exit 124. SIGKILL cannot be handled and may leave provider/tool processes running.
+Prefer Due's `--timeout` to an external hard kill; the trace's pid/pgid can help
+inspect processes after an abrupt stop.
 
 ### Sessions
 
@@ -295,9 +300,10 @@ Default trace records exclude prompt text, argv, paths, model-generated text,
 reasoning, tool arguments/results, and raw diagnostics. IDs and tool names are retained
 with length/character restrictions. Due uses an explicit `tracing` target
 allowlist; `RUST_LOG=trace` does not enable dependency payload logging. With
-stderr tracing enabled, native diagnostics are suppressed to keep that channel
-safe and JSONL parseable. Use `--output json` for detailed runtime errors on
-stdout; those errors and final responses can contain provider content.
+stderr tracing enabled (text or JSON), native diagnostics and Due's error-message
+text are suppressed to keep that channel content-limited and JSONL parseable.
+The trace retains the error kind and exit code. Use `--output json` for detailed
+runtime errors on stdout; those errors and final responses can contain provider content.
 
 Use `--trace-detail` with `--trace` or `--trace-file` to include supported command,
 file/tool labels and user-facing assistant messages. Details are bounded and
@@ -448,7 +454,7 @@ is always null. `duration_ms` is Due's elapsed time, including input/setup/clean
 | `2` | Invalid invocation, input, or conflicting options |
 | `124` | Execution timeout |
 | `127` | Provider executable not found |
-| `130` | Cancelled by Ctrl-C |
+| `130` | Cancelled by Ctrl-C or Unix SIGTERM/SIGHUP |
 
 ## Scope and tests
 
@@ -462,7 +468,7 @@ cargo test --locked
 
 Tests launch fake provider executables, not models. They exercise actual argv,
 stdin, cwd, native passthrough, resume/ephemeral mapping, dry-run, final-answer
-normalization, failures, and Unix timeout/Ctrl-C descendant cleanup. Tracing tests
+normalization, failures, and Unix timeout/SIGINT/SIGTERM/SIGHUP descendant cleanup. Tracing tests
 also hold a gated fake provider mid-run to verify early event delivery, heartbeat
 behavior, content omission, sink handling, and cleanup with a blocked trace
 consumer. Protocol fixtures follow the wrappers' recorded CLI shapes. The unit of

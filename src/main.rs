@@ -66,22 +66,26 @@ async fn run_command(input: RunCommand) -> ExitCode {
                 None => RunResult::new(run.provider).fail(RunError::invalid(
                     "trace interval exceeds this platform's scheduling range",
                 )),
-                Some(heartbeat_start) => {
-                    let execution = providers::execute(&run, &prompt, &progress, async {
-                        // Await the wrappers' cancellation cleanup before reporting exit 130.
-                        let _ = tokio::signal::ctrl_c().await;
-                        progress.phase("cancel_requested");
-                    });
-                    tokio::pin!(execution);
-                    let mut heartbeat = tokio::time::interval_at(heartbeat_start, period);
-                    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    loop {
-                        tokio::select! {
-                            result = &mut execution => break result,
-                            _ = heartbeat.tick(), if progress.enabled() => progress.heartbeat(),
+                Some(heartbeat_start) => match shutdown_signal() {
+                    Err(error) => RunResult::new(run.provider)
+                        .fail(RunError::io("register shutdown signals", error)),
+                    Ok(cancel) => {
+                        let execution = providers::execute(&run, &prompt, &progress, async {
+                            // Await the wrappers' cancellation cleanup before reporting exit 130.
+                            cancel.await;
+                            progress.phase("cancel_requested");
+                        });
+                        tokio::pin!(execution);
+                        let mut heartbeat = tokio::time::interval_at(heartbeat_start, period);
+                        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        loop {
+                            tokio::select! {
+                                result = &mut execution => break result,
+                                _ = heartbeat.tick(), if progress.enabled() => progress.heartbeat(),
+                            }
                         }
                     }
-                }
+                },
             }
         }
         Err(error) => RunResult::new(run.provider).fail(error),
@@ -98,6 +102,36 @@ async fn run_command(input: RunCommand) -> ExitCode {
         &result,
         run.trace.is_none() || !progress.enabled(),
     )
+}
+
+#[cfg(unix)]
+fn shutdown_signal() -> io::Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    // Register before spawning: failure must not leave a running provider
+    // without a usable cancellation handler.
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    Ok(async move {
+        tokio::select! {
+            Some(()) = interrupt.recv() => {},
+            Some(()) = terminate.recv() => {},
+            Some(()) = hangup.recv() => {},
+            // A closed receiver is not a shutdown request.
+            else => std::future::pending::<()>().await,
+        }
+    })
+}
+
+#[cfg(windows)]
+fn shutdown_signal() -> io::Result<impl std::future::Future<Output = ()>> {
+    let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    Ok(async move {
+        if interrupt.recv().await.is_none() {
+            std::future::pending::<()>().await;
+        }
+    })
 }
 
 fn finish_output(output: Output, result: &RunResult, diagnostics: bool) -> ExitCode {

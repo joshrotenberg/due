@@ -468,10 +468,16 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
             ..
         } => {
             let parsed = parse(&stdout, output_path);
-            if !matches!(
+            if matches!(
                 parsed.error.as_ref().map(|error| error.kind),
                 Some(ErrorKind::Protocol)
             ) {
+                // A failed process can stop before its terminal event or final
+                // file. Preserve observed metadata while reporting the actual
+                // process failure, just as the streaming path does.
+                result.session_id = parsed.session_id;
+                result.usage = parsed.usage;
+            } else {
                 result = parsed;
             }
             result.diagnostics = stderr;
@@ -705,6 +711,63 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(terminal_error(&plain).kind, ErrorKind::Provider);
+    }
+
+    #[test]
+    fn process_failure_preserves_observed_metadata_without_a_complete_response() {
+        use serde_json::json;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-written.txt");
+        for completed in [false, true] {
+            let mut events = vec![json!({"type":"thread.started","thread_id":"thread-partial"})];
+            if completed {
+                events.push(json!({
+                    "type":"turn.completed",
+                    "usage":{"input_tokens":11,"output_tokens":3}
+                }));
+            }
+            let stdout = events
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let buffered = failure(
+                Error::CommandFailed {
+                    command: "unused".into(),
+                    exit_code: 7,
+                    stdout,
+                    stderr: "process interrupted".into(),
+                    working_dir: None,
+                },
+                &path,
+            );
+            let mut state = StreamState::default();
+            for event in events {
+                state.observe(serde_json::from_value(event).unwrap(), &Progress::default());
+            }
+            let streamed = state.fail(
+                Error::CommandFailed {
+                    command: "unused".into(),
+                    exit_code: 7,
+                    stdout: String::new(),
+                    stderr: "process interrupted".into(),
+                    working_dir: None,
+                },
+                &path,
+            );
+            for result in [buffered, streamed] {
+                assert_eq!(result.session_id.as_deref(), Some("thread-partial"));
+                assert_eq!(result.usage.is_some(), completed);
+                if let Some(usage) = result.usage {
+                    assert_eq!(usage.input_tokens, Some(11));
+                    assert_eq!(usage.output_tokens, Some(3));
+                }
+                let error = result.error.unwrap();
+                assert_eq!(error.kind, ErrorKind::Provider);
+                assert_eq!(error.provider_exit_code, Some(7));
+                assert_eq!(error.exit_code(), 1);
+            }
+        }
     }
 
     #[test]

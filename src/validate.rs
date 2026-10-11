@@ -190,12 +190,13 @@ fn arity(provider: Provider, name: &str) -> Arity {
             | "--setting-sources"
             | "--debug-file"
             | "--name"
+            | "--plugin-dir"
             | "--plugin-url",
         ) => Arity::One,
         (
             Provider::Claude,
             "--allowed-tools" | "--allowedTools" | "--disallowed-tools" | "--disallowedTools"
-            | "--tools" | "--add-dir" | "--mcp-config" | "--file" | "--betas" | "--plugin-dir",
+            | "--tools" | "--add-dir" | "--mcp-config" | "--file" | "--betas",
         ) => Arity::Many,
         (
             Provider::Claude,

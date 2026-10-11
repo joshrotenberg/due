@@ -742,6 +742,50 @@ fn merged_native_collisions_fail_and_replacement_or_clear_resolves_them() {
 }
 
 #[test]
+fn claude_plugin_dir_consumes_one_value_per_flag() {
+    for from_request in [false, true] {
+        for (native, accepted) in [
+            (vec!["--plugin-dir", "./a", "injected-positional"], false),
+            (vec!["--plugin-dir", "./a", "--plugin-dir", "./b"], true),
+        ] {
+            let fixture = Fixture::new("claude");
+            let mut command = fixture.command("success");
+            command.args(["--output", "json"]);
+            if from_request {
+                let path = fixture.request(&json!({
+                    "schema_version":1,"provider":"claude","prompt":"task","native_args":native
+                }));
+                command.arg("--request").arg(path);
+            } else {
+                command
+                    .args(["--provider", "claude", "--prompt", "task", "--"])
+                    .args(&native);
+            }
+            let output = run(&mut command);
+            if accepted {
+                result(&output, 0, "succeeded");
+                assert!(
+                    fixture
+                        .argv()
+                        .windows(native.len())
+                        .any(|args| args == native)
+                );
+            } else {
+                let value = result(&output, 2, "failed");
+                assert_eq!(value["error"]["kind"], "invalid_input");
+                assert!(
+                    value["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("unexpected native positional")
+                );
+                assert!(!fixture.was_spawned());
+            }
+        }
+    }
+}
+
+#[test]
 fn contradictory_cli_overrides_keep_normal_clap_errors() {
     let fixture = Fixture::new("codex");
     let path = fixture.request(&json!({"schema_version":1,"provider":"codex","prompt":"task"}));

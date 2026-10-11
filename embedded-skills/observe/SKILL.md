@@ -46,8 +46,9 @@ the provider outcome. Do not infer success or failure from missing trace records
 
 Default traces omit prompts, schemas, argv, paths, assistant text, reasoning, tool inputs,
 tool results, and raw diagnostics. They retain restricted IDs/tool names and counts.
-Stderr tracing suppresses native diagnostics; detailed errors remain in the final
-JSON result and may contain provider content. With file-only tracing, ordinary
+Stderr tracing (text or JSON) suppresses native diagnostics and Due's error-message
+text; the trace retains error kinds and exit codes. Use `--output json` for detailed
+errors, which may contain provider content. With file-only tracing, ordinary
 stderr diagnostics remain enabled, except successful Codex stderr is unavailable
 through the current wrapper streaming API.
 
@@ -75,11 +76,14 @@ status reports whether it read/parsed the log, not the recorded agent outcome.
 Malformed or oversized records fail; no partial summary is reported as complete.
 Retain the final result's delivery metadata too: a log cannot reveal every sink loss.
 
-Ctrl-C and `--timeout` await wrapper cleanup. On Unix, SIGINT asks the provider to
+Ctrl-C and `--timeout` await wrapper cleanup; Unix SIGTERM and SIGHUP use the same
+cancellation path. The provider receives SIGINT to
 stop its tool sessions; output drains during a two-second grace, followed by a
 forced kill of the remaining owned group and direct-child reaping. Detached tool
 cleanup depends on the provider's cooperation; group kill alone cannot reach it.
-Cleanup can extend beyond the deadline. Cancellation is not rollback.
+Cleanup can extend beyond the deadline. Handled signals exit 130; timeouts exit 124.
+SIGKILL cannot be handled and may leave provider/tool processes running; prefer
+`--timeout` to an external hard kill. Cancellation is not rollback.
 Inspect artifacts and authorized external effects independently after interruption
 or completion; trace events describe observations, not a verified effect inventory.
 Do not retry automatically. Use `due skills show contracts` to interpret the
