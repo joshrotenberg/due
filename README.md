@@ -12,6 +12,41 @@ due run --provider claude -p "Fix the tests" -- --max-turns 5
 due run --provider codex -p "Fix the tests" -- --sandbox workspace-write
 ```
 
+## Agent entry point and embedded skills
+
+The skills-only plugin in [`plugin/due`](plugin/due) provides one short
+[`delegate` skill](plugin/due/skills/delegate/SKILL.md). It starts an agent with
+the installed binary's help and skill catalog. The plugin requires local command
+execution, Due on PATH, and the selected provider CLI installed and authenticated.
+It follows the [Agent Plugins package format](https://agent-plugins.org/plugin-authors/build-an-agent-plugin).
+Load that directory through a compatible client's local plugin installation flow.
+The package does not install a provider or change the caller's authorization.
+
+Detailed guidance ships inside the executable, so it stays available alongside
+the installed behavior without a source checkout, provider process, or network:
+
+```sh
+due --help
+due run --help
+due skills                         # Names and short descriptions
+due skills list --output json      # Versioned catalog for automated selection
+due skills show run                # Scope, execution, and verifying effects
+due skills show contracts          # Structured answers and result semantics
+due skills show observe            # Progress, trace loss, and cancellation
+due skills show contracts --output json
+```
+
+`skills show` prints a complete Agent Skills `SKILL.md` by default. JSON catalog
+and document output include `schema_version: 1` and `cli_version`; unknown names
+return a structured `invalid_input` error and exit 2 in JSON mode. Normal argument
+syntax errors use stderr and exit 2. These commands are read-only and do not need
+a provider installation. The canonical instructions live in `embedded-skills/`
+and are included at compile time; changing them requires rebuilding the binary.
+
+The entry skill stays small; load only the detailed guide relevant to the task.
+The current contract concerns execution and returned data. Artifact and external
+side effects still require the caller's independent verification.
+
 ## Build and install
 
 Requires Rust 1.90 or newer, and whichever provider CLI you intend to use,
@@ -287,5 +322,6 @@ Shared features translate provider differences or improve execution reliability;
 agent lifetimes, queues, automatic retries, context catalogs, configuration
 hierarchies, and repository management belong to the caller.
 
-Next planned extension: a thin [agent plugin](https://agent-plugins.org) exposing
-Due's single-run operation for subagent delegation.
+The plugin and embedded skills use the same single-run operation; they add
+guidance without an MCP server or a retained agent runtime. JSON request input
+and independently observed effect receipts remain future increments.

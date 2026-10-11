@@ -495,7 +495,10 @@ mod tests {
             }
             let crate::cli::Cli {
                 command: crate::cli::Command::Run(run),
-            } = crate::cli::Cli::try_parse_from(args).unwrap();
+            } = crate::cli::Cli::try_parse_from(args).unwrap()
+            else {
+                panic!("expected run command");
+            };
             let command = Turn::new(&run, "prompt", "/tmp/final-message", Some("/tmp/schema"));
             let argv = command.args();
             let schema = argv

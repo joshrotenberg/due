@@ -2,6 +2,7 @@ mod cli;
 mod providers;
 mod result;
 mod schema;
+mod skills;
 mod telemetry;
 mod validate;
 
@@ -18,9 +19,13 @@ use result::{RunError, RunResult};
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let Cli {
-        command: Command::Run(run),
-    } = Cli::parse();
+    match Cli::parse().command {
+        Command::Run(run) => run_command(*run).await,
+        Command::Skills(args) => skills::execute(&args),
+    }
+}
+
+async fn run_command(run: RunArgs) -> ExitCode {
     let start = Instant::now();
     let (progress, guard) = match telemetry::start(&run) {
         Ok(tracing) => tracing,

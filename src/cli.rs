@@ -4,7 +4,11 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "One CLI for Claude Code and Codex")]
+#[command(
+    version,
+    about = "One CLI for Claude Code and Codex",
+    after_help = "Start with `due run --help` for execution options.\nAgents can discover bundled guidance with `due skills`."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -13,7 +17,34 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run one noninteractive turn, optionally continuing an existing session.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
+    /// Discover and read agent skills embedded in this binary; no provider is started.
+    Skills(SkillsArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  due skills\n  due skills list --output json\n  due skills show run\n  due skills show contracts\n  due skills show observe\n\nSkills are local, read-only guidance for this installed version."
+)]
+pub struct SkillsArgs {
+    /// Human-readable guidance or a versioned JSON document.
+    #[arg(long, value_enum, default_value = "text", global = true)]
+    pub output: Output,
+
+    #[command(subcommand)]
+    pub command: Option<SkillsCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillsCommand {
+    /// List available names and descriptions (also the default for `due skills`).
+    List,
+    /// Print one complete embedded SKILL.md.
+    Show {
+        /// Skill name from `due skills list`.
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
@@ -63,7 +94,10 @@ impl Effort {
 }
 
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("prompt_source").required(true).args(["prompt", "stdin"])))]
+#[command(
+    group(ArgGroup::new("prompt_source").required(true).args(["prompt", "stdin"])),
+    after_help = "Examples:\n  due run --provider claude -p 'Explain this repository'\n  due run --provider codex --stdin --output json --trace\n  due run --provider codex -p 'Summarize' --schema answer.schema.json --output json\n  due run --provider claude -p 'Fix tests' -- --max-turns 5\n\nStdout carries the final answer/result; stderr carries diagnostics or progress.\n`--output json` wraps the result; `--schema` requests structured model data.\nProvider settings and permissions apply. Native options follow `--`.\nFor agent workflows, read `due skills show run`, `contracts`, or `observe`."
+)]
 pub struct RunArgs {
     /// Provider CLI to invoke; its existing authentication and settings apply.
     #[arg(long, value_enum)]

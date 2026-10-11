@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "due",
+  "version": "0.1.0",
+  "description": "Delegate bounded coding tasks through the local Due CLI for Claude Code and Codex."
+}
