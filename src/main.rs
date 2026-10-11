@@ -59,20 +59,28 @@ async fn run_command(input: RunCommand) -> ExitCode {
     let mut result = match prepare_prompt(&run) {
         Ok(prompt) => {
             progress.prompt_ready(prompt.len());
-            let execution = providers::execute(&run, &prompt, &progress, async {
-                // Await the wrappers' cancellation cleanup before reporting exit 130.
-                let _ = tokio::signal::ctrl_c().await;
-                progress.phase("cancel_requested");
-            });
-            tokio::pin!(execution);
             let period = run.trace_interval.unwrap_or(Duration::from_secs(5));
-            let mut heartbeat =
-                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    result = &mut execution => break result,
-                    _ = heartbeat.tick(), if progress.enabled() => progress.heartbeat(),
+            // Input may have blocked since duration parsing. Check again at the
+            // actual scheduling boundary instead of overflowing Instant::add.
+            match tokio::time::Instant::now().checked_add(period) {
+                None => RunResult::new(run.provider).fail(RunError::invalid(
+                    "trace interval exceeds this platform's scheduling range",
+                )),
+                Some(heartbeat_start) => {
+                    let execution = providers::execute(&run, &prompt, &progress, async {
+                        // Await the wrappers' cancellation cleanup before reporting exit 130.
+                        let _ = tokio::signal::ctrl_c().await;
+                        progress.phase("cancel_requested");
+                    });
+                    tokio::pin!(execution);
+                    let mut heartbeat = tokio::time::interval_at(heartbeat_start, period);
+                    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            result = &mut execution => break result,
+                            _ = heartbeat.tick(), if progress.enabled() => progress.heartbeat(),
+                        }
+                    }
                 }
             }
         }
@@ -95,7 +103,7 @@ async fn run_command(input: RunCommand) -> ExitCode {
 fn finish_output(output: Output, result: &RunResult, diagnostics: bool) -> ExitCode {
     if let Err(error) = render(output, result, diagnostics) {
         if error.kind() != io::ErrorKind::BrokenPipe && diagnostics {
-            eprintln!("due: failed to write output: {error}");
+            let _ = writeln!(io::stderr().lock(), "due: failed to write output: {error}");
         }
         return ExitCode::from(1);
     }
@@ -116,22 +124,6 @@ fn prepare_prompt(run: &RunArgs) -> Result<String, RunError> {
 }
 
 fn render(output: Output, result: &RunResult, diagnostics: bool) -> io::Result<()> {
-    // Native diagnostics can contain prompt or tool content. Stderr tracing
-    // deliberately emits only safe progress; JSON stdout retains error details.
-    if diagnostics {
-        let mut stderr = io::stderr().lock();
-        if !result.diagnostics.is_empty() {
-            write!(stderr, "{}", result.diagnostics)?;
-            if !result.diagnostics.ends_with('\n') {
-                writeln!(stderr)?;
-            }
-        }
-        if let Some(error) = &result.error
-            && error.message.trim() != result.diagnostics.trim()
-        {
-            writeln!(stderr, "due: {}", error.message)?;
-        }
-    }
     let mut stdout = io::stdout().lock();
     match output {
         Output::Json => {
@@ -165,7 +157,32 @@ fn render(output: Output, result: &RunResult, diagnostics: bool) -> io::Result<(
             }
         }
     }
-    stdout.flush()
+    stdout.flush()?;
+    drop(stdout);
+    // Deliver the result independently of diagnostics: a closed stderr must
+    // neither suppress stdout nor replace the run's exit status.
+    if diagnostics {
+        let _ = write_diagnostics(result);
+    }
+    Ok(())
+}
+
+fn write_diagnostics(result: &RunResult) -> io::Result<()> {
+    // Native diagnostics can contain prompt or tool content. Stderr tracing
+    // deliberately emits only safe progress; JSON stdout retains error details.
+    let mut stderr = io::stderr().lock();
+    if !result.diagnostics.is_empty() {
+        write!(stderr, "{}", result.diagnostics)?;
+        if !result.diagnostics.ends_with('\n') {
+            writeln!(stderr)?;
+        }
+    }
+    if let Some(error) = &result.error
+        && error.message.trim() != result.diagnostics.trim()
+    {
+        writeln!(stderr, "due: {}", error.message)?;
+    }
+    Ok(())
 }
 
 fn shell_quote(value: &str) -> String {

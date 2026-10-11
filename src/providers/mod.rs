@@ -1,7 +1,10 @@
 mod claude;
 mod codex;
 
-use std::{future::Future, path::PathBuf};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     cli::{Provider, RunArgs},
@@ -18,6 +21,12 @@ pub struct Context {
 
 impl Context {
     pub fn resolve(run: &RunArgs) -> Result<Self, RunError> {
+        if let Some(cwd) = &run.cwd {
+            require_utf8_path(cwd, "working directory")?;
+        }
+        if let Some(binary) = &run.binary {
+            require_utf8_path(binary, "executable")?;
+        }
         let original_cwd =
             std::env::current_dir().map_err(|e| RunError::io("read current directory", e))?;
         let cwd = run
@@ -26,6 +35,7 @@ impl Context {
             .unwrap_or(&original_cwd)
             .canonicalize()
             .map_err(|e| RunError::invalid(format!("invalid working directory: {e}")))?;
+        require_utf8_path(&cwd, "working directory")?;
         if !cwd.is_dir() {
             return Err(RunError::invalid("--cwd must name a directory"));
         }
@@ -49,6 +59,7 @@ impl Context {
                 }
             }
         };
+        require_utf8_path(&binary, "executable")?;
         let schema = run.schema.as_deref().map(Schema::load).transpose()?;
         Ok(Self {
             binary,
@@ -65,6 +76,15 @@ impl Context {
             stdin_bytes: prompt.len(),
         }
     }
+}
+
+fn require_utf8_path(path: &Path, label: &str) -> Result<(), RunError> {
+    if path.to_str().is_none() {
+        return Err(RunError::invalid(format!(
+            "{label} path must contain valid UTF-8; choose a UTF-8 path"
+        )));
+    }
+    Ok(())
 }
 
 pub async fn execute<C>(run: &RunArgs, prompt: &str, progress: &Progress, cancel: C) -> RunResult

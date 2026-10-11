@@ -1,0 +1,20 @@
+{
+  "name": "due-dev",
+  "interface": {
+    "displayName": "Due (source)"
+  },
+  "plugins": [
+    {
+      "name": "due",
+      "source": {
+        "source": "local",
+        "path": "./plugin/due"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

@@ -1,4 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -226,6 +229,11 @@ pub(crate) fn parse_timeout(value: &str) -> Result<Duration, String> {
     let duration = humantime::parse_duration(value).map_err(|e| e.to_string())?;
     if duration.is_zero() {
         return Err("duration must be greater than zero".into());
+    }
+    // Duration can represent values beyond the platform's monotonic clock.
+    // Reject those before a heartbeat or native execution deadline is scheduled.
+    if Instant::now().checked_add(duration).is_none() {
+        return Err("duration exceeds this platform's scheduling range".into());
     }
     Ok(duration)
 }

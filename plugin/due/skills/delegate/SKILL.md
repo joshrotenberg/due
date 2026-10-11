@@ -25,3 +25,10 @@ must be installed on PATH; the selected provider CLI must also be available.
 
 Keep detailed procedures in the binary's guides. Use native passthrough only
 for a provider option needed by this assignment and supported by its CLI.
+
+During the source-install trial, report Due defects or confusing behavior using
+the [issue-reporting guide](https://github.com/joshrotenberg/due/blob/main/docs/dogfooding.md).
+Preserve the exit status, Due/provider versions, available source commit, and a
+minimal sanitized reproduction. Submit an issue when the user's scope authorizes
+issue filing; otherwise provide a draft. Inspect partial effects before any
+follow-up. Do not include credentials, private task content, or raw provider logs.

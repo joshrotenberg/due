@@ -1,0 +1,41 @@
+name: Dogfooding issue
+description: Report a Due defect, installation problem, or confusing documented behavior.
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Features are frozen during source dogfooding. Include a minimal reproduction.
+        Review evidence before posting; omit credentials, private task content, and raw configuration files.
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Expected and actual behavior
+      description: Include the exit status and independently observed changes, if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Build and environment
+      description: Due Git commit, due --version, resolved binary path, provider CLI version/model, OS/architecture, plugin host/version, and whether binary/plugin were refreshed.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Sanitized command/profile and synthetic prompt. Note any native passthrough options.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Result, trace summary, and checks
+      description: Relevant error fields or a small sanitized trace summary. Avoid full raw logs. Note any trace delivery loss and side effects.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround or related issue
+      description: If known. No need to rerun a mutating task solely for this report.

@@ -835,3 +835,59 @@ fn accepted_request_failures_retain_the_selected_provider() {
         }
     }
 }
+
+#[test]
+fn oversized_timeout_is_rejected_after_overlay_without_spawning() {
+    const TOO_LARGE: &str = "18446744073709551615s";
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(provider);
+        let path = fixture.request(&json!({
+            "schema_version":1,"provider":provider,"prompt":"task","timeout":TOO_LARGE
+        }));
+        let rejected = result(
+            &run(fixture
+                .command("success")
+                .arg("--request")
+                .arg(&path)
+                .args(["--output", "json", "--dry-run"])),
+            2,
+            "failed",
+        );
+        assert_eq!(rejected["error"]["kind"], "invalid_input");
+        assert!(rejected["provider"].is_null());
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("scheduling range")
+        );
+        // Only the merged timeout is semantic input: an explicit valid override wins.
+        result(
+            &run(fixture
+                .command("success")
+                .arg("--request")
+                .arg(&path)
+                .args(["--timeout", "1s", "--output", "json", "--dry-run"])),
+            0,
+            "planned",
+        );
+        let cli_error = run(fixture.command("success").args([
+            "--provider",
+            provider,
+            "--prompt",
+            "task",
+            "--timeout",
+            TOO_LARGE,
+            "--output",
+            "json",
+            "--dry-run",
+        ]));
+        assert_eq!(cli_error.status.code(), Some(2));
+        assert!(
+            cli_error.stdout.is_empty(),
+            "CLI syntax errors stay on stderr"
+        );
+        assert!(String::from_utf8_lossy(&cli_error.stderr).contains("scheduling range"));
+        assert!(!fixture.was_spawned());
+    }
+}

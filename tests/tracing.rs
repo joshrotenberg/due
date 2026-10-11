@@ -841,3 +841,27 @@ fn codex_detail_ignores_reasoning_and_unknown_content_blocks() {
     assert!(!text.contains("SECRET_REASONING_BLOCK"));
     assert!(!text.contains("SECRET_UNKNOWN_BLOCK"));
 }
+
+#[test]
+fn oversized_trace_interval_fails_before_trace_or_provider_initialization() {
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(provider);
+        let output = run(fixture
+            .command("success")
+            .args([
+                "--dry-run",
+                "--trace=json",
+                "--trace-interval",
+                "18446744073709551615s",
+                "--trace-file",
+            ])
+            .arg(fixture.trace()));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty(), "CLI syntax errors stay on stderr");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("scheduling range"));
+        assert!(!stderr.contains("panicked"));
+        assert!(!fixture.trace().exists());
+        assert!(!fixture.dir.path().join("argv").exists());
+    }
+}

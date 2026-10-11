@@ -1,9 +1,13 @@
 #![cfg(unix)]
 
 use serde_json::Value;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -78,6 +82,12 @@ fn finish(mut child: Child) -> Output {
 
 fn run(command: &mut Command) -> Output {
     finish(command.spawn().unwrap())
+}
+
+fn closed_sink() -> Stdio {
+    let (reader, writer) = UnixStream::pair().unwrap();
+    drop(reader);
+    Stdio::from(OwnedFd::from(writer))
 }
 
 fn describe(output: &Output) -> String {
@@ -630,6 +640,116 @@ fn successful_provider_stderr_is_forwarded_without_contaminating_json() {
         let value = json(&output, 0, "succeeded");
         assert_eq!(value["text"], "FINAL ANSWER");
         assert!(String::from_utf8_lossy(&output.stderr).contains("fixture progress diagnostic"));
+    }
+}
+
+#[test]
+fn closed_stderr_preserves_final_results_and_run_exit_codes() {
+    for provider in ["claude", "codex"] {
+        for (mode, code, status) in [
+            ("success_stderr", 0, "succeeded"),
+            ("nonzero_terminal", 1, "failed"),
+        ] {
+            let fixture = Fixture::new(provider);
+            let output = run(fixture
+                .command(mode)
+                .args(["--prompt", "x", "--output", "json"])
+                .stderr(closed_sink()));
+            let value = json(&output, code, status);
+            assert_eq!(value["provider"], provider);
+            if code == 0 {
+                assert_eq!(value["text"], "FINAL ANSWER");
+            } else {
+                assert_eq!(value["text"], "PARTIAL ANSWER");
+                assert_eq!(value["error"]["provider_exit_code"], 9);
+            }
+        }
+    }
+}
+
+#[test]
+fn closed_stderr_preserves_intake_error_json_and_exit_code() {
+    let root = tempfile::tempdir().unwrap();
+    let output = run(Command::new(env!("CARGO_BIN_EXE_due"))
+        .args(["run", "--request"])
+        .arg(root.path().join("missing.json"))
+        .args(["--output", "json"])
+        .stdout(Stdio::piped())
+        .stderr(closed_sink()));
+    let value = json(&output, 2, "failed");
+    assert_eq!(value["error"]["kind"], "invalid_input");
+    assert!(value["provider"].is_null());
+}
+
+#[test]
+fn stdout_failure_still_exits_one_when_stderr_is_closed() {
+    let root = tempfile::tempdir().unwrap();
+    for stdout in [
+        closed_sink(),
+        // An unconnected datagram socket fails with a non-BrokenPipe error,
+        // exercising the best-effort output-error diagnostic path too.
+        Stdio::from(OwnedFd::from(UnixDatagram::unbound().unwrap())),
+    ] {
+        let output = run(Command::new(env!("CARGO_BIN_EXE_due"))
+            .args(["run", "--request"])
+            .arg(root.path().join("missing.json"))
+            .args(["--output", "json"])
+            .stdout(stdout)
+            .stderr(closed_sink()));
+        assert_eq!(output.status.code(), Some(1), "{}", describe(&output));
+    }
+}
+
+#[test]
+fn non_utf8_invocation_paths_fail_before_planning_or_spawning() {
+    for provider in ["claude", "codex"] {
+        for field in ["--binary", "--cwd"] {
+            let fixture = Fixture::new(provider);
+            let invalid_path = fixture
+                .root
+                .path()
+                .join(OsString::from_vec(b"invalid-\xff".to_vec()));
+            for format in ["text", "json"] {
+                for dry_run in [false, true] {
+                    let mut command = Command::new(env!("CARGO_BIN_EXE_due"));
+                    command
+                        .args([
+                            "run",
+                            "--provider",
+                            provider,
+                            "--prompt",
+                            "x",
+                            "--output",
+                            format,
+                        ])
+                        .arg(field)
+                        .arg(&invalid_path)
+                        .env("DUE_TEST_DIR", fixture.root.path())
+                        .env("DUE_TEST_PROVIDER", provider)
+                        .env("DUE_TEST_MODE", "success")
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped());
+                    if field == "--cwd" {
+                        command.arg("--binary").arg(&fixture.binary);
+                    }
+                    if dry_run {
+                        command.arg("--dry-run");
+                    }
+                    let output = run(&mut command);
+                    if format == "json" {
+                        let value = json(&output, 2, "failed");
+                        assert_eq!(value["error"]["kind"], "invalid_input");
+                        assert_eq!(value["provider"], provider);
+                        assert!(value.get("invocation").is_none());
+                    } else {
+                        assert_eq!(output.status.code(), Some(2), "{}", describe(&output));
+                        assert!(output.stdout.is_empty(), "{}", describe(&output));
+                    }
+                    assert!(String::from_utf8_lossy(&output.stderr).contains("valid UTF-8"));
+                    assert!(!fixture.root.path().join("argv").exists());
+                }
+            }
+        }
     }
 }
 

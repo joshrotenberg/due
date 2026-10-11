@@ -2,5 +2,20 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "due",
   "version": "0.1.0",
-  "description": "Delegate bounded coding tasks through the local Due CLI for Claude Code and Codex."
+  "description": "Delegate bounded coding tasks through the local Due CLI for Claude Code and Codex.",
+  "author": {
+    "name": "Josh Rotenberg"
+  },
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Due",
+        "shortDescription": "Delegate with Claude or Codex",
+        "longDescription": "Run one bounded task through the locally installed Due CLI. Discover the installed help and embedded skills, preserve result contracts, and verify the actual changes.",
+        "developerName": "Josh Rotenberg",
+        "category": "Developer Tools",
+        "defaultPrompt": "Use Due to delegate a bounded task and verify the resulting changes."
+      }
+    }
+  }
 }
