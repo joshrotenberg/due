@@ -94,7 +94,7 @@ repeat waits, invalid handles and batches, null/empty containers/exact integers,
 invalid child answers, and Lua sparse/mixed/cyclic values and unavailable APIs.
 All passed. A separate before/after probe confirmed the C-loop repair below.
 
-A blind, bounded provider trial gave Claude and Codex the **same prompt and API
+A [blind, bounded provider trial](https://github.com/joshrotenberg/due/issues/18) gave Claude and Codex the **same prompt and API
 reference**. Each returned both a Lua and a Rhai script. All four scripts were
 executed unchanged against four scenarios: replacement required, no replacement,
 invalid fast answer, invalid replacement answer. All **16 executions passed**.
@@ -147,7 +147,8 @@ The restrictions and guards are choices in this embedding, not inherent limits o
 Lua or a proof of a complete hostile-code sandbox. Provider resource limits and
 permissions remain Rust/native-runner responsibilities.
 
-An intermittent **shared-host sibling-cancellation test** remains unresolved.
+An intermittent **shared-host sibling-cancellation test** remains unresolved in
+[#19](https://github.com/joshrotenberg/due/issues/19).
 The implementation worker saw one readiness timeout, and the caller reproduced
 it in a full Rhai-only suite while other probes were running. Twelve standalone
 reproductions and three repeated eight-test handle suites then passed. Subsequent
