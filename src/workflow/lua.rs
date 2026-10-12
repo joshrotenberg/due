@@ -5,8 +5,8 @@ use super::{
     host::{RunHandle, SharedHost},
 };
 use mlua::{
-    Error, Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Table, Value,
-    VmState, chunk::ChunkMode, debug::DebugEvent,
+    Error, FromLua, Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib,
+    Table, Value, VmState, chunk::ChunkMode, debug::DebugEvent,
 };
 use serde_json::Value as Json;
 use std::{
@@ -28,7 +28,7 @@ fn err(e: impl ToString) -> Error {
 fn vm() -> mlua::Result<Lua> {
     // Omit user-created coroutines and C functions that can call arbitrary Lua
     // callbacks across a non-yieldable C boundary. The host's async coroutine is
-    // the sole continuation. This makes hook suspension uncatchable by pcall.
+    // host manages every continuation. Hook suspension is uncatchable by pcall.
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
         LuaOptions::default(),
@@ -257,20 +257,50 @@ fn from_lua(lua: &Lua, value: Value, object_mt: &Table) -> mlua::Result<Json> {
 #[derive(Clone)]
 struct Adapter {
     host: SharedHost,
-    initializing: Rc<Cell<usize>>,
+    current: Rc<Cell<usize>>,
+    initializing: Rc<RefCell<HashMap<usize, usize>>>,
+    budget: Rc<Cell<u64>>,
     object_mt: Table,
 }
 impl Adapter {
+    fn host(&self) -> SharedHost {
+        self.host.in_scope(self.current.get())
+    }
+    fn stopped(&self) -> mlua::Result<()> {
+        if self.budget.get() >= INSTRUCTIONS {
+            return Err(err("Lua instruction budget exhausted"));
+        }
+        if self.host.lock().cancelled.load(Ordering::SeqCst) {
+            return Err(err("workflow stopped"));
+        }
+        Ok(())
+    }
     fn enabled(&self) -> mlua::Result<()> {
-        if self.initializing.get() > 0 {
-            return Err(err(self.host.fail(
+        if self
+            .initializing
+            .borrow()
+            .get(&self.current.get())
+            .copied()
+            .unwrap_or(0)
+            > 0
+        {
+            return Err(err(self.host().fail(
                 "effects unavailable during Lua module initialization or entry loading".into(),
             )));
         }
         Ok(())
     }
     fn json(&self, lua: &Lua, value: Value) -> mlua::Result<Json> {
-        from_lua(lua, value, &self.object_mt).map_err(|e| err(self.host.fail(e.to_string())))
+        self.checked(from_lua(lua, value, &self.object_mt))
+    }
+    fn checked<T>(&self, result: mlua::Result<T>) -> mlua::Result<T> {
+        result.map_err(|e| err(self.host().fail(e.to_string())))
+    }
+    fn text(&self, lua: &Lua, value: Value) -> mlua::Result<String> {
+        self.checked(String::from_lua(value, lua))
+    }
+    fn outcome(&self, lua: &Lua, value: &Json) -> mlua::Result<Value> {
+        self.checked(to_lua(lua, value))
     }
     fn handle(&self, value: Value) -> mlua::Result<RunHandle> {
         if let Value::UserData(u) = value
@@ -278,12 +308,12 @@ impl Adapter {
         {
             return Ok(h.clone());
         }
-        Err(err(self.host.fail("expected opaque RunHandle".into())))
+        Err(err(self.host().fail("expected opaque RunHandle".into())))
     }
     fn handles(&self, value: Value) -> mlua::Result<Vec<RunHandle>> {
         let invalid = || {
             err(self
-                .host
+                .host()
                 .fail("expected dense nonempty handle array".into()))
         };
         let Value::Table(t) = value else {
@@ -298,7 +328,7 @@ impl Adapter {
         }
         let mut count = 0;
         for pair in t.clone().pairs::<Value, Value>() {
-            let (key, _) = pair?;
+            let (key, _) = self.checked(pair)?;
             if !matches!(key, Value::Integer(i) if i > 0 && i <= len as i64) {
                 return Err(invalid());
             }
@@ -307,19 +337,198 @@ impl Adapter {
         if count != len {
             return Err(invalid());
         }
-        (1..=len).map(|i| self.handle(t.raw_get(i)?)).collect()
+        (1..=len)
+            .map(|i| self.handle(self.checked(t.raw_get(i))?))
+            .collect()
     }
+}
+// Poll-local identity, restored even when a nested composition returns Pending.
+// No thread-local state and no host-global phase mutation across await points.
+struct CurrentScope {
+    current: Rc<Cell<usize>>,
+    previous: usize,
+}
+impl CurrentScope {
+    fn enter(current: &Rc<Cell<usize>>, scope: usize) -> Self {
+        Self {
+            current: current.clone(),
+            previous: current.replace(scope),
+        }
+    }
+}
+impl Drop for CurrentScope {
+    fn drop(&mut self) {
+        self.current.set(self.previous);
+    }
+}
+struct Initializing {
+    counts: Rc<RefCell<HashMap<usize, usize>>>,
+    scope: usize,
+}
+impl Initializing {
+    fn enter(a: &Adapter) -> Self {
+        let scope = a.current.get();
+        *a.initializing.borrow_mut().entry(scope).or_default() += 1;
+        Self {
+            counts: a.initializing.clone(),
+            scope,
+        }
+    }
+}
+impl Drop for Initializing {
+    fn drop(&mut self) {
+        let mut counts = self.counts.borrow_mut();
+        let n = counts.get_mut(&self.scope).unwrap();
+        *n -= 1;
+        if *n == 0 {
+            counts.remove(&self.scope);
+        }
+    }
+}
+fn functions(value: Value) -> mlua::Result<Vec<Function>> {
+    let invalid = || err("concurrent expects a plain dense array of 1..32 functions");
+    let Value::Table(t) = value else {
+        return Err(invalid());
+    };
+    let len = t.raw_len();
+    if t.metatable().is_some() || len == 0 || len > 32 {
+        return Err(invalid());
+    }
+    let mut count = 0;
+    for pair in t.clone().pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        if !matches!(key, Value::Integer(i) if i > 0 && i <= len as i64)
+            || !matches!(value, Value::Function(_))
+        {
+            return Err(invalid());
+        }
+        count += 1;
+    }
+    if count != len {
+        return Err(invalid());
+    }
+    (1..=len).map(|i| t.raw_get(i)).collect()
+}
+// Armed from reservation through aggregate conversion. Dropping a pending Lua
+// async wrapper must not silently discard its component tree, even without jobs.
+// This guard owns no tasks: pending futures drop normally and JoinBack returns
+// any borrowed native joins to the host for outer finish.
+struct PendingGroup {
+    parent: SharedHost,
+    complete: bool,
+}
+impl Drop for PendingGroup {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.parent.abandon_group();
+        }
+    }
+}
+async fn concurrent(lua: Lua, a: Adapter, group: Value, value: Value) -> mlua::Result<Value> {
+    a.enabled()?;
+    a.stopped()?;
+    let parent = a.host();
+    let Value::String(group) = group else {
+        return Err(err(parent.fail("concurrent group must be a string".into())));
+    };
+    let functions = functions(value).map_err(|e| err(parent.fail(e.to_string())))?;
+    let group = group
+        .to_str()
+        .map_err(|e| err(parent.fail(e.to_string())))?;
+    let scopes = parent.open_scopes(&group, functions.len()).map_err(err)?;
+    let mut guard = PendingGroup {
+        parent: parent.clone(),
+        complete: false,
+    };
+    let scope_ids: Vec<_> = scopes.iter().map(SharedHost::scope_id).collect();
+    let mut pending = Vec::new();
+    for (function, host) in functions.into_iter().zip(scopes) {
+        let a = a.clone();
+        let lua = lua.clone();
+        // Construct call_async under its own identity as well as polling it.
+        let _identity = CurrentScope::enter(&a.current, host.scope_id());
+        let call = function.call_async::<MultiValue>(());
+        let future = async move {
+            let result = async {
+                let mut values = call.await?;
+                if values.len() != 1 {
+                    return Err(err(
+                        "concurrent function must return exactly one JSON value",
+                    ));
+                }
+                from_lua(&lua, values.pop_front().unwrap(), &a.object_mt)
+            }
+            .await;
+            if let Err(e) = &result {
+                host.scope_failure(format!("scope {}: {e}", host.scope_id()));
+            }
+            host.finish_scope().await.map_err(err)?;
+            result
+        };
+        pending.push(Some(Box::pin(future)));
+    }
+    let mut results = vec![Json::Null; pending.len()];
+    let mut result_bytes = 2usize;
+    // A single bounded tree of futures on one VM; Rust jobs run independently.
+    // Poll every ready sibling once per outer poll, never drive a yielded hook
+    // again here. The outer budget check runs even through nested pcall.
+    poll_fn(|cx| {
+        for (i, future) in pending.iter_mut().enumerate() {
+            if a.stopped().is_err() {
+                return Poll::Pending;
+            }
+            if let Some(f) = future {
+                let scope = scope_ids[i];
+                let _identity = CurrentScope::enter(&a.current, scope);
+                if let Poll::Ready(value) = f.as_mut().poll(cx) {
+                    let Ok(value) = value else {
+                        return Poll::Pending;
+                    };
+                    result_bytes += serde_json::to_vec(&value)
+                        .map_err(|e| err(parent.fail(e.to_string())))?
+                        .len()
+                        + 1;
+                    if result_bytes > contract::MAX_BYTES {
+                        parent.fail("concurrent results exceed 1 MiB".into());
+                        return Poll::Pending;
+                    }
+                    results[i] = value;
+                    *future = None;
+                }
+            }
+            if a.stopped().is_err() {
+                return Poll::Pending;
+            }
+        }
+        if pending.iter().all(Option::is_none) {
+            Poll::Ready(Ok::<(), Error>(()))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await?;
+    let result =
+        to_lua(&lua, &Json::Array(results)).map_err(|e| err(parent.fail(e.to_string())))?;
+    guard.complete = true;
+    Ok(result)
 }
 fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
     let due = lua.create_table()?;
+    let h = a.clone();
+    due.set(
+        "concurrent",
+        lua.create_async_function(move |lua, (group, value): (Value, Value)| {
+            concurrent(lua, h.clone(), group, value)
+        })?,
+    )?;
     let h = a.clone();
     due.set(
         "start",
         lua.create_function(move |lua, value: Value| {
             h.enabled()?;
             let job = h.json(lua, value)?;
-            let handle = h.host.start("run", vec![job]).map_err(err)?.remove(0);
-            lua.create_userdata(handle)
+            let handle = h.host().start("run", vec![job]).map_err(err)?.remove(0);
+            h.checked(lua.create_userdata(handle))
         })?,
     )?;
     for op in ["wait", "cancel", "wait_any", "run"] {
@@ -333,15 +542,15 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
                     let outcome = match op {
                         "run" => {
                             let job = h.json(&lua, value)?;
-                            let handle = h.host.start("run", vec![job]).map_err(err)?.remove(0);
-                            h.host.wait(handle).await
+                            let handle = h.host().start("run", vec![job]).map_err(err)?.remove(0);
+                            h.host().wait(handle).await
                         }
-                        "wait_any" => h.host.wait_any(h.handles(value)?).await,
-                        "cancel" => h.host.cancel(h.handle(value)?).await,
-                        _ => h.host.wait(h.handle(value)?).await,
+                        "wait_any" => h.host().wait_any(h.handles(value)?).await,
+                        "cancel" => h.host().cancel(h.handle(value)?).await,
+                        _ => h.host().wait(h.handle(value)?).await,
                     }
                     .map_err(err)?;
-                    to_lua(&lua, &outcome)
+                    h.outcome(&lua, &outcome)
                 }
             })?,
         )?;
@@ -349,15 +558,16 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
     let h = a.clone();
     due.set(
         "parallel",
-        lua.create_async_function(move |lua, (group, value): (String, Value)| {
+        lua.create_async_function(move |lua, (group, value): (Value, Value)| {
             let h = h.clone();
             async move {
                 h.enabled()?;
+                let group = h.text(&lua, group)?;
                 let Json::Array(jobs) = h.json(&lua, value)? else {
-                    return Err(err(h.host.fail("parallel expects array".into())));
+                    return Err(err(h.host().fail("parallel expects array".into())));
                 };
-                let value = h.host.parallel(&group, jobs).await.map_err(err)?;
-                to_lua(&lua, &value)
+                let value = h.host().parallel(&group, jobs).await.map_err(err)?;
+                h.outcome(&lua, &value)
             }
         })?,
     )?;
@@ -365,12 +575,13 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
         let h = a.clone();
         due.set(
             op,
-            lua.create_function(move |_, text: String| {
+            lua.create_function(move |lua, text: Value| {
                 h.enabled()?;
+                let text = h.text(lua, text)?;
                 if op == "phase" {
-                    h.host.phase(&text)
+                    h.host().phase(&text)
                 } else {
-                    h.host.log(&text)
+                    h.host().log(&text)
                 }
                 .map_err(err)
             })?,
@@ -420,23 +631,49 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
     };
     let cache = Rc::new(RefCell::new(HashMap::<String, Table>::new()));
     let loading = Rc::new(RefCell::new(HashSet::<String>::new()));
+    let module_gate = Rc::new(tokio::sync::Mutex::new(()));
     lua.globals().set(
         "require",
-        lua.create_async_function(move |lua, name: String| {
+        lua.create_async_function(move |lua, name: Value| {
             let a = a.clone();
+            let module_gate = module_gate.clone();
             let cache = cache.clone();
             let loading = loading.clone();
-            let source = modules.get(&name).cloned();
-            let filename = names.get(&name).cloned();
+            let name = String::from_lua(name, &lua);
+            let source = name
+                .as_ref()
+                .ok()
+                .and_then(|name| modules.get(name))
+                .cloned();
+            let filename = name.as_ref().ok().and_then(|name| names.get(name)).cloned();
             async move {
-                // Legacy plain v1 Lua may recover from ordinary require errors.
+                // Only the legacy plain v1 root may recover from ordinary
+                // require errors, including argument conversion errors.
                 // Due effects still call host.fail in enabled(), in every version.
                 let load_error = |e: Error| {
-                    if sticky_loading {
-                        err(a.host.fail(e.to_string()))
+                    if sticky_loading || a.current.get() != 0 {
+                        err(a.host().fail(e.to_string()))
                     } else {
                         e
                     }
+                };
+                let name = name.map_err(load_error)?;
+                // Serialize only uncached loading. Nested require in the same
+                // initializer reenters without locking; cycle checks still apply.
+                if let Some(module) = cache.borrow().get(&name) {
+                    return Ok(module.clone());
+                }
+                let outer = a
+                    .initializing
+                    .borrow()
+                    .get(&a.current.get())
+                    .copied()
+                    .unwrap_or(0)
+                    == 0;
+                let _gate = if outer {
+                    Some(module_gate.lock().await)
+                } else {
+                    None
                 };
                 if let Some(module) = cache.borrow().get(&name) {
                     return Ok(module.clone());
@@ -446,7 +683,7 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
                 if !loading.borrow_mut().insert(name.clone()) {
                     return Err(load_error(err("cyclic module initialization")));
                 }
-                a.initializing.set(a.initializing.get() + 1);
+                let _initializing = Initializing::enter(&a);
                 let result = async {
                     let function = compile(
                         &lua,
@@ -471,7 +708,7 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
                     Ok(module)
                 }
                 .await;
-                a.initializing.set(a.initializing.get() - 1);
+
                 loading.borrow_mut().remove(&name);
                 let module = result.map_err(load_error)?;
                 cache.borrow_mut().insert(name, module.clone());
@@ -499,13 +736,24 @@ async fn evaluate(host: SharedHost) -> mlua::Result<Json> {
     let hook_budget = budget.clone();
     let cancelled = host.lock().cancelled.clone();
     let diagnostic_host = host.clone();
-    let triggers = HookTriggers::new().every_nth_instruction(1000);
+    let current = Rc::new(Cell::new(0));
+    let hook_current = current.clone();
+    let triggers = HookTriggers::new().every_nth_instruction(1);
     let triggers = if track_locations {
         triggers.every_line()
     } else {
         triggers
     };
     lua.set_global_hook(triggers, move |_, debug| {
+        // This pinned mlua implementation chunk polls Rust futures, rather than
+        // executing workflow logic. Charging it makes quiet native waits consume
+        // the script budget. Yielding inside it can also interrupt the transition
+        // from polling a nested future to yielding its Pending sentinel, consuming
+        // the child's wake before the next poll reaches that child. Keep this
+        // private wrapper atomic; actual user/module chunks always have @ names.
+        if debug.source().source.as_deref() == Some("=__mlua_async_poll") {
+            return Ok(VmState::Continue);
+        }
         // A host-only line hook survives async wait + hook suspension and
         // tail calls, where mlua callback tracebacks may lose the caller.
         if track_locations
@@ -513,7 +761,7 @@ async fn evaluate(host: SharedHost) -> mlua::Result<Json> {
             && let (Some(source), Some(line)) = (debug.source().source, debug.current_line())
         {
             let name = source.strip_prefix('@').unwrap_or(&source);
-            let mut h = diagnostic_host.lock();
+            let h = diagnostic_host.lock();
             // Only generated chunks carry this suffix; leave ordinary Lua
             // filenames alone (including names that happen to end this way).
             let name = name
@@ -529,27 +777,50 @@ async fn evaluate(host: SharedHost) -> mlua::Result<Json> {
                 })
                 .unwrap_or(name);
             if name == h.bundle.entry_name || h.bundle.module_names.values().any(|n| n == name) {
-                h.script_location = Some(source_location(&h.bundle, name, line));
+                let location = source_location(&h.bundle, name, line);
+                // Generated epilogues can have no source-map entry. Keep the
+                // last available workflow site in this scope in that case.
+                #[cfg(feature = "workflow-fennel-spike")]
+                let fallback = h.bundle.source_maps.get(name).is_some_and(|map| {
+                    line.checked_sub(1)
+                        .and_then(|index| map.get(index))
+                        .is_none_or(Option::is_none)
+                });
+                #[cfg(not(feature = "workflow-fennel-spike"))]
+                let fallback = false;
+                drop(h);
+                diagnostic_host
+                    .in_scope(hook_current.get())
+                    .location(location, fallback);
             }
         }
         if !matches!(debug.event(), DebugEvent::Count) {
             return Ok(VmState::Continue);
         }
-        hook_budget.set(hook_budget.get() + 1000);
+        hook_budget.set(hook_budget.get() + 1);
+        if hook_budget.get() == INSTRUCTIONS {
+            diagnostic_host
+                .in_scope(hook_current.get())
+                .scope_failure("Lua instruction budget exhausted".into());
+        }
         // Always yield control to the outer future, including inside pcall.
         // That future terminates without resuming once the sticky budget trips.
-        Ok(VmState::Yield)
+        Ok(if hook_budget.get().is_multiple_of(1000) {
+            VmState::Yield
+        } else {
+            VmState::Continue
+        })
     })?;
     let object_mt = lua.create_table()?;
-    let initializing = Rc::new(Cell::new(0));
-    install(
-        &lua,
-        Adapter {
-            host: host.clone(),
-            initializing: initializing.clone(),
-            object_mt: object_mt.clone(),
-        },
-    )?;
+    let initializing = Rc::new(RefCell::new(HashMap::new()));
+    let adapter = Adapter {
+        host: host.clone(),
+        initializing: initializing.clone(),
+        object_mt: object_mt.clone(),
+        current,
+        budget: budget.clone(),
+    };
+    install(&lua, adapter.clone())?;
     let (entry, input, name, version) = {
         let h = host.lock();
         (
@@ -565,9 +836,9 @@ async fn evaluate(host: SharedHost) -> mlua::Result<Json> {
         if version == 1 {
             return function.call_async::<Value>(()).await;
         }
-        initializing.set(1);
+        let loading = Initializing::enter(&adapter);
         let entry = function.call_async::<Value>(()).await;
-        initializing.set(0);
+        drop(loading);
         let entry = entry.map_err(|e| err(host.fail(e.to_string())))?;
         if let Some(error) = host.lock().fatal_cause() {
             return Err(err(error));
@@ -603,7 +874,15 @@ async fn evaluate(host: SharedHost) -> mlua::Result<Json> {
     from_lua(&lua, value, &object_mt)
 }
 pub async fn run(host: SharedHost) -> Result<Json, String> {
-    evaluate(host).await.map_err(|e| e.to_string())
+    let result = evaluate(host.clone()).await;
+    result.map_err(|e| {
+        // Signals stay cause-less for the outer invocation's cancelled receipt.
+        if host.lock().cancelled.load(Ordering::SeqCst) {
+            e.to_string()
+        } else {
+            host.scope_failure(e.to_string())
+        }
+    })
 }
 
 fn source_location(bundle: &Bundle, name: &str, line: usize) -> String {
@@ -665,11 +944,105 @@ pub fn map_error(bundle: &Bundle, error: &str) -> String {
     error.to_owned()
 }
 
-#[cfg(all(test, feature = "workflow-fennel-spike"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn abandoned_pending_group_is_sticky_without_jobs_and_preserves_existing_stop() {
+        for stop in ["none", "signal", "earlier"] {
+            let (host, dir) = super::super::host::tests::fixture();
+            let lua = vm().unwrap();
+            let adapter = Adapter {
+                host: host.clone(),
+                current: Rc::new(Cell::new(0)),
+                initializing: Rc::new(RefCell::new(HashMap::new())),
+                budget: Rc::new(Cell::new(0)),
+                object_mt: lua.create_table().unwrap(),
+            };
+            let live = Rc::new(Cell::new(0));
+            let counted = live.clone();
+            lua.globals()
+                .set(
+                    "suspend",
+                    lua.create_async_function(move |_, ()| {
+                        let counted = counted.clone();
+                        async move {
+                            struct Live(Rc<Cell<usize>>);
+                            impl Drop for Live {
+                                fn drop(&mut self) {
+                                    self.0.set(self.0.get() - 1);
+                                }
+                            }
+                            counted.set(counted.get() + 1);
+                            let _live = Live(counted);
+                            std::future::pending::<mlua::Result<Value>>().await
+                        }
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            install(&lua, adapter.clone()).unwrap();
+            let functions: Value = lua.load("return {function() return due.concurrent('inner',{function() return suspend() end}) end}")
+                .eval().unwrap();
+            let mut future = Box::pin(concurrent(
+                lua.clone(),
+                adapter,
+                Value::String(lua.create_string("outer").unwrap()),
+                functions,
+            ));
+            poll_fn(|cx| {
+                assert!(future.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert_eq!(live.get(), 1);
+            assert!(host.lock().fatal_cause().is_none());
+            host.location("root.fnl:5".into(), false);
+            match stop {
+                "signal" => host.lock().cancelled.store(true, Ordering::SeqCst),
+                "earlier" => {
+                    host.scope_failure("original failure".into());
+                }
+                _ => (),
+            }
+            // Deterministically abandon the real Rust composition future. This
+            // models lost ownership, not an observed Lua allocator failure.
+            drop(future);
+            assert_eq!(live.get(), 0, "pending mlua child future leaked");
+            let error = host.finish(Ok(json!(true))).await.unwrap_err();
+            match stop {
+                "signal" => assert!(host.lock().fatal_cause().is_none(), "{error}"),
+                "earlier" => {
+                    assert_eq!(error, "original failure");
+                    assert_eq!(host.lock().script_location.as_deref(), Some("root.fnl:5"));
+                }
+                _ => assert!(error.contains("abandoned"), "{error}"),
+            }
+            assert!(host.lock().steps().is_empty());
+            assert!(
+                host.start(
+                    "after",
+                    vec![json!({"id":"after","profile":"none","prompt":"never"})]
+                )
+                .is_err()
+            );
+            let events: Vec<Json> = std::fs::read_to_string(dir.path().join("events"))
+                .unwrap()
+                .lines()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect();
+            let finished: Vec<_> = events
+                .iter()
+                .filter(|v| v["event"] == "scope_finished")
+                .map(|v| v["scope"]["id"].as_u64().unwrap())
+                .collect();
+            assert_eq!(finished, vec![2, 1]);
+        }
+    }
+
+    #[cfg(feature = "workflow-fennel-spike")]
     #[test]
     fn mapped_locations_require_exact_generated_chunks_and_known_map_entries() {
         let bundle = Bundle {

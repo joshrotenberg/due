@@ -1,5 +1,17 @@
 # Lua / Rhai comparison
 
+**New working direction:** the [Lua composition spike](workflow-lua-composition.md)
+on base `f1e6633` exposes bounded host-managed concurrent ordinary functions,
+including nested reuse and a Lua library pipeline used twice in isolated
+caller-supplied profiles. Rust retains native admission, capacity, ownership,
+cancellation and receipts. This makes reusable suspended functions concrete and
+supports Lua as the working direction. It is local fake-native evidence, not a
+new provider authoring trial, real-model acceptance, CI result or shipping decision.
+
+The comparison and trial results below are historical. Its one-coordinating-script
+recommendation and one-continuation limitation describe the earlier surface;
+the new capability changes that premise without changing those measured results.
+
 Follow-up: [Fennel authoring spike](workflow-fennel-spike.md) layers an optional
 pinned compiler onto the Lua candidate. The measurements and recommendations
 below describe the prior Lua comparison, not new Fennel results. Combined
@@ -14,13 +26,13 @@ among runs, while Rust owns admission, native processes, output, cancellation
 and receipts. Both languages passed the completion-driven experiment without
 turning the script into an agent runtime.
 
-For the current **one invocation, one coordinating script** product, I would
+For the then-current **one invocation, one coordinating script** product, I would
 keep Rhai as the slightly simpler candidate. Lua is a credible alternative with
 a smaller executable and genuine async suspension. This experiment does not
 justify shipping both permanently, nor inventing resumable machinery for Rhai.
 If independently suspended script functions or Lua editor tooling become central,
 revisit that choice with a prototype that actually exposes those capabilities.
-The present Lua surface deliberately exposes only one host-managed continuation.
+That earlier Lua surface deliberately exposed only one host-managed continuation.
 
 ## What was compared
 
@@ -54,8 +66,8 @@ languages. Its scheduling improvements are not evidence that Lua is better.
 | Build | Rust interpreter | Vendored Lua 5.4.9 C runtime through `mlua` 0.12.2; no user-installed Lua |
 | Embedding work | Reserved bindings use Rhai's pinned AST API (`internals` feature) | Strict data conversion, coroutine visibility, C-loop bounds and library restrictions |
 
-Neither language is categorically richer. The Lua implementation proves real
-async waiting, not a scheduler for numerous independently suspended workflows.
+Neither language is categorically richer. The earlier Lua implementation proved real
+async waiting, without numerous independently suspended workflow functions.
 Its coroutine library, xpcall, callback-based sorting/substitution, C pattern
 matching, loaders and filesystem/OS APIs are intentionally unavailable. Ordinary
 Lua functions and closures remain. Rhai uses its normal parser, including string

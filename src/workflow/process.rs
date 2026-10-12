@@ -46,6 +46,7 @@ pub fn save(path: &Path, value: &Value) -> Result<(), String> {
 }
 
 pub struct Launch {
+    pub scope: Value,
     pub dir: PathBuf,
     pub request: Value,
     pub binary: PathBuf,
@@ -172,7 +173,7 @@ pub async fn run(launch: Launch, stop: Stop, local: Arc<AtomicBool>) -> Collecte
     }
     if let Err(e) = save(
         &launch.dir.join("exit.json"),
-        &json!({"exit":result.exit,"error":result.error}),
+        &json!({"exit":result.exit,"error":result.error,"scope":launch.scope}),
     ) {
         stop.fail(e.clone());
         result.stop_cause.get_or_insert(e.clone());
@@ -212,7 +213,9 @@ async fn run_inner(
     let pid = child.id().ok_or_else(|| "child has no PID".to_string())?;
     collected.exit = json!({"started":true,"pid":pid,"code":null,"signal":null});
     // Persist identity while the child is still running, including interrupted runs.
-    let start_error = save(&launch.dir.join("started.json"), &collected.exit).err();
+    let mut started = collected.exit.clone();
+    started["scope"] = launch.scope.clone();
+    let start_error = save(&launch.dir.join("started.json"), &started).err();
     if let Some(error) = &start_error {
         stop.fail(error.clone());
     }

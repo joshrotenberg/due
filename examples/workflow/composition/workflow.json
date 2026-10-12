@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "entry": "main.lua",
+  "input_schema": "input.schema.json",
+  "output_schema": "output.schema.json",
+  "max_runs": 7,
+  "max_concurrency": 2,
+  "profiles": {
+    "workspace_a": {"request": {"schema_version": 1, "provider": "codex", "cwd": "workspace-a", "schema": "answer.schema.json", "native_args": ["--sandbox", "workspace-write"]}},
+    "workspace_b": {"request": {"schema_version": 1, "provider": "codex", "cwd": "workspace-b", "schema": "answer.schema.json", "native_args": ["--sandbox", "workspace-write"]}},
+    "synthesizer": {"request": {"schema_version": 1, "provider": "codex", "cwd": ".", "schema": "answer.schema.json", "native_args": ["--sandbox", "read-only"]}}
+  },
+  "modules": {"local/pipeline": "pipeline.lua"}
+}

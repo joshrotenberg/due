@@ -38,7 +38,20 @@ struct Job {
     profile: String,
     prompt: String,
 }
+struct Scope {
+    parent: Option<usize>,
+    group: String,
+    component: usize,
+    #[cfg(feature = "workflow-lua-spike")]
+    depth: usize,
+    phase: String,
+    #[cfg(feature = "workflow-lua-spike")]
+    closed: bool,
+    #[cfg(feature = "workflow-lua-spike")]
+    location: Option<String>,
+}
 struct Run {
+    scope: usize,
     job: Job,
     group: String,
     phase: String,
@@ -54,7 +67,7 @@ pub struct Host {
     event_bytes: usize,
     event_count: usize,
     id: String,
-    phase: String,
+    scopes: Vec<Scope>,
     used: HashSet<String>,
     runs: Vec<Run>,
     tasks: Vec<(usize, JoinHandle<()>)>,
@@ -66,6 +79,7 @@ pub struct Host {
 }
 #[derive(Clone)]
 pub struct SharedHost {
+    scope: usize,
     state: Arc<Mutex<Host>>,
     changed: Arc<Notify>,
 }
@@ -78,6 +92,7 @@ impl SharedHost {
         cancelled: Arc<AtomicBool>,
     ) -> Self {
         Self {
+            scope: 0,
             state: Arc::new(Mutex::new(Host {
                 bundle,
                 #[cfg(feature = "workflow-lua-spike")]
@@ -87,7 +102,18 @@ impl SharedHost {
                 event_bytes: 0,
                 event_count: 0,
                 id,
-                phase: String::new(),
+                scopes: vec![Scope {
+                    parent: None,
+                    group: "root".into(),
+                    component: 0,
+                    #[cfg(feature = "workflow-lua-spike")]
+                    depth: 0,
+                    phase: String::new(),
+                    #[cfg(feature = "workflow-lua-spike")]
+                    closed: false,
+                    #[cfg(feature = "workflow-lua-spike")]
+                    location: None,
+                }],
                 used: HashSet::new(),
                 runs: vec![],
                 tasks: vec![],
@@ -100,11 +126,120 @@ impl SharedHost {
             changed: Arc::new(Notify::new()),
         }
     }
+    #[cfg(feature = "workflow-lua-spike")]
+    pub fn in_scope(&self, scope: usize) -> Self {
+        Self {
+            scope,
+            ..self.clone()
+        }
+    }
+    #[cfg(feature = "workflow-lua-spike")]
+    pub fn scope_id(&self) -> usize {
+        self.scope
+    }
+    #[cfg(feature = "workflow-lua-spike")]
+    pub fn location(&self, location: String, fallback: bool) {
+        let mut h = self.lock();
+        let site = &mut h.scopes[self.scope].location;
+        if !fallback || site.is_none() {
+            *site = Some(location);
+        }
+    }
+    #[cfg(feature = "workflow-lua-spike")]
+    pub fn scope_failure(&self, error: String) -> String {
+        let mut h = self.lock();
+        h.fail_at(self.scope, error)
+    }
+    #[cfg(feature = "workflow-lua-spike")]
+    pub fn abandon_group(&self) {
+        let mut h = self.lock();
+        // A dropped future during signal/collector shutdown is cleanup, not a
+        // new failure. In particular, signals must keep their cause-less status.
+        if !h.cancelled.load(Ordering::SeqCst) {
+            h.fail_at(
+                self.scope,
+                "concurrent group abandoned before completion".into(),
+            );
+        }
+        self.changed.notify_waiters();
+    }
+    #[cfg(feature = "workflow-lua-spike")]
+    pub fn open_scopes(&self, group: &str, count: usize) -> Result<Vec<Self>, String> {
+        self.effect(|h| {
+            bundle::name(group)?;
+            let depth = h.scopes[self.scope].depth + 1;
+            if count == 0 || count > 32 {
+                return Err("concurrent requires 1..32 functions".into());
+            }
+            if depth > 8 {
+                return Err("concurrent depth exceeds 8".into());
+            }
+            if h.scopes.len() - 1 + count > 256 {
+                return Err("total continuations exceed 256".into());
+            }
+            if h.scopes.iter().skip(1).filter(|s| !s.closed).count() + count > 64 {
+                return Err("active continuations exceed 64".into());
+            }
+            let mut result = Vec::new();
+            for component in 1..=count {
+                let scope = h.scopes.len();
+                h.scopes.push(Scope {
+                    parent: Some(self.scope),
+                    group: group.into(),
+                    component,
+                    depth,
+                    phase: String::new(),
+                    closed: false,
+                    location: None,
+                });
+                h.scope_event(scope, "scope_started", json!({}))?;
+                result.push(self.in_scope(scope));
+            }
+            Ok(result)
+        })
+    }
+    #[cfg(feature = "workflow-lua-spike")]
+    pub async fn finish_scope(&self) -> Result<(), String> {
+        {
+            let mut h = self.lock();
+            if !h.cancelled.load(Ordering::SeqCst) {
+                if h.has_open_descendants(self.scope) {
+                    h.fail_at(
+                        self.scope,
+                        format!(
+                            "scope {} returned with unclosed descendant components",
+                            self.scope
+                        ),
+                    );
+                } else if h
+                    .runs
+                    .iter()
+                    .any(|r| r.scope == self.scope && r.outcome.is_none())
+                {
+                    h.fail_at(
+                        self.scope,
+                        format!(
+                            "scope {} returned with outstanding jobs; cancelling and joining",
+                            self.scope
+                        ),
+                    );
+                }
+            }
+            // On failure, outer finish owns all joins and descendant-first
+            // closure. A parent must not finish while its descendants are live.
+            h.running()?;
+        }
+        self.join_scope(Some(self.scope)).await;
+        let mut h = self.lock();
+        h.running()?;
+        h.close_scope(self.scope);
+        h.running()
+    }
     pub fn lock(&self) -> MutexGuard<'_, Host> {
         self.state.lock().expect("workflow host lock")
     }
     pub fn fail(&self, error: String) -> String {
-        self.lock().fail(error)
+        self.lock().fail_at(self.scope, error)
     }
     pub fn effect<T>(
         &self,
@@ -112,15 +247,15 @@ impl SharedHost {
     ) -> Result<T, String> {
         let mut h = self.lock();
         h.running()?;
-        action(&mut h).map_err(|e| h.fail(e))
+        action(&mut h).map_err(|e| h.fail_at(self.scope, e))
     }
     pub fn phase(&self, phase: &str) -> Result<(), String> {
         self.effect(|h| {
             if phase.len() > 256 {
                 return Err("phase exceeds 256 bytes".into());
             }
-            h.phase = phase.into();
-            h.event("phase", json!({}))
+            h.scopes[self.scope].phase = phase.into();
+            h.scope_event(self.scope, "phase", json!({}))
         })
     }
     pub fn log(&self, message: &str) -> Result<(), String> {
@@ -128,7 +263,7 @@ impl SharedHost {
             if message.len() > 4096 {
                 return Err("log exceeds 4096 bytes".into());
             }
-            h.event("log", json!({"message":message}))
+            h.scope_event(self.scope, "log", json!({"message":message}))
         })
     }
     pub fn start(&self, group: &str, values: Vec<Value>) -> Result<Vec<RunHandle>, String> {
@@ -158,15 +293,16 @@ impl SharedHost {
             }
             Ok(jobs)
         })();
-        let jobs = validated.map_err(|e| h.fail(e))?;
+        let jobs = validated.map_err(|e| h.fail_at(self.scope, e))?;
         // Register the ENTIRE reservation before any fallible receipt or launch.
         let first = h.runs.len();
         for job in jobs {
             h.used.insert(job.id.clone());
             let index = h.runs.len();
             h.pending.insert(index);
-            let phase = h.phase.clone();
+            let phase = h.scopes[self.scope].phase.clone();
             h.runs.push(Run {
+                scope: self.scope,
                 job,
                 group: group.into(),
                 phase,
@@ -182,9 +318,9 @@ impl SharedHost {
             });
             let run = &h.runs[index];
             let dir = h.artifacts.join("steps").join(&run.job.id);
-            let setup = process::private_dir(&dir).and_then(|_| process::save(&dir.join("admitted.json"), &json!({"id":run.job.id,"profile":run.job.profile,"group":run.group,"phase":run.phase})));
+            let setup = process::private_dir(&dir).and_then(|_| process::save(&dir.join("admitted.json"), &json!({"id":run.job.id,"profile":run.job.profile,"group":run.group,"phase":run.phase,"scope":h.identity(run.scope)})));
             let fields = json!({"step_id":run.job.id,"profile":run.job.profile,"group":run.group});
-            let setup = setup.and_then(|_| h.event("admitted", fields));
+            let setup = setup.and_then(|_| h.scope_event(self.scope, "admitted", fields));
             if let Err(error) = &setup {
                 h.fail(error.clone());
             }
@@ -198,6 +334,7 @@ impl SharedHost {
             );
             request["prompt"] = json!(run.job.prompt);
             let launch = process::Launch {
+                scope: h.identity(run.scope),
                 dir,
                 request,
                 binary: profile.binary.clone(),
@@ -271,6 +408,9 @@ impl SharedHost {
             let mut seen = HashSet::new();
             for handle in handles {
                 let index = handle.checked_index(&h.id, h.runs.len())?;
+                if h.runs[index].scope != self.scope {
+                    return Err("run handle belongs to another function scope".into());
+                }
                 if !seen.insert(index) {
                     return Err("duplicate run handle".into());
                 }
@@ -324,23 +464,31 @@ impl SharedHost {
             // "stopped" error, or the outstanding-work policy, can mask it.
             if !h.cancelled.load(Ordering::SeqCst) {
                 if let Err(e) = &evaluated {
-                    h.fail(e.clone());
+                    h.fail_at(self.scope, e.clone());
+                }
+                #[cfg(feature = "workflow-lua-spike")]
+                if h.scopes.iter().skip(1).any(|s| !s.closed) {
+                    h.fail_at(
+                        self.scope,
+                        "script returned with unclosed components".into(),
+                    );
                 }
                 if h.runs.iter().any(|r| r.outcome.is_none()) {
-                    h.fail("script returned with outstanding jobs; cancelling and joining".into());
+                    h.fail_at(
+                        self.scope,
+                        "script returned with outstanding jobs; cancelling and joining".into(),
+                    );
                 }
             }
         }
-        let tasks = std::mem::take(&mut self.lock().tasks);
-        for (index, task) in tasks {
-            if let Err(e) = task.await {
-                let mut h = self.lock();
-                let error = format!("child supervisor panicked: {e}; cleanup unresolved");
-                h.fail(error.clone());
-                h.record(index, synthetic(error));
+        self.join_scope(None).await;
+        let mut h = self.lock();
+        #[cfg(feature = "workflow-lua-spike")]
+        for scope in (1..h.scopes.len()).rev() {
+            if !h.scopes[scope].closed {
+                h.close_scope(scope);
             }
         }
-        let mut h = self.lock();
         if let Some(error) = h.stop.cause() {
             return Err(error);
         }
@@ -352,6 +500,43 @@ impl SharedHost {
         h.event("completed", json!({}))?;
         Ok(value)
     }
+    async fn join_scope(&self, scope: Option<usize>) {
+        loop {
+            let task = {
+                let mut h = self.lock();
+                h.tasks
+                    .iter()
+                    .position(|(index, _)| scope.is_none_or(|s| h.runs[*index].scope == s))
+                    .map(|i| h.tasks.swap_remove(i))
+            };
+            let Some((index, task)) = task else { break };
+            // Await via a guard: dropping a Lua continuation restores its join
+            // handle to the host, whose outer finish still cancels and joins it.
+            struct JoinBack {
+                host: SharedHost,
+                task: Option<(usize, JoinHandle<()>)>,
+            }
+            impl Drop for JoinBack {
+                fn drop(&mut self) {
+                    if let Some(task) = self.task.take() {
+                        self.host.lock().tasks.push(task);
+                    }
+                }
+            }
+            let mut guard = JoinBack {
+                host: self.clone(),
+                task: Some((index, task)),
+            };
+            let result = (&mut guard.task.as_mut().unwrap().1).await;
+            guard.task.take();
+            if let Err(e) = result {
+                let mut h = self.lock();
+                let error = format!("child supervisor panicked: {e}; cleanup unresolved");
+                h.fail(error.clone());
+                h.record(index, synthetic(error));
+            }
+        }
+    }
 }
 fn synthetic(error: String) -> process::Collected {
     process::Collected {
@@ -362,6 +547,29 @@ fn synthetic(error: String) -> process::Collected {
     }
 }
 impl Host {
+    #[cfg(feature = "workflow-lua-spike")]
+    fn has_open_descendants(&self, scope: usize) -> bool {
+        self.scopes.iter().any(|s| {
+            if s.closed {
+                return false;
+            }
+            let mut parent = s.parent;
+            while let Some(id) = parent {
+                if id == scope {
+                    return true;
+                }
+                parent = self.scopes[id].parent;
+            }
+            false
+        })
+    }
+    #[cfg(feature = "workflow-lua-spike")]
+    fn close_scope(&mut self, scope: usize) {
+        self.scopes[scope].closed = true;
+        if let Err(e) = self.scope_event(scope, "scope_finished", json!({})) {
+            self.fail(e);
+        }
+    }
     pub fn fatal_cause(&self) -> Option<String> {
         self.stop.cause()
     }
@@ -374,6 +582,15 @@ impl Host {
         }
         Ok(())
     }
+    fn fail_at(&mut self, scope: usize, error: String) -> String {
+        #[cfg(feature = "workflow-lua-spike")]
+        if self.stop.cause().is_none() {
+            self.script_location = self.scopes[scope].location.clone();
+        }
+        #[cfg(not(feature = "workflow-lua-spike"))]
+        let _ = scope;
+        self.fail(error)
+    }
     fn fail(&mut self, error: String) -> String {
         self.stop.fail(error)
     }
@@ -381,8 +598,25 @@ impl Host {
         // Keep envelope order stable (admission), expose observed arrival separately.
         self.runs.iter().filter_map(|r| r.outcome.clone()).collect()
     }
+    fn identity(&self, scope: usize) -> Value {
+        let s = &self.scopes[scope];
+        json!({"id":scope,"parent":s.parent,"group":s.group,"component":s.component})
+    }
     pub fn event(&mut self, event: &str, fields: Value) -> Result<(), String> {
-        let record = json!({"workflow_version":1,"workflow_id":self.id,"seq":self.event_count,"event":event,"phase":self.phase,"data":fields});
+        self.scope_event(0, event, fields)
+    }
+    fn scope_event(&mut self, scope: usize, event: &str, fields: Value) -> Result<(), String> {
+        let phase = self.scopes[scope].phase.clone();
+        self.event_at(scope, &phase, event, fields)
+    }
+    fn event_at(
+        &mut self,
+        scope: usize,
+        phase: &str,
+        event: &str,
+        fields: Value,
+    ) -> Result<(), String> {
+        let record = json!({"workflow_version":1,"workflow_id":self.id,"seq":self.event_count,"event":event,"phase":phase,"scope":self.identity(scope),"data":fields});
         let line = serde_json::to_vec(&record).map_err(|e| e.to_string())?;
         if self.event_count >= 2048 || self.event_bytes + line.len() + 1 > contract::MAX_BYTES {
             return Err("workflow event budget exhausted".into());
@@ -398,6 +632,10 @@ impl Host {
     }
     fn record(&mut self, index: usize, collected: process::Collected) {
         if let Some(cause) = &collected.stop_cause {
+            #[cfg(feature = "workflow-lua-spike")]
+            if self.script_location.is_none() {
+                self.script_location = self.scopes[self.runs[index].scope].location.clone();
+            }
             self.fail(format!("step {}: {cause}", self.runs[index].job.id));
         }
         let run = &self.runs[index];
@@ -423,26 +661,162 @@ impl Host {
             })
             && collected.error.is_none();
         let dir = self.artifacts.join("steps").join(&run.job.id);
-        let mut step = json!({"id":run.job.id,"profile":run.job.profile,"group":run.group,"phase":run.phase,"completion_seq":self.completed,"cancel_requested":run.cancel.load(Ordering::SeqCst),"ok":execution_ok && validation.is_ok(),"exit":collected.exit,"error":collected.error,"validation":{"valid":validation.is_ok(),"error":validation.err()},"answer_present":present,"result_file":dir.join("result.json"),"stderr_file":dir.join("stderr.txt"),"trace_file":dir.join("trace.jsonl"),"child_run_id":raw.and_then(|r| r.get("run_id"))});
+        let mut step = json!({"id":run.job.id,"profile":run.job.profile,"group":run.group,"phase":run.phase,"scope":self.identity(run.scope),"completion_seq":self.completed,"cancel_requested":run.cancel.load(Ordering::SeqCst),"ok":execution_ok && validation.is_ok(),"exit":collected.exit,"error":collected.error,"validation":{"valid":validation.is_ok(),"error":validation.err()},"answer_present":present,"result_file":dir.join("result.json"),"stderr_file":dir.join("stderr.txt"),"trace_file":dir.join("trace.jsonl"),"child_run_id":raw.and_then(|r| r.get("run_id"))});
         if step["ok"] == true
             && let Some(answer) = answer
         {
             step["answer"] = answer.clone();
         }
+        let scope = run.scope;
+        let phase = run.phase.clone();
         let mut receipt = step.clone();
         receipt["child_result"] = collected.result.unwrap_or(Value::Null);
         self.completed += 1;
         self.runs[index].outcome = Some(step.clone());
         // Retain each outcome BEFORE either fallible side effect. Never short circuit siblings.
-        for result in [process::save(&dir.join("step.json"), &receipt), self.event("step_completed", json!({"step_id":step["id"],"completion_seq":step["completion_seq"],"ok":step["ok"],"error":step["error"],"validation":step["validation"],"child_run_id":step["child_run_id"],"trace_file":step["trace_file"]}))] {
+        for result in [process::save(&dir.join("step.json"), &receipt), self.event_at(scope, &phase, "step_completed", json!({"step_id":step["id"],"completion_seq":step["completion_seq"],"ok":step["ok"],"error":step["error"],"validation":step["validation"],"child_run_id":step["child_run_id"],"trace_file":step["trace_file"]}))] {
             if let Err(e) = result { self.fail(e); }
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::RunHandle;
+pub(super) mod tests {
+    use super::*;
+
+    #[cfg(feature = "workflow-lua-spike")]
+    pub(crate) fn fixture() -> (SharedHost, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = Bundle {
+            manifest: serde_json::from_value(json!({
+                "schema_version":2,"entry":"main.lua","input_schema":"schema.json",
+                "output_schema":"schema.json","max_runs":1,"max_concurrency":1,"profiles":{}
+            }))
+            .unwrap(),
+            language: super::super::Language::Lua,
+            entry: String::new(),
+            entry_name: "main.lua".into(),
+            modules: Default::default(),
+            module_names: Default::default(),
+            #[cfg(feature = "workflow-fennel-spike")]
+            source_maps: Default::default(),
+            input: Value::Null,
+            output_validator: contract::validator(&json!(true)).unwrap(),
+            profiles: Default::default(),
+            snapshot: Value::Null,
+        };
+        let host = SharedHost::new(
+            bundle,
+            dir.path().into(),
+            File::create(dir.path().join("events")).unwrap(),
+            "internal-test".into(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        (host, dir)
+    }
+
+    #[cfg(feature = "workflow-lua-spike")]
+    #[tokio::test]
+    async fn unclosed_descendants_fail_before_parent_closure_and_outer_finish_rejects_orphans() {
+        for finish_parent in [false, true] {
+            let (host, dir) = fixture();
+            let scopes = host.open_scopes("outer", 2).unwrap();
+            let parent = &scopes[0];
+            let child = parent.open_scopes("inner", 1).unwrap().remove(0);
+            let _grandchild = child.open_scopes("leaf", 1).unwrap();
+            // An open sibling tree must not prevent this sibling from finishing.
+            scopes[1].finish_scope().await.unwrap();
+            if finish_parent {
+                parent.location("parent.fnl:7".into(), false);
+                let error = parent.finish_scope().await.unwrap_err();
+                assert!(error.contains("unclosed descendant"), "{error}");
+                assert!(!host.lock().scopes[parent.scope_id()].closed);
+                assert_eq!(host.lock().script_location.as_deref(), Some("parent.fnl:7"));
+            } else {
+                host.location("root.fnl:3".into(), false);
+            }
+            let error = host.finish(Ok(json!(true))).await.unwrap_err();
+            assert!(error.contains("unclosed"), "{error}");
+            if !finish_parent {
+                assert_eq!(host.lock().script_location.as_deref(), Some("root.fnl:3"));
+            }
+            assert!(host.lock().scopes.iter().skip(1).all(|s| s.closed));
+            let finished: Vec<u64> = std::fs::read_to_string(dir.path().join("events"))
+                .unwrap()
+                .lines()
+                .map(|s| serde_json::from_str::<Value>(s).unwrap())
+                .filter(|v| v["event"] == "scope_finished")
+                .map(|v| v["scope"]["id"].as_u64().unwrap())
+                .collect();
+            assert_eq!(finished, vec![2, 4, 3, 1]);
+        }
+    }
+
+    #[cfg(feature = "workflow-lua-spike")]
+    #[tokio::test]
+    async fn dropped_scope_join_returns_task_until_outer_cleanup_before_closure() {
+        let (host, dir) = fixture();
+        let parent = host.open_scopes("parent", 1).unwrap().remove(0);
+        let child = parent.open_scopes("child", 1).unwrap().remove(0);
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let joined = Arc::new(AtomicBool::new(false));
+        let task_joined = joined.clone();
+        let task = tokio::spawn(async move {
+            // Dropping release on a test panic also releases this owned task.
+            let _ = wait.await;
+            task_joined.store(true, Ordering::SeqCst);
+        });
+        {
+            let mut h = host.lock();
+            // An outcome may exist before its supervisor has fully returned.
+            h.runs.push(Run {
+                scope: child.scope_id(),
+                job: Job {
+                    id: "fixture".into(),
+                    profile: "fixture".into(),
+                    prompt: "fixture".into(),
+                },
+                group: "run".into(),
+                phase: String::new(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                outcome: Some(json!(true)),
+            });
+            h.tasks.push((0, task));
+        }
+        let mut joining = Box::pin(child.finish_scope());
+        std::future::poll_fn(|cx| {
+            assert!(joining.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(host.lock().tasks.is_empty());
+        drop(joining);
+        assert_eq!(host.lock().tasks.len(), 1);
+        parent.abandon_group();
+        let mut finish = Box::pin(host.finish(Ok(json!(true))));
+        std::future::poll_fn(|cx| {
+            assert!(finish.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            !std::fs::read_to_string(dir.path().join("events"))
+                .unwrap()
+                .contains("scope_finished")
+        );
+        release.send(()).unwrap();
+        assert!(finish.await.unwrap_err().contains("abandoned"));
+        assert!(joined.load(Ordering::SeqCst));
+        assert!(host.lock().tasks.is_empty());
+        let text = std::fs::read_to_string(dir.path().join("events")).unwrap();
+        let finished: Vec<_> = text
+            .lines()
+            .map(|s| serde_json::from_str::<Value>(s).unwrap())
+            .filter(|v| v["event"] == "scope_finished")
+            .map(|v| v["scope"]["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(finished, vec![2, 1]);
+    }
     #[test]
     fn handles_reject_other_invocations_and_unadmitted_indices() {
         let handle = RunHandle {

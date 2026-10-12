@@ -64,6 +64,19 @@ case "$prompt" in
         exit 0 ;;
 esac
 case "$prompt" in
+    large-answer|deep-answer)
+        printf '%s' '{"type":"result","subtype":"success","session_id":"workflow-fake","is_error":false,"structured_output":'
+        if [ "$prompt" = large-answer ]; then
+            printf '%s' '{"payload":"'
+            /bin/dd if=/dev/zero bs=1000 count=400 2>/dev/null | /usr/bin/tr '\000' 'x'
+            printf '%s' '"}'
+        else
+            i=0; while [ "$i" -lt 32 ]; do printf '['; i=$((i + 1)); done
+            printf true
+            i=0; while [ "$i" -lt 32 ]; do printf ']'; i=$((i + 1)); done
+        fi
+        printf '%s\n' '}'
+        exit 0 ;;
     invalid*) answer='{"approved":"wrong type"}' ;;
     null*) answer='null' ;;
     missing*)

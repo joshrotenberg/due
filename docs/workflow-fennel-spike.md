@@ -1,5 +1,11 @@
 # Fennel authoring spike
 
+Follow-up: the [Lua function composition spike](workflow-lua-composition.md) adds
+shared-runtime concurrent function scopes available to Fennel as well. It makes
+Lua the working direction for reusable suspended functions; the authoring trials
+and assessment below retain their historical scope. No compiler/macro expansion
+is part of that follow-up.
+
 Branch `spike/fennel-workflows` builds on Lua comparison
 `2202b5f308c2fa97190f8959ce5e65d6e3502f77`. Fennel is an optional compiler front end
 for that Lua candidate. Rust still owns the same start/wait/wait_any/cancel jobs,
@@ -107,7 +113,9 @@ also retain normal OS signal handling without registering compiler handlers.
 effect-disabled initialization and plain string-keyed function exports (at most 128). Module
 load failures, undeclared imports and cycles are sticky through pcall for v2
 and bundles containing Fennel. Plain v1 Lua retains recoverable ordinary module
-errors. Effects attempted during module loading remain sticky in every version.
+errors at the root; composition scopes always make loading errors sticky,
+including argument conversion failures. Effects attempted during module loading
+remain sticky in every version, including malformed effect arguments.
 No child can be admitted before v2 invocation.
 Input/final/per-step validation requirements are unchanged.
 

@@ -1,0 +1,1 @@
+{"type":"object","required":["outcomes","findings","synthesis"],"properties":{"outcomes":{"type":"array","minItems":2,"maxItems":2},"findings":{"type":"array"},"synthesis":{"type":"object"}},"additionalProperties":false}

@@ -149,7 +149,7 @@ consume resources beyond these host limits. Artifacts have private Unix modes,
 not protection against a provider with the same user permissions. Do not put
 untrusted writable workloads around the receipt directory. This spike does not
 verify workspace overlap, effects, authentication, native flag support or costs.
-No retries, resume, scheduler, server, tools, workspace creation or registry.
+No retries, resume, persistent scheduler, server, workspace creation or registry.
 
 
 ## Shared run handles and cleanup
@@ -174,7 +174,9 @@ Rhai uses `::`. They have the same host semantics:
   cancellation may still succeed; `cancel_requested` records the request as seen
   at collection and does not assert that a signal won the race.
 - Handles belong to exactly one invocation, cannot be serialized as JSON or
-  created from IDs/maps, and can be copied/reused within that invocation. Empty
+  created from IDs/maps, and can be copied/reused within their owning scope.
+  Lua concurrent components cannot use ancestor, sibling or descendant handles;
+  ordinary calls inside the same component can share them. Rhai uses one scope. Empty
   wait_any lists, duplicates, foreign handles and malformed handles error.
   Scripts cannot obtain foreign handles through the provided APIs. No events
   are consumed by wait_any and no implicit cursor or timeout exists.
@@ -185,8 +187,10 @@ in admission order; completion_seq and step_completed JSONL expose arrivals.
 Check performs none of these effects. Admission, collection and persistence
 failures are fatal and sticky, including when a script catches the callback
 error. Native failures and invalid answers are outcomes; callers may branch on
-`ok`. Argument errors produced by interpreter type checking can be caught as
-ordinary language errors but cannot forge handles or bypass host admission.
+`ok`. Lua host argument/result conversion failures are sticky, including through
+pcall. Ordinary require errors remain recoverable only at a plain v1 Lua root;
+component/v2/Fennel loading errors are sticky. Initialization effects always fail.
+Rhai interpreter argument-type errors remain ordinary catchable language errors.
 
 Every admitted job remains Rust-owned. A normal return with outstanding jobs
 fails the workflow, cancels/joins them, and keeps their outcomes. Script errors,
@@ -236,8 +240,13 @@ Lua is pinned mlua 0.12.2 with vendored Lua 5.4, async and serde. Its 16 MiB VM
 ceiling applies to compilation and evaluation. The shared 100000 instruction
 budget yields every 1000 instructions; an outer future refuses to resume after
 budget exhaustion or cancellation. pcall cannot catch this termination. The
-count includes module initialization and mlua glue and is not equivalent to Rhai
-operations. Catching a memory allocation error cannot reset the instruction count.
+count includes workflow/library code and module initialization, but excludes the
+pinned private mlua polling wrapper. Quiet native waiting spends no script budget;
+short-lived components cannot reset it. This is not equivalent to Rhai operations.
+The private wrapper is also exempt from hook suspension to preserve nested wakes.
+An mlua upgrade must revalidate that boundary and the quiet-wait regression.
+There is no periodic interpreter polling timer or implicit provider deadline.
+Catchable memory allocation errors cannot reset the instruction count.
 Lua actually suspends through async callbacks while Rust supervises children.
 
 No io/os/debug/package or native loader, load/loadfile/dofile, print/warn,
@@ -257,3 +266,50 @@ spans are rejected before entering C. These errors can be caught normally;
 repeated catches still consume the shared instruction budget.
 string.rep returns immediately when both the repeated string and separator are
 empty, avoiding Lua 5.4's otherwise allocation-free C loop.
+
+## Lua function composition
+
+`due.concurrent(group, functions)` invokes a plain dense array of 1–32 ordinary
+zero-argument functions concurrently and returns copied JSON values in input
+order. Capture inputs in closures. Functions may call existing Due APIs and nest
+concurrent groups. Each must return exactly one JSON-compatible value; use
+json.null for null. The combined array also obeys the 1 MiB/depth-32 limit, so a
+component value at depth 32 cannot fit beneath that extra array level.
+
+For the shipped design → implement → review library, declare local/pipeline as
+examples/workflow/composition/pipeline.lua, supply caller-approved profiles for
+two isolated workspaces, allow at least six runs, and use a compatible output
+schema. The complete executable example and synthesis stage are adjacent to that
+library; docs/workflow-lua-composition.md describes the experimental contract.
+
+```lua
+local p = require("local/pipeline")
+local function work(prefix, profile)
+    return p.pipeline({prefix=prefix, task=input.task,
+        profiles={design=profile, implement=profile, review=profile}})
+end
+return due.concurrent("implementations", {
+    function() return work("a", "workspace_a") end,
+    function() return work("b", "workspace_b") end
+})
+```
+
+The pipeline stays an ordinary function; replace stages through config.stages.
+It uses the same API as custom modules. Its Lua stable_sort helper provides an
+interruptible copying sort with stable ties; native table.sort remains disabled.
+
+Rust owns the component tree and every job. Returning with active/queued jobs,
+abandoning a pending group, or finishing with unclosed descendants fails the
+invocation and joins remaining work. Expected failed agent outcomes stay data.
+No component detaches, creates a workspace or widens profile permissions. Job
+prefixes remain explicit and invocation-global. Cancellation retains earlier edits.
+
+All components share one VM, native capacity, run budget and instruction/memory
+limits. The host also bounds total components to 256, active components to 64 and
+depth to 8. Globals, module tables and mutable captures are shared: prefer per-call
+locals and immutable configuration. Module initialization is serialized and
+cannot start agent work. Phase and diagnostic state are per scope. Workflow
+events and step/admitted/started/exit receipts carry scope identity and parent
+links; scope_finished follows cleanup. Native traces and envelopes stay unchanged.
+Fennel uses this same API when its optional frontend is enabled; Rhai does not
+expose concurrent function composition in this spike.
