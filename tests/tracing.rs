@@ -541,6 +541,87 @@ fn traced_semantic_and_process_failures_keep_metadata_but_redact_traces() {
 }
 
 #[test]
+fn codex_error_items_are_redacted_diagnostics_not_activities() {
+    for (mode, exit, status) in [
+        ("diagnostic", 0, "succeeded"),
+        ("diagnostic_failed", 1, "failed"),
+    ] {
+        for detail in [false, true] {
+            let fixture = Fixture::new("codex");
+            let mut command = fixture.command(mode);
+            command
+                .args(["--trace=json", "--trace-file"])
+                .arg(fixture.trace());
+            if detail {
+                command.arg("--trace-detail");
+            }
+            let output = run(&mut command);
+            let value = result(&output, exit, status);
+            if exit == 0 {
+                assert_eq!(value["text"], "FINAL TRACED ANSWER");
+            } else {
+                assert_eq!(value["error"]["kind"], "provider");
+                assert_eq!(value["error"]["message"], "SECRET_PROVIDER_ERROR");
+            }
+            let file_bytes = fs::read(fixture.trace()).unwrap();
+            let events = records(&file_bytes);
+            check_trace(&events, "codex", &value["run_id"], status, exit);
+            // One phase per completion; started and updated diagnostics are
+            // ignored, including when a diagnostic completes without a start.
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["event"] == "provider_error")
+                    .count(),
+                2,
+                "{events:?}"
+            );
+            assert_eq!(
+                events.iter().any(|event| event["event"] == "turn_failed"),
+                exit != 0
+            );
+            for event in &events {
+                if event["event"] == "provider_error" {
+                    assert!(event.get("detail").is_none() && event.get("message").is_none());
+                }
+                assert_ne!(event["activity"], "unknown", "{event:?}");
+            }
+            let finished = events.last().unwrap();
+            assert_eq!(finished["activities_started"], 1);
+            assert_eq!(finished["activities_completed"], 1);
+            assert_eq!(finished["activities_failed"], 0);
+
+            let summary = run(Command::new(env!("CARGO_BIN_EXE_due"))
+                .args(["trace", "summarize", "--output", "json"])
+                .arg(fixture.trace())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()));
+            assert_eq!(summary.status.code(), Some(0));
+            let summary: Value = serde_json::from_slice(&summary.stdout).unwrap();
+            let summarized = &summary["runs"][0];
+            assert_eq!(summarized["status"], status);
+            assert_eq!(summarized["event_counts"]["provider_error"], 2);
+            let activities = &summarized["activities"];
+            assert_eq!(activities["started"], 1);
+            assert_eq!(activities["completed"], 1);
+            assert_eq!(activities["failed"], 0);
+            assert_eq!(activities["unmatched_starts"], serde_json::json!([]));
+            assert_eq!(activities["completions_without_observed_start"], 0);
+            assert!(activities["by_kind"].get("unknown").is_none());
+
+            for bytes in [&output.stdout, &output.stderr, &file_bytes] {
+                let text = String::from_utf8_lossy(bytes);
+                assert!(!text.contains("SECRET_DIAGNOSTIC_MESSAGE"), "{text}");
+            }
+            if !detail {
+                no_secrets(&output.stderr);
+                no_secrets(&file_bytes);
+            }
+        }
+    }
+}
+
+#[test]
 fn existing_or_uncreatable_trace_files_fail_before_provider_spawn() {
     for provider in ["claude", "codex"] {
         for existing in [true, false] {

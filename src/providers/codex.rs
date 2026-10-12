@@ -203,6 +203,17 @@ impl StreamState {
                 progress.phase("turn_failed");
             }
             "error" => progress.phase("provider_error"),
+            "item.started" | "item.updated" | "item.completed"
+                if event.item_type() == Some("error") =>
+            {
+                // A native error item is a diagnostic, not an activity, and does
+                // not decide the turn outcome. Only turn.failed does that.
+                // Report completion only, just as assistant messages do. No
+                // item history or raw diagnostic content needs to be retained.
+                if event.event_type == "item.completed" {
+                    progress.phase("provider_error");
+                }
+            }
             "item.started" | "item.updated" | "item.completed" => {
                 emit_activity(&event, progress);
                 if let Some(text) = event.agent_message_text() {
@@ -288,6 +299,8 @@ fn activity_kind(item_type: &str) -> Option<ActivityKind> {
     Some(match item_type {
         // These are assistant content, not tools or observable actions.
         "agent_message" | "reasoning" => return None,
+        // Native diagnostics are reported as provider_error phases instead.
+        "error" => return None,
         "command_execution" => ActivityKind::Command,
         "file_change" => ActivityKind::FileChange,
         "mcp_tool_call" => ActivityKind::McpCall,
@@ -577,6 +590,51 @@ mod tests {
         }
         assert_eq!(activity_kind("agent_message"), None);
         assert_eq!(activity_kind("reasoning"), None);
+        assert_eq!(activity_kind("error"), None);
+    }
+
+    #[test]
+    fn native_error_items_are_diagnostics_that_keep_turn_outcomes() {
+        use serde_json::json;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("final-message.txt");
+        let diagnostic = |kind: &str, id: &str| {
+            serde_json::from_value::<JsonLineEvent>(json!({
+                "type":kind,
+                "item":{"id":id,"type":"error","message":"SECRET_DIAGNOSTIC_MESSAGE"}
+            }))
+            .unwrap()
+        };
+        for failed in [false, true] {
+            let mut state = StreamState::default();
+            let mut events = vec![diagnostic("item.completed", "item_0")];
+            for kind in ["item.started", "item.updated", "item.completed"] {
+                events.push(diagnostic(kind, "item_1"));
+            }
+            events.push(serde_json::from_value(json!({"type":"turn.started"})).unwrap());
+            events.push(
+                serde_json::from_value(if failed {
+                    json!({"type":"turn.failed","error":{"message":"native terminal failure"}})
+                } else {
+                    json!({"type":"turn.completed"})
+                })
+                .unwrap(),
+            );
+            for event in events {
+                state.observe(event, &Progress::default());
+            }
+            assert!(state.last_assistant.is_empty());
+            std::fs::write(&path, "final answer\n").unwrap();
+            let result = state.finish(&path);
+            if failed {
+                let error = result.error.unwrap();
+                assert_eq!(error.kind, ErrorKind::Provider);
+                assert_eq!(error.message, "native terminal failure");
+            } else {
+                assert!(result.error.is_none());
+                assert_eq!(result.text, "final answer");
+            }
+        }
     }
 
     #[test]

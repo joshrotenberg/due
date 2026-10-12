@@ -280,6 +280,9 @@ Both adapters emit `activity_started` and `activity_completed` using the common
 is not invented. Starts or completion may be absent when the provider does not
 report them. Activity and message counts describe observed events, not equivalent
 units of work across providers. Assistant content is not counted as activity.
+Codex `error` items are diagnostics, not activities: each completion produces a
+`provider_error` record without its message, and the run outcome still comes
+from the turn's terminal event.
 
 ### Trace records
 

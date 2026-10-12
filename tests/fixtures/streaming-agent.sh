@@ -25,6 +25,14 @@ if [ "$DUE_TRACE_PROVIDER" = claude ]; then
     printf '%s\n' '{"type":"future_event","payload":"SECRET_UNKNOWN"}'
 else
     printf '{"type":"thread.started","thread_id":"%s","unknown":"SECRET_UNKNOWN"}\n' "$DUE_TRACE_SESSION"
+    if [ "$DUE_TRACE_MODE" = diagnostic ] || [ "$DUE_TRACE_MODE" = diagnostic_failed ]; then
+        # A nonfatal startup diagnostic with no item.started, then one
+        # reported through every item lifecycle shape.
+        printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"error","message":"SECRET_DIAGNOSTIC_MESSAGE"}}'
+        printf '%s\n' '{"type":"item.started","item":{"id":"item_1","type":"error","message":"SECRET_DIAGNOSTIC_MESSAGE"}}'
+        printf '%s\n' '{"type":"item.updated","item":{"id":"item_1","type":"error","message":"SECRET_DIAGNOSTIC_MESSAGE"}}'
+        printf '%s\n' '{"type":"item.completed","item":{"id":"item_1","type":"error","message":"SECRET_DIAGNOSTIC_MESSAGE"}}'
+    fi
     printf '%s\n' '{"type":"turn.started"}'
     printf '%s\n' '{"type":"item.started","item":{"id":"tool-test-1","type":"command_execution","command":"SECRET_TOOL_INPUT","status":"in_progress"}}'
     printf '%s\n' '{"type":"item.updated","item":{"id":"tool-test-1","type":"command_execution","aggregated_output":"SECRET_DELTA"}}'
@@ -94,7 +102,7 @@ else
     else
         printf '%s\n' '{"type":"item.completed","item":{"id":"tool-test-1","type":"command_execution","command":"SECRET_TOOL_INPUT","status":"completed","exit_code":0,"aggregated_output":"SECRET_TOOL_OUTPUT"}}'
     fi
-    if [ "$DUE_TRACE_MODE" = semantic ] || [ "$DUE_TRACE_MODE" = nonzero ]; then
+    if [ "$DUE_TRACE_MODE" = semantic ] || [ "$DUE_TRACE_MODE" = nonzero ] || [ "$DUE_TRACE_MODE" = diagnostic_failed ]; then
         if [ -n "$last_message" ]; then printf 'PARTIAL ANSWER\n' > "$last_message"; fi
         printf '%s\n' '{"type":"item.completed","item":{"id":"message-final","type":"agent_message","text":"PARTIAL ANSWER"}}'
         printf '%s\n' '{"type":"turn.failed","error":{"message":"SECRET_PROVIDER_ERROR"}}'
