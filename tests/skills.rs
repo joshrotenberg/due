@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
+#[cfg(not(feature = "workflow-spike"))]
 const SKILLS: [&str; 3] = ["run", "contracts", "observe"];
+#[cfg(feature = "workflow-spike")]
+const SKILLS: [&str; 4] = ["run", "contracts", "observe", "workflow"];
 
 struct Standalone {
     root: TempDir,

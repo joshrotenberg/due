@@ -19,6 +19,12 @@ struct Skill {
 }
 
 const SKILLS: &[Skill] = &[
+    #[cfg(feature = "workflow-spike")]
+    Skill {
+        name: "workflow",
+        description: "Author and check an experimental bounded Rhai workflow with caller-declared Due profiles, schema gates, and private subprocess receipts.",
+        content: include_str!("../embedded-skills/workflow/SKILL.md"),
+    },
     Skill {
         name: "run",
         description: "Run one bounded Claude Code or Codex task through Due and independently verify its artifacts and effects.",

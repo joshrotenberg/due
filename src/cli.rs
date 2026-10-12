@@ -19,6 +19,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Experimental bounded Rhai workflows (not a production interface).
+    #[cfg(feature = "workflow-spike")]
+    Workflow(crate::workflow::WorkflowArgs),
     /// Run one noninteractive turn, optionally continuing an existing session.
     Run(Box<RunCommand>),
     /// Discover and read agent skills embedded in this binary; no provider is started.
@@ -189,6 +192,11 @@ pub struct RunCommand {
     #[arg(long, requires = "progress_sink", help_heading = "Progress")]
     pub trace_detail: bool,
 
+    /// Internal workflow child capture limit; never forwarded to a provider.
+    #[cfg(feature = "workflow-spike")]
+    #[arg(long, hide = true)]
+    pub workflow_trace_limit: bool,
+
     /// Discard all native_args inherited from a profile.
     #[arg(long, conflicts_with = "native_args", help_heading = "Native options")]
     pub clear_native_args: bool,
@@ -222,6 +230,8 @@ pub struct RunArgs {
     pub trace_file: Option<PathBuf>,
     pub trace_interval: Option<Duration>,
     pub trace_detail: bool,
+    #[cfg(feature = "workflow-spike")]
+    pub workflow_trace_limit: bool,
     pub native_args: Vec<String>,
 }
 

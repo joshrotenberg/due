@@ -66,6 +66,33 @@ fn read_request(input: &RunCommand) -> Result<Request, RunError> {
 
 pub fn resolve(input: RunCommand) -> Result<RunArgs, RunError> {
     let request = read_request(&input)?;
+    resolve_loaded(input, request)
+}
+
+#[cfg(feature = "workflow-spike")]
+pub(crate) fn workflow_profile(value: &serde_json::Value) -> Result<RunArgs, String> {
+    use clap::Parser;
+    let request: Request = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+    if request.schema_version != 1 {
+        return Err("profile request schema_version must be 1".into());
+    }
+    let cli = crate::cli::Cli::try_parse_from([
+        "due",
+        "run",
+        "--request",
+        "-",
+        "--prompt",
+        "workflow profile check",
+        "--dry-run",
+    ])
+    .map_err(|e| e.to_string())?;
+    let crate::cli::Command::Run(input) = cli.command else {
+        unreachable!()
+    };
+    resolve_loaded(*input, request).map_err(|e| e.message)
+}
+
+fn resolve_loaded(input: RunCommand, request: Request) -> Result<RunArgs, RunError> {
     let provider = match input.provider {
         Some(provider) => provider,
         None => Provider::from_str(
@@ -144,6 +171,8 @@ pub fn resolve(input: RunCommand) -> Result<RunArgs, RunError> {
         trace_file: input.trace_file,
         trace_interval: input.trace_interval,
         trace_detail: input.trace_detail,
+        #[cfg(feature = "workflow-spike")]
+        workflow_trace_limit: input.workflow_trace_limit,
         native_args,
     })
 }

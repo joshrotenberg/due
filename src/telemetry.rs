@@ -129,10 +129,16 @@ pub fn start(run: &RunArgs) -> Result<(Progress, Option<TraceGuard>), RunError> 
     let dropped = Arc::new(AtomicU64::new(0));
     let worker_failed = Arc::clone(&failed);
     let stderr_format = run.trace;
+    #[cfg(feature = "workflow-spike")]
+    let trace_limit = run
+        .workflow_trace_limit
+        .then_some(crate::workflow::trace_limit());
+    #[cfg(not(feature = "workflow-spike"))]
+    let trace_limit = None;
     thread::Builder::new()
         .name("due-trace".into())
         .spawn(move || {
-            write_records(receiver, file, stderr_format, &worker_failed);
+            write_records(receiver, file, stderr_format, &worker_failed, trace_limit);
             let _ = done_sender.send(());
         })
         .map_err(|error| RunError::io("start trace writer", error))?;
@@ -506,12 +512,21 @@ fn write_records(
     mut file: Option<File>,
     mut stderr_format: Option<TraceFormat>,
     failed: &AtomicBool,
+    mut remaining: Option<usize>,
 ) {
     for message in receiver {
         let Message::Record(record) = message else {
             break;
         };
         let line = format!("{record}\n");
+        if let Some(remaining) = &mut remaining {
+            if line.len() > *remaining {
+                file = None;
+                failed.store(true, Ordering::Relaxed);
+            } else {
+                *remaining -= line.len();
+            }
+        }
         if let Some(writer) = &mut file
             && writer
                 .write_all(line.as_bytes())

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "approved": { "type": "boolean" },
+    "needs_more_evidence": { "type": "boolean" },
+    "findings": { "type": "array", "items": { "type": "string" }, "maxItems": 20 }
+  },
+  "required": ["approved", "needs_more_evidence", "findings"],
+  "additionalProperties": false
+}

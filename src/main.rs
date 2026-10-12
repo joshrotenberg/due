@@ -8,6 +8,8 @@ mod skills;
 mod telemetry;
 mod trace_summary;
 mod validate;
+#[cfg(feature = "workflow-spike")]
+mod workflow;
 
 use std::{
     io::{self, Write},
@@ -27,6 +29,8 @@ async fn main() -> ExitCode {
         Command::Skills(args) => skills::execute(&args),
         Command::Schema(args) => contracts::execute(&args),
         Command::Trace(args) => trace_summary::execute(&args),
+        #[cfg(feature = "workflow-spike")]
+        Command::Workflow(args) => workflow::execute(args).await,
     }
 }
 

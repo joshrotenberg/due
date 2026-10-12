@@ -7,7 +7,12 @@ description = "One command-line interface for Claude Code and Codex"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+workflow-spike = ["dep:rhai", "dep:jsonschema", "dep:libc"]
+
 [dependencies]
+rhai = { version = "=1.26.1", optional = true, default-features = false, features = ["std"] }
+jsonschema = { version = "=0.56.0", optional = true, default-features = false }
 claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
 codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "1c0bbfa2a66024d094a8117ec83bca0d6b41232c" }
 clap = { version = "4.5", features = ["derive"] }
@@ -21,6 +26,9 @@ which = "8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
