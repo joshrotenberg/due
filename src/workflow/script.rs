@@ -1,12 +1,14 @@
-use super::{Host, bundle::Bundle, contract};
+use super::{
+    bundle::Bundle,
+    contract,
+    host::{RunHandle, SharedHost},
+};
 use rhai::{
     AST, Array, Dynamic, Engine, EvalAltResult, Module, OptimizationLevel, Scope,
     module_resolvers::StaticModuleResolver,
 };
 use std::{
-    cell::RefCell,
     collections::BTreeMap,
-    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -15,7 +17,7 @@ use std::{
 
 type ScriptResult<T> = Result<T, Box<EvalAltResult>>;
 
-pub(super) fn engine(host: Option<Rc<RefCell<Host>>>, cancelled: Arc<AtomicBool>) -> Engine {
+pub(super) fn engine(host: Option<SharedHost>, cancelled: Arc<AtomicBool>) -> Engine {
     // Select pure data packages explicitly. The standard package also exposes
     // blocking sleep and Rhai's permissive parse_json; neither belongs here.
     use rhai::packages::*;
@@ -53,46 +55,87 @@ pub(super) fn engine(host: Option<Rc<RefCell<Host>>>, cancelled: Arc<AtomicBool>
     engine.on_print(|_| {}).on_debug(|_, _, _| {});
     #[allow(deprecated)]
     engine.on_def_var(|_, info, _| Ok(!matches!(info.name(), "input" | "due" | "json")));
+    engine.register_type_with_name::<RunHandle>("RunHandle");
     let mut due = Module::new();
     let run_host = host.clone();
-    due.set_native_fn("run", move |job: Dynamic| -> ScriptResult<Dynamic> {
-        let host = run_host
+    due.set_native_fn("start", move |job: Dynamic| -> ScriptResult<RunHandle> {
+        let h = run_host
             .as_ref()
             .ok_or("effects unavailable during check")?;
-        host.borrow_mut()
-            .effect(|host| host.batch("run", vec![job]).map(|mut v| v.remove(0)))
+        let job = contract::from_dynamic(&job).map_err(|e| h.fail(e))?;
+        Ok(h.start("run", vec![job])?.remove(0))
+    });
+    let run_host = host.clone();
+    due.set_native_fn("run", move |job: Dynamic| -> ScriptResult<Dynamic> {
+        let h = run_host
+            .as_ref()
+            .ok_or("effects unavailable during check")?;
+        let job = contract::from_dynamic(&job).map_err(|e| h.fail(e))?;
+        let value = tokio::runtime::Handle::current().block_on(h.parallel("run", vec![job]))?;
+        contract::to_dynamic(&value[0]).map_err(Into::into)
     });
     let batch_host = host.clone();
     due.set_native_fn(
         "parallel",
-        move |group: &str, jobs: Array| -> ScriptResult<Array> {
-            let host = batch_host
+        move |group: &str, jobs: Array| -> ScriptResult<Dynamic> {
+            let h = batch_host
                 .as_ref()
                 .ok_or("effects unavailable during check")?;
-            host.borrow_mut().effect(|host| host.batch(group, jobs))
+            let jobs = jobs
+                .iter()
+                .map(contract::from_dynamic)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| h.fail(e))?;
+            let value = tokio::runtime::Handle::current().block_on(h.parallel(group, jobs))?;
+            contract::to_dynamic(&value).map_err(Into::into)
         },
     );
-    let phase_host = host.clone();
-    due.set_native_fn("phase", move |phase: &str| -> ScriptResult<()> {
-        let host = phase_host
+    for op in ["wait", "cancel"] {
+        let wait_host = host.clone();
+        due.set_native_fn(op, move |handle: Dynamic| -> ScriptResult<Dynamic> {
+            let h = wait_host
+                .as_ref()
+                .ok_or("effects unavailable during check")?;
+            let handle = handle
+                .try_cast::<RunHandle>()
+                .ok_or_else(|| h.fail("expected opaque RunHandle".into()))?;
+            let runtime = tokio::runtime::Handle::current();
+            let value = if op == "cancel" {
+                runtime.block_on(h.cancel(handle))
+            } else {
+                runtime.block_on(h.wait(handle))
+            }?;
+            contract::to_dynamic(&value).map_err(Into::into)
+        });
+    }
+    let any_host = host.clone();
+    due.set_native_fn("wait_any", move |handles: Array| -> ScriptResult<Dynamic> {
+        let h = any_host
             .as_ref()
             .ok_or("effects unavailable during check")?;
-        host.borrow_mut().effect(|host| {
-            if phase.len() > 256 {
-                return Err("phase exceeds 256 bytes".into());
-            }
-            host.phase = phase.into();
-            host.event("phase", serde_json::json!({}))
-        })
+        let handles = handles
+            .into_iter()
+            .map(|v| {
+                v.try_cast::<RunHandle>()
+                    .ok_or_else(|| h.fail("expected opaque RunHandle".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let value = tokio::runtime::Handle::current().block_on(h.wait_any(handles))?;
+        contract::to_dynamic(&value).map_err(Into::into)
+    });
+    let phase_host = host.clone();
+    due.set_native_fn("phase", move |phase: &str| -> ScriptResult<()> {
+        phase_host
+            .as_ref()
+            .ok_or("effects unavailable during check")?
+            .phase(phase)
+            .map_err(Into::into)
     });
     due.set_native_fn("log", move |message: &str| -> ScriptResult<()> {
-        let host = host.as_ref().ok_or("effects unavailable during check")?;
-        host.borrow_mut().effect(|host| {
-            if message.len() > 4096 {
-                return Err("log exceeds 4096 bytes".into());
-            }
-            host.event("log", serde_json::json!({"message":message}))
-        })
+        host.as_ref()
+            .ok_or("effects unavailable during check")?
+            .log(message)
+            .map_err(Into::into)
     });
     engine.register_static_module("due", due.into());
     let mut json = Module::new();
@@ -110,9 +153,24 @@ pub struct Compiled {
 }
 pub fn compile(engine: &Engine, bundle: &Bundle) -> Result<Compiled, String> {
     fn one(engine: &Engine, source: &str, name: &str) -> Result<AST, String> {
-        reserved(source).map_err(|e| format!("{name}: {e}"))?;
         let mut ast = engine.compile(source).map_err(|e| format!("{name}: {e}"))?;
         ast.set_source(name);
+        let mut reserved = false;
+        ast.walk(&mut |nodes| {
+            if let Some(rhai::ASTNode::Stmt(stmt)) = nodes.last() {
+                let ident = match stmt {
+                    rhai::Stmt::Import(pair, _) => Some(&pair.1),
+                    rhai::Stmt::Var(var, _, _) => Some(&var.0),
+                    _ => None,
+                };
+                reserved |= ident.is_some_and(|id| matches!(id.as_str(), "due" | "json" | "input"));
+            }
+            !reserved
+        });
+        if reserved {
+            return Err(format!("{name}: reserved host binding"));
+        }
+
         for f in ast.iter_functions() {
             if matches!(f.name, "due" | "json" | "input")
                 || f.params
@@ -147,92 +205,16 @@ pub fn install_modules(engine: &mut Engine, modules: BTreeMap<String, AST>) -> R
     Ok(())
 }
 
-// A deliberately narrow lexical policy, not a replacement parser: host namespace
-// identifiers may only precede `::`. This also forbids import aliases that could
-// hide a static host module. Rhai performs actual parsing afterwards. Backtick
-// interpolation is explicitly outside this spike (use string + json::encode).
-fn reserved(source: &str) -> Result<(), String> {
-    let bytes = source.as_bytes();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-        if bytes[i..].starts_with(b"//") {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if bytes[i..].starts_with(b"/*") {
-            i += 2;
-            let mut depth = 1;
-            while i < bytes.len() && depth > 0 {
-                if bytes[i..].starts_with(b"/*") {
-                    depth += 1;
-                    i += 2;
-                } else if bytes[i..].starts_with(b"*/") {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        if bytes[i] == b'`' {
-            return Err(
-                "backtick interpolation unsupported; concatenate strings explicitly".into(),
-            );
-        }
-        if bytes[i] == b'"' || bytes[i] == b'\'' {
-            let quote = bytes[i];
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                } else if bytes[i] == quote {
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-            tokens.push("literal".to_string());
-            continue;
-        }
-        let start = i;
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
-            i += 1;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            tokens.push(source[start..i].to_string());
-        } else if bytes[i..].starts_with(b"::") {
-            i += 2;
-            tokens.push("::".into());
-        } else {
-            i += 1;
-            tokens.push("punctuation".into());
-        }
-    }
-    for (i, token) in tokens.iter().enumerate() {
-        if matches!(token.as_str(), "due" | "json")
-            && tokens.get(i + 1).map(String::as_str) != Some("::")
-        {
-            return Err(format!("reserved namespace {token} cannot be shadowed"));
-        }
-        if token == "input"
-            && i > 0
-            && matches!(
-                tokens[i - 1].as_str(),
-                "as" | "for" | "let" | "const" | "fn"
-            )
-        {
-            return Err("input is reserved".into());
-        }
-    }
-    Ok(())
+pub fn run(host: SharedHost, runtime: tokio::runtime::Handle) -> Result<serde_json::Value, String> {
+    let _runtime = runtime.enter();
+    let cancelled = host.lock().cancelled.clone();
+    let mut engine = engine(Some(host.clone()), cancelled);
+    let compiled = compile(&engine, &host.lock().bundle)?;
+    install_modules(&mut engine, compiled.modules)?;
+    let mut scope = Scope::new();
+    scope.push_constant_dynamic("input", contract::to_dynamic(&host.lock().bundle.input)?);
+    let value = engine
+        .eval_ast_with_scope::<Dynamic>(&mut scope, &compiled.entry)
+        .map_err(|e| e.to_string())?;
+    contract::from_dynamic(&value)
 }

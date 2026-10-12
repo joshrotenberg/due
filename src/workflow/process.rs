@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -57,6 +57,40 @@ pub struct Collected {
     pub stop_cause: Option<String>,
 }
 
+/// Sticky first cause, shared by collectors and host receipt/admission errors.
+#[derive(Clone)]
+pub struct Stop {
+    pub cancelled: Arc<AtomicBool>,
+    cause: Arc<Mutex<Option<String>>>,
+    prefix: String,
+}
+impl Stop {
+    pub fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled,
+            cause: Arc::new(Mutex::new(None)),
+            prefix: String::new(),
+        }
+    }
+    pub fn step(&self, id: &str) -> Self {
+        Self {
+            prefix: format!("step {id}: "),
+            ..self.clone()
+        }
+    }
+    pub fn cause(&self) -> Option<String> {
+        self.cause.lock().expect("stop cause lock").clone()
+    }
+    pub fn fail(&self, error: String) -> String {
+        let mut cause = self.cause.lock().expect("stop cause lock");
+        let first = cause
+            .get_or_insert_with(|| format!("{}{error}", self.prefix))
+            .clone();
+        self.cancelled.store(true, Ordering::SeqCst);
+        first
+    }
+}
+
 enum Failure {
     Host(String),
     Protocol(String),
@@ -68,10 +102,24 @@ impl From<String> for Failure {
     }
 }
 
+fn request_write_failure(error: std::io::Error, stop: &Stop, local: &AtomicBool) -> Failure {
+    let message = format!("write Due request: {error}");
+    // Killing one child before intake finishes can close its request pipe.
+    // Preserve that step's error without cancelling unrelated jobs.
+    if error.kind() == std::io::ErrorKind::BrokenPipe
+        && (local.load(Ordering::SeqCst) || stop.cancelled.load(Ordering::SeqCst))
+    {
+        Failure::Protocol(message)
+    } else {
+        stop.fail(message.clone());
+        Failure::Host(message)
+    }
+}
+
 async fn capture(
     mut reader: impl AsyncRead + Unpin,
     mut file: File,
-    cancelled: Arc<AtomicBool>,
+    stop: Stop,
 ) -> (Vec<u8>, Option<String>) {
     let mut captured = Vec::new();
     let mut error = None;
@@ -88,14 +136,14 @@ async fn capture(
                 if keep < n {
                     error = Some("child output exceeded 1 MiB; artifact truncated".into());
                 }
-                if error.is_some() {
-                    cancelled.store(true, Ordering::SeqCst);
+                if let Some(error) = &error {
+                    stop.fail(error.clone());
                 }
                 // Keep draining after truncation/error so cancellation cannot deadlock on a pipe.
             }
             Err(e) => {
                 error = Some(format!("child output read: {e}"));
-                cancelled.store(true, Ordering::SeqCst);
+                stop.fail(error.clone().unwrap());
                 break;
             }
         }
@@ -103,18 +151,18 @@ async fn capture(
     (captured, error)
 }
 
-pub async fn run(launch: Launch, cancelled: Arc<AtomicBool>) -> Collected {
+pub async fn run(launch: Launch, stop: Stop, local: Arc<AtomicBool>) -> Collected {
     let mut result = Collected {
         result: None,
         exit: json!({"code":null,"signal":null,"started":false}),
         error: None,
         stop_cause: None,
     };
-    let outcome = run_inner(&launch, cancelled.clone(), &mut result).await;
+    let outcome = run_inner(&launch, stop.clone(), local, &mut result).await;
     if let Err(error) = outcome {
         result.error = Some(match error {
             Failure::Host(error) => {
-                cancelled.store(true, Ordering::SeqCst);
+                stop.fail(error.clone());
                 result.stop_cause.get_or_insert(error.clone());
                 error
             }
@@ -126,7 +174,7 @@ pub async fn run(launch: Launch, cancelled: Arc<AtomicBool>) -> Collected {
         &launch.dir.join("exit.json"),
         &json!({"exit":result.exit,"error":result.error}),
     ) {
-        cancelled.store(true, Ordering::SeqCst);
+        stop.fail(e.clone());
         result.stop_cause.get_or_insert(e.clone());
         result.error = Some(match result.error.take() {
             Some(previous) => format!("{previous}; exit receipt: {e}"),
@@ -138,7 +186,8 @@ pub async fn run(launch: Launch, cancelled: Arc<AtomicBool>) -> Collected {
 
 async fn run_inner(
     launch: &Launch,
-    cancelled: Arc<AtomicBool>,
+    stop: Stop,
+    local: Arc<AtomicBool>,
     collected: &mut Collected,
 ) -> Result<(), Failure> {
     let out = private_file(&launch.dir.join("result.json"))?;
@@ -154,7 +203,7 @@ async fn run_inner(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if cancelled.load(Ordering::SeqCst) {
+    if stop.cancelled.load(Ordering::SeqCst) || local.load(Ordering::SeqCst) {
         return Err(Failure::Cancelled);
     }
     let mut child = command
@@ -164,23 +213,21 @@ async fn run_inner(
     collected.exit = json!({"started":true,"pid":pid,"code":null,"signal":null});
     // Persist identity while the child is still running, including interrupted runs.
     let start_error = save(&launch.dir.join("started.json"), &collected.exit).err();
-    if start_error.is_some() {
-        cancelled.store(true, Ordering::SeqCst);
+    if let Some(error) = &start_error {
+        stop.fail(error.clone());
     }
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let bytes = serde_json::to_vec(&launch.request).expect("JSON value");
-    let write_cancel = cancelled.clone();
+    let write_stop = stop.clone();
+    let write_local = local.clone();
     let write = async move {
         let outcome = stdin.write_all(&bytes).await;
         drop(stdin);
-        if outcome.is_err() {
-            write_cancel.store(true, Ordering::SeqCst);
-        }
-        outcome
+        outcome.map_err(|error| request_write_failure(error, &write_stop, &write_local))
     };
-    let wait_cancel = cancelled.clone();
+    let wait_cancel = stop.cancelled.clone();
     let wait = async {
         let mut signalled = false;
         let mut tick = tokio::time::interval(Duration::from_millis(10));
@@ -188,7 +235,7 @@ async fn run_inner(
             tokio::select! {
                 status = child.wait() => break status,
                 _ = tick.tick() => {
-                    if wait_cancel.load(Ordering::SeqCst) && !signalled {
+                    if (wait_cancel.load(Ordering::SeqCst) || local.load(Ordering::SeqCst)) && !signalled {
                         #[cfg(unix)]
                         unsafe { libc::kill(pid as i32, libc::SIGTERM); }
                         signalled = true;
@@ -202,8 +249,8 @@ async fn run_inner(
     let (status, written, stdout, stderr) = tokio::join!(
         wait,
         write,
-        capture(stdout, out, cancelled.clone()),
-        capture(stderr, err, cancelled)
+        capture(stdout, out, stop.clone()),
+        capture(stderr, err, stop)
     );
     let status = status.map_err(|e| format!("wait Due child: {e}"))?;
     #[cfg(unix)]
@@ -215,18 +262,36 @@ async fn run_inner(
     let signal: Option<i32> = None;
     collected.exit = json!({"started":true,"pid":pid,"code":status.code(),"signal":signal});
     collected.result = serde_json::from_slice(&stdout.0).ok();
-    if let Some(error) = start_error
-        .or(stdout.1)
-        .or(stderr.1)
-        .or_else(|| written.err().map(|e| format!("write Due request: {e}")))
-    {
+    if let Some(error) = start_error.or(stdout.1).or(stderr.1) {
         collected.stop_cause = Some(error.clone());
         return Err(error.into());
     }
+    written?;
     if collected.result.is_none() {
         return Err(Failure::Protocol(
             "Due child did not emit one JSON result; see result.json".into(),
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn broken_request_pipe_after_local_cancel_does_not_stop_siblings() {
+        for (cancelled, global) in [(true, false), (false, false), (false, true), (true, true)] {
+            let (mut writer, reader) = UnixStream::pair().unwrap();
+            drop(reader);
+            let error = writer.write_all(&vec![0; 60 * 1024]).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            let stop = Stop::new(Arc::new(AtomicBool::new(global)));
+            let failure = request_write_failure(error, &stop, &AtomicBool::new(cancelled));
+            assert_eq!(matches!(failure, Failure::Protocol(_)), cancelled || global);
+            assert_eq!(stop.cancelled.load(Ordering::SeqCst), !cancelled || global);
+            assert_eq!(stop.cause().is_some(), !cancelled && !global);
+        }
+    }
 }

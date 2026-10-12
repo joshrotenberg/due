@@ -1,4 +1,4 @@
-use super::contract;
+use super::{Language, contract};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -35,6 +35,7 @@ pub struct ResolvedProfile {
 }
 pub struct Bundle {
     pub manifest: Manifest,
+    pub language: Language,
     pub entry: String,
     pub modules: BTreeMap<String, String>,
     pub input: Value,
@@ -111,6 +112,7 @@ impl Bundle {
             sources.insert(path, text.clone());
             Ok(text)
         };
+        let language = Language::from_path(&manifest.entry)?;
         let entry = snapshot_file(&manifest.entry)?;
         let input_schema: Value = serde_json::from_str(&snapshot_file(&manifest.input_schema)?)
             .map_err(|e| e.to_string())?;
@@ -121,17 +123,17 @@ impl Bundle {
             serde_json::from_str(&input_source).map_err(|e| format!("input: {e}"))?;
         contract::validate(&contract::validator(&input_schema)?, &input)
             .map_err(|e| format!("input: {e}"))?;
-        let _ = contract::to_dynamic(&input)?;
+        contract::check_value(&input)?;
         let output_validator = contract::validator(&output_schema)?;
         let mut modules = BTreeMap::new();
-        modules.insert(
-            "patterns/v1".into(),
-            include_str!("../../assets/workflow/patterns-v1.rhai").into(),
-        );
+        modules.insert("patterns/v1".into(), language.patterns().into());
         for (key, path) in &manifest.modules {
             name(key.strip_prefix("local/").ok_or(
                 "module names must start with local/; bundled and host names are reserved",
             )?)?;
+            if Language::from_path(path)? != language {
+                return Err("module language must match entry".into());
+            }
             modules.insert(key.clone(), snapshot_file(path)?);
         }
         let mut profiles = BTreeMap::new();
@@ -195,6 +197,7 @@ impl Bundle {
         let snapshot = json!({"manifest_path":manifest_path,"manifest_source":source,"sources":sources,"modules":modules,"input":input,"profiles":resolved});
         Ok(Self {
             manifest,
+            language,
             entry,
             modules,
             input,

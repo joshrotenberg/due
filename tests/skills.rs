@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
-#[cfg(not(feature = "workflow-spike"))]
+#[cfg(not(any(feature = "workflow-spike", feature = "workflow-lua-spike")))]
 const SKILLS: [&str; 3] = ["run", "contracts", "observe"];
-#[cfg(feature = "workflow-spike")]
+#[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
 const SKILLS: [&str; 4] = ["run", "contracts", "observe", "workflow"];
 
 struct Standalone {

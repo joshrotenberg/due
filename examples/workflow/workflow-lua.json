@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "entry": "review.lua",
+  "input_schema": "input.schema.json",
+  "output_schema": "answer.schema.json",
+  "max_runs": 5,
+  "max_concurrency": 2,
+  "profiles": {
+    "reader": {
+      "request": {
+        "schema_version": 1,
+        "provider": "codex",
+        "cwd": ".",
+        "schema": "answer.schema.json",
+        "native_args": ["--sandbox", "read-only"]
+      }
+    }
+  },
+  "modules": { "local/review": "local-review.lua" }
+}

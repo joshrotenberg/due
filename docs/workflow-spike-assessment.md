@@ -1,4 +1,9 @@
-# Rhai spike assessment
+# Rhai spike assessment (historical f6aec6e)
+
+This assessment describes the completed Rhai-only base. The Lua comparison
+branch changes the batch host to shared run handles and real completion-order
+collection; see [the language comparison](workflow-language-comparison.md). Measurements and
+independent reviews below have **not** been repeated or attributed to this branch.
 
 Recommendation: keep the experiment, then simplify the boundary before promoting
 it. The concrete result supports a script library over a small execution host.

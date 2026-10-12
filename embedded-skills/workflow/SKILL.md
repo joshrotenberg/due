@@ -1,9 +1,11 @@
 ---
 name: workflow
-description: Author and check an experimental bounded Rhai workflow with caller-declared Due profiles, schema gates, and private subprocess receipts.
+description: Author and check an experimental bounded Lua or Rhai workflow with caller-declared Due profiles, schema gates, and private subprocess receipts.
 ---
 
-Use this only with a binary built with Cargo feature `workflow-spike`. This is a
+Use this only with `workflow-spike` (Rhai) or `workflow-lua-spike` (Lua),
+or both. The entry extension `.rhai` / `.lua` selects the runtime; unavailable
+languages fail before children. Default builds expose neither. This is a
 Unix execution spike, not a production release or an OS sandbox. For one task,
 `due run` is cheaper and simpler. Existing native permissions still apply.
 
@@ -79,7 +81,8 @@ Exact API:
 
 - `due::run(#{id, profile, prompt})` returns one step outcome.
 - `due::parallel(group, [jobs])` reserves the entire batch before any launch,
-  runs at most max_concurrency children, and returns outcomes in input order.
+  runs at most max_concurrency children with available slots reused immediately,
+  and returns outcomes in input order.
   IDs are globally unique, 1..64 ASCII alphanumerics, `_` or `-`; group uses the
   same grammar. Jobs accept only id/profile/prompt. Prompt is 1..65536 bytes.
 - `due::phase(text)` sets subsequent step metadata (at most 256 bytes).
@@ -111,10 +114,12 @@ import `"local/review" as review`. Only function definitions are extracted;
 all top-level module statements, imports, constants and effects are discarded.
 Import dependencies inside functions. Local functions can call the same due/json
 primitives as bundled functions. Module names must be local/NAME; patterns/v1,
-due and json are reserved. Host namespace names cannot be rebound. Input is a
+due and json are reserved. Host namespace names cannot be rebound. Rhai input is a
 constant. No eval, filesystem resolver, shell, filesystem or network API is
 exposed. Blocking sleep, timestamps and Rhai's permissive parse_json are absent.
-Backtick interpolation is unsupported; use concatenation.
+Rhai parses ordinary syntax, including interpolation. Reserved bindings are
+checked using its AST; there is no extra lexer. Lua uses ordinary table/global
+bindings; changing or dropping a script binding never transfers job ownership.
 
 Schemas use a restricted Draft 2020-12 dialect. Supported keywords: $schema
 (exact https://json-schema.org/draft/2020-12/schema), type, enum, const, required,
@@ -129,9 +134,9 @@ blob, function-pointer and other non-JSON values are rejected.
 
 Fixed limits: 1..64 runs, 1..8 concurrency (no greater than max_runs), 1..32
 profiles, <=32 local modules, 1 MiB per source/JSON value/child stdout/stderr/trace,
-32 JSON/schema nesting, 100000 VM operations, 32 call depth, 4096 array items,
-256 map entries/variables, 128 functions and 64 module imports. Workflow logging
-has a 2048-record/1 MiB budget. Batches join in concurrency-sized chunks. Output
+32 JSON/schema nesting, 100000 Rhai VM operations, 32 Rhai call depth, 4096 array items,
+256 object entries (and Rhai variables), 128 Rhai functions and 64 Rhai module imports. Workflow logging
+has a 2048-record/1 MiB budget. Work uses available slots in admission order. Output
 overflow stops admissions, signals children, drains pipes, and retains truncated
 bytes plus the error; trace overflow is recorded by the child's trace.incomplete.
 No provider deadline is invented; caller request.timeout remains available.
@@ -142,3 +147,110 @@ not protection against a provider with the same user permissions. Do not put
 untrusted writable workloads around the receipt directory. This spike does not
 verify workspace overlap, effects, authentication, native flag support or costs.
 No retries, resume, scheduler, server, tools, workspace creation or registry.
+
+
+## Shared run handles and cleanup
+
+Lua uses `due.start/wait/wait_any/cancel/run/parallel/phase/log` and `json.encode`;
+Rhai uses `::`. They have the same host semantics:
+
+- `start(job)` admits one job and returns an opaque, cheap Rust-backed RunHandle.
+  It does not wait for completion. A full concurrency limit queues the job under
+  the invocation's max_runs budget. IDs remain globally unique across all calls.
+- `wait(handle)` returns the cached outcome after cleanup and recording. Repeated
+  waits return the same value without additional provider work.
+- `wait_any([handles])` (Lua `{handles}`) returns one outcome with `id` and a
+  zero-based `completion_seq`. Rust assigns the sequence when a subprocess has
+  exited and its output collectors have joined, before receipt writes. This is
+  observed completion order, not a claim about native exit timestamps. Already
+  completed handles are eligible; the smallest sequence wins, even when passed
+  after a later completion. Remove the returned ID yourself to consume arrivals.
+- `cancel(handle)` requests cancellation and awaits that job's cleanup. It does
+  not stop siblings or global admission. A queued job never spawns. A previously
+  completed job returns its unchanged cached outcome. A completion racing a
+  cancellation may still succeed; `cancel_requested` records the request as seen
+  at collection and does not assert that a signal won the race.
+- Handles belong to exactly one invocation, cannot be serialized as JSON or
+  created from IDs/maps, and can be copied/reused within that invocation. Empty
+  wait_any lists, duplicates, foreign handles and malformed handles error.
+  Scripts cannot obtain foreign handles through the provided APIs. No events
+  are consumed by wait_any and no implicit cursor or timeout exists.
+
+run is start+wait; parallel validates and reserves its entire batch atomically
+before launch, then awaits all outcomes in input order. Final `steps` also stay
+in admission order; completion_seq and step_completed JSONL expose arrivals.
+Check performs none of these effects. Admission, collection and persistence
+failures are fatal and sticky, including when a script catches the callback
+error. Native failures and invalid answers are outcomes; callers may branch on
+`ok`. Argument errors produced by interpreter type checking can be caught as
+ordinary language errors but cannot forge handles or bypass host admission.
+
+Every admitted job remains Rust-owned. A normal return with outstanding jobs
+fails the workflow, cancels/joins them, and keeps their outcomes. Script errors,
+budget exhaustion, signals, dropped handles and secondary log/receipt failures
+also stop admission and cancel/join unfinished work. Closing the VM is never the
+cleanup mechanism. All outcomes survive in memory/stdout even if an individual
+receipt cannot be persisted. The first fatal cause remains the error; failed
+persistence of the final envelope is separately `artifact_error`.
+
+## Lua modules, JSON and budgets
+
+Use the same manifest, with entry `main.lua` and declared `.lua` module paths:
+
+```lua
+local p = require("patterns/v1")
+local handles = {
+    due.start(p.job("a", "reader", input.task)),
+    due.start(p.job("b", "reader", input.task))
+}
+local first = due.wait_any(handles)
+local other = first.id == "a" and handles[2] or handles[1]
+local replacement = due.start(p.job("replacement", "reader", json.encode(first)))
+local cancelled = due.cancel(other)
+return {first=first, cancelled=cancelled, replacement=due.wait(replacement)}
+```
+
+This raw outcome example needs max_runs >= 3 and a compatible final schema
+(e.g. boolean true). The bundled Lua module exports the same job/answer/answers/
+review functions as Rhai. A local Lua composition can return
+`{review=function(prefix,profile,task) ... end}`. At run time, require initializes
+bundled/declared modules once, in a bounded context where all due effects are
+disabled, and expects a plain string-keyed function table (<=128 functions).
+Captured constants and nested declared imports work; cycles fail. Initializers
+never execute during check. Rhai's function-only extraction still discards them.
+
+Explicit JSON null is `json.null` (mlua serde's sentinel), distinct from missing
+keys (`nil`). Empty arrays are `json.array()`; empty objects are `json.object()`
+or `{}`. Constructors accept plain tables too. Dense 1-based tables become arrays,
+string-keyed tables become objects. Mixed/sparse/cyclic tables, other userdata,
+functions, threads, invalid UTF-8 and nil final values fail. Checked conversion
+preserves signed i64 endpoints and rejects nonfinite/lossy integral floats; it
+never coerces integer values through f64. Lua integer arithmetic itself retains
+Lua's wrapping semantics. Use JSON input or math.mininteger/math.maxinteger for
+endpoints; oversized float literals cannot encode arbitrary exact integers.
+
+Lua is pinned mlua 0.12.2 with vendored Lua 5.4, async and serde. Its 16 MiB VM
+ceiling applies to compilation and evaluation. The shared 100000 instruction
+budget yields every 1000 instructions; an outer future refuses to resume after
+budget exhaustion or cancellation. pcall cannot catch this termination. The
+count includes module initialization and mlua glue and is not equivalent to Rhai
+operations. Catching a memory allocation error cannot reset the instruction count.
+Lua actually suspends through async callbacks while Rust supervises children.
+
+No io/os/debug/package or native loader, load/loadfile/dofile, print/warn,
+collectgarbage, metatable setters/getters, user coroutine controls, xpcall,
+table.sort, or string.find/match/gmatch/gsub/dump are exposed. Non-yieldable C
+callback paths and C pattern loops are deliberately excluded so they cannot
+trap budget termination inside a poll. Internal coroutine yield remains private
+to mlua async wrappers. Basic strings/tables/math/UTF-8, functions, closures,
+loops and pcall use ordinary Lua syntax. VM restrictions are not a native-process
+sandbox. See docs/workflow-spike.md and examples/workflow for complete source
+examples and the comparison's explicit limitations.
+
+table.move/insert/remove are bounded wrappers around Lua's C implementations.
+Moves may span at most 4096 items; insert/remove require a sequence within the
+4096-item limit. Sparse keys do not bypass these checks, and oversized integer
+spans are rejected before entering C. These errors can be caught normally;
+repeated catches still consume the shared instruction budget.
+string.rep returns immediately when both the repeated string and separator are
+empty, avoiding Lua 5.4's otherwise allocation-free C loop.

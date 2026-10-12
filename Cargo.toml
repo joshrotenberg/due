@@ -9,9 +9,11 @@ publish = false
 
 [features]
 workflow-spike = ["dep:rhai", "dep:jsonschema", "dep:libc"]
+workflow-lua-spike = ["dep:mlua", "dep:jsonschema", "dep:libc"]
 
 [dependencies]
-rhai = { version = "=1.26.1", optional = true, default-features = false, features = ["std"] }
+mlua = { version = "=0.12.2", optional = true, default-features = false, features = ["lua54", "vendored", "async", "serde"] }
+rhai = { version = "=1.26.1", optional = true, default-features = false, features = ["std", "internals"] }
 jsonschema = { version = "=0.56.0", optional = true, default-features = false }
 claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
 codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "1c0bbfa2a66024d094a8117ec83bca0d6b41232c" }

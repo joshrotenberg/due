@@ -19,10 +19,10 @@ struct Skill {
 }
 
 const SKILLS: &[Skill] = &[
-    #[cfg(feature = "workflow-spike")]
+    #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
     Skill {
         name: "workflow",
-        description: "Author and check an experimental bounded Rhai workflow with caller-declared Due profiles, schema gates, and private subprocess receipts.",
+        description: "Author and check an experimental bounded Lua or Rhai workflow with caller-declared Due profiles, schema gates, and private subprocess receipts.",
         content: include_str!("../embedded-skills/workflow/SKILL.md"),
     },
     Skill {

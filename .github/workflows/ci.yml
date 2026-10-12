@@ -31,12 +31,19 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets --target-dir target/default -- -D warnings
+      - run: cargo test --locked --target-dir target/default
       - name: Check the opt-in workflow spike
         run: |
-          cargo clippy --locked --all-targets --features workflow-spike -- -D warnings
-          cargo test --locked --features workflow-spike
+          for variant in rhai lua both; do
+            case "$variant" in
+              rhai) features=workflow-spike ;;
+              lua) features=workflow-lua-spike ;;
+              both) features=workflow-spike,workflow-lua-spike ;;
+            esac
+            cargo clippy --locked --all-targets --features "$features" --target-dir "target/$variant" -- -D warnings
+            cargo test --locked --features "$features" --target-dir "target/$variant"
+          done
       - name: Install from source and smoke-test offline commands
         shell: bash
         env:
@@ -58,5 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90
-      - run: cargo check --locked
-      - run: cargo check --locked --all-targets --features workflow-spike
+      - run: cargo check --locked --target-dir target/default
+      - run: cargo check --locked --all-targets --features workflow-spike --target-dir target/rhai
+      - run: cargo check --locked --all-targets --features workflow-lua-spike --target-dir target/lua
+      - run: cargo check --locked --all-targets --features workflow-spike,workflow-lua-spike --target-dir target/both

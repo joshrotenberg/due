@@ -19,8 +19,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Experimental bounded Rhai workflows (not a production interface).
-    #[cfg(feature = "workflow-spike")]
+    /// Experimental bounded Lua or Rhai workflows (not a production interface).
+    #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
     Workflow(crate::workflow::WorkflowArgs),
     /// Run one noninteractive turn, optionally continuing an existing session.
     Run(Box<RunCommand>),
@@ -193,7 +193,7 @@ pub struct RunCommand {
     pub trace_detail: bool,
 
     /// Internal workflow child capture limit; never forwarded to a provider.
-    #[cfg(feature = "workflow-spike")]
+    #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
     #[arg(long, hide = true)]
     pub workflow_trace_limit: bool,
 
@@ -230,7 +230,7 @@ pub struct RunArgs {
     pub trace_file: Option<PathBuf>,
     pub trace_interval: Option<Duration>,
     pub trace_detail: bool,
-    #[cfg(feature = "workflow-spike")]
+    #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
     pub workflow_trace_limit: bool,
     pub native_args: Vec<String>,
 }

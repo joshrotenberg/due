@@ -1,4 +1,5 @@
 //! Deliberately small, offline JSON Schema + checked Rhai JSON boundary.
+#[cfg(feature = "workflow-spike")]
 use rhai::{Array, Dynamic, FLOAT, INT, ImmutableString, Map};
 use serde_json::Value;
 
@@ -63,6 +64,7 @@ pub fn validate(schema: &jsonschema::Validator, value: &Value) -> Result<(), Str
         .map_err(|e| format!("{} at {}", e, e.instance_path()))
 }
 
+#[cfg(feature = "workflow-spike")]
 pub fn to_dynamic(value: &Value) -> Result<Dynamic, String> {
     fn convert(value: &Value, depth: usize) -> Result<Dynamic, String> {
         if depth > 32 {
@@ -100,9 +102,11 @@ pub fn to_dynamic(value: &Value) -> Result<Dynamic, String> {
     if serde_json::to_vec(value).map_err(|e| e.to_string())?.len() > MAX_BYTES {
         return Err("JSON exceeds 1 MiB".into());
     }
+    check_value(value)?;
     convert(value, 0)
 }
 
+#[cfg(feature = "workflow-spike")]
 pub fn from_dynamic(value: &Dynamic) -> Result<Value, String> {
     fn convert(v: &Dynamic, depth: usize) -> Result<Value, String> {
         if depth > 32 {
@@ -151,10 +155,11 @@ pub fn from_dynamic(value: &Dynamic) -> Result<Value, String> {
     if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > MAX_BYTES {
         return Err("JSON exceeds 1 MiB".into());
     }
+    check_value(&value)?;
     Ok(value)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "workflow-spike"))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -183,4 +188,47 @@ mod tests {
         assert!(validate(&schema, &json!({"x":null})).is_ok());
         assert!(validate(&schema, &json!({})).is_err());
     }
+}
+
+/// Interpreter-independent data limits. Signed integers never pass through f64.
+pub fn check_value(value: &Value) -> Result<(), String> {
+    fn visit(v: &Value, depth: usize) -> Result<(), String> {
+        if depth > 32 {
+            return Err("JSON nesting exceeds 32".into());
+        }
+        match v {
+            Value::Number(n) if n.is_u64() && n.as_i64().is_none() => {
+                return Err("JSON integer exceeds signed 64-bit range".into());
+            }
+            Value::Number(n) if n.is_f64() => {
+                let f = n.as_f64().ok_or("invalid float")?;
+                if !f.is_finite() || (f.fract() == 0.0 && f.abs() > 9_007_199_254_740_991.0) {
+                    return Err("nonfinite or potentially lossy integral float".into());
+                }
+            }
+            Value::Array(a) => {
+                if a.len() > 4096 {
+                    return Err("array exceeds 4096 items".into());
+                }
+                for v in a {
+                    visit(v, depth + 1)?;
+                }
+            }
+            Value::Object(o) => {
+                if o.len() > 256 {
+                    return Err("object exceeds 256 entries".into());
+                }
+                for v in o.values() {
+                    visit(v, depth + 1)?;
+                }
+            }
+            _ => (),
+        }
+        Ok(())
+    }
+    visit(value, 0)?;
+    if serde_json::to_vec(value).map_err(|e| e.to_string())?.len() > MAX_BYTES {
+        return Err("JSON exceeds 1 MiB".into());
+    }
+    Ok(())
 }

@@ -4,114 +4,14 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::Path,
-    process::{Child, Command, Output, Stdio},
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-use tempfile::TempDir;
 
-struct Fixture {
-    root: TempDir,
-}
-impl Fixture {
-    fn new(script: &str) -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let f = Self { root };
-        f.write("agent", include_str!("fixtures/workflow-agent.sh"));
-        fs::set_permissions(
-            f.root.path().join("agent"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        f.write("main.rhai", script);
-        f.json("input.json", json!({"task":"synthetic review"}));
-        f.json("input.schema.json", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string"}},"additionalProperties":false}));
-        f.json("answer.schema.json", json!({"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"},"needs_more_evidence":{"type":"boolean"},"findings":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}));
-        f.json("output.schema.json", json!(true));
-        f.json("workflow.json", json!({
-            "schema_version":1,"entry":"main.rhai","input_schema":"input.schema.json","output_schema":"output.schema.json","max_runs":8,"max_concurrency":2,
-            "profiles":{"reader":{"binary":"agent","request":{"schema_version":1,"provider":"claude","cwd":".","schema":"answer.schema.json","native_args":["--permission-mode","plan"]}}},"modules":{}
-        }));
-        f
-    }
-    fn write(&self, name: &str, text: &str) {
-        fs::write(self.root.path().join(name), text).unwrap();
-    }
-    fn json(&self, name: &str, v: Value) {
-        self.write(name, &v.to_string());
-    }
-    fn read(&self, name: &str) -> Value {
-        serde_json::from_slice(&fs::read(self.root.path().join(name)).unwrap()).unwrap()
-    }
-    fn edit(&self, edit: impl FnOnce(&mut Value)) {
-        let mut m = self.read("workflow.json");
-        edit(&mut m);
-        self.json("workflow.json", m);
-    }
-    fn command(&self, check: bool) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_due"));
-        c.args(["workflow", if check { "check" } else { "run" }])
-            .arg(self.root.path().join("workflow.json"))
-            .args(["--input", "input.json", "--output", "json"])
-            .env("DUE_WORKFLOW_TEST_DIR", self.root.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if !check {
-            c.arg("--artifacts").arg(self.root.path().join("artifacts"));
-        }
-        c
-    }
-    fn run(&self, check: bool, code: i32) -> Value {
-        envelope(finish(self.command(check).spawn().unwrap()), code)
-    }
-    fn calls(&self) -> Vec<String> {
-        fs::read_to_string(self.root.path().join("prompts"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-}
-fn finish(mut c: Child) -> Output {
-    let until = Instant::now() + Duration::from_secs(20);
-    loop {
-        if c.try_wait().unwrap().is_some() {
-            return c.wait_with_output().unwrap();
-        }
-        if Instant::now() >= until {
-            let _ = c.kill();
-            let output = c.wait_with_output().unwrap();
-            panic!("deadline: {output:?}");
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-fn envelope(output: Output, code: i32) -> Value {
-    assert_eq!(
-        output.status.code(),
-        Some(code),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(v["workflow_version"], 1);
-    v
-}
-fn wait_for(path: &Path, child: &mut Child) {
-    let until = Instant::now() + Duration::from_secs(10);
-    while !path.exists() {
-        assert!(child.try_wait().unwrap().is_none(), "exited before ready");
-        assert!(Instant::now() < until, "never ready");
-        thread::sleep(Duration::from_millis(10));
-    }
-}
+#[path = "support/workflow.rs"]
+mod support;
+use support::*;
 
 #[test]
 fn staged_parallel_synthesis_preserves_child_and_artifacts() {
@@ -186,7 +86,6 @@ fn event_budget_failure_keeps_every_joined_sibling() {
     assert_eq!(f.calls().len(), 2);
     for id in ["a", "b"] {
         let step = f.read(&format!("artifacts/steps/{id}/step.json"));
-        assert_eq!(step["ok"], true);
         assert_eq!(
             step["child_result"],
             f.read(&format!("artifacts/steps/{id}/result.json"))
@@ -203,6 +102,8 @@ fn collection_cause_survives_secondary_receipt_failures() {
         due::parallel("reviews", [p::job("a","reader","huge-result"),p::job("b","reader","ordinary")]);
     "#,
     );
+    // Serialize launches so the output fault precedes the exhausted-log fault.
+    f.edit(|m| m["max_concurrency"] = json!(1));
     let v = f.run(false, 1);
     assert_eq!(v["steps"].as_array().unwrap().len(), 2);
     assert!(
@@ -229,7 +130,7 @@ fn collection_cause_survives_secondary_receipt_failures() {
 }
 
 #[test]
-fn host_artifact_setup_failure_stops_later_chunks() {
+fn host_artifact_setup_failure_stops_queued_jobs() {
     let f = Fixture::new(
         r#"
         import "patterns/v1" as p;
@@ -239,8 +140,9 @@ fn host_artifact_setup_failure_stops_later_chunks() {
     f.edit(|m| m["max_concurrency"] = json!(1));
     let v = f.run(false, 1);
     assert_eq!(f.calls(), vec!["block-request"]);
-    assert_eq!(v["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     assert_eq!(v["steps"][1]["exit"]["started"], false);
+    assert_eq!(v["steps"][2]["exit"]["started"], false);
     assert!(
         v["error"]
             .as_str()

@@ -18,6 +18,22 @@ case "$prompt" in
     huge-result-bad-exit*) printf collision > "$DUE_WORKFLOW_TEST_DIR/artifacts/steps/a/exit.json" ;;
 esac
 case "$prompt" in
+    slow*)
+        printf '%s' "$$" > "$DUE_WORKFLOW_TEST_DIR/slow-pid"
+        printf ready > "$DUE_WORKFLOW_TEST_DIR/slow-ready"
+        /bin/sleep 1000 &
+        descendant=$!
+        printf '%s\n' "$descendant" >> "$DUE_WORKFLOW_TEST_DIR/pids"
+        wait "$descendant" ;;
+    fast*)
+        while [ ! -f "$DUE_WORKFLOW_TEST_DIR/slow-ready" ]; do /bin/sleep 0.01; done ;;
+    replacement*)
+        kill -0 "$(/bin/cat "$DUE_WORKFLOW_TEST_DIR/slow-pid")"
+        printf ready > "$DUE_WORKFLOW_TEST_DIR/replacement-ready" ;;
+    barrier-*)
+        label=${prompt#barrier-}
+        printf ready > "$DUE_WORKFLOW_TEST_DIR/$label-ready"
+        while [ ! -f "$DUE_WORKFLOW_TEST_DIR/$label-release" ]; do /bin/sleep 0.01; done ;;
     trace-flood*)
         i=0
         while [ "$i" -lt 4000 ]; do
