@@ -109,6 +109,74 @@ fn mixed_modules_cache_nested_imports_and_reusable_component() {
 }
 
 #[test]
+fn v1_lua_entry_with_fennel_module_snapshot_shim_and_loading_rules() {
+    let f = fixture(
+        r#"
+        assert(setmetatable==nil and debug==nil)
+        assert(getmetatable({})==nil and getmetatable('string')==nil)
+        assert(getmetatable(json.array())==nil and getmetatable(json.object())==nil)
+        assert(getmetatable(json.null)==nil)
+        return require('local/f').answer()
+    "#,
+        "lua",
+    );
+    let source = "{:answer (fn [] (local [head & rest] [1 2 3]) {:head head :rest rest})}";
+    f.write("functions.fnl", source);
+    f.edit(|m| {
+        m["schema_version"] = json!(1);
+        m["modules"] = json!({"local/f":"functions.fnl"});
+    });
+    f.run(true, 0);
+    assert!(!f.root.path().join("artifacts").exists());
+    assert_eq!(f.run(false, 0)["output"], json!({"head":1,"rest":[2,3]}));
+    let snapshot = f.read("artifacts/snapshot.json");
+    assert_eq!(snapshot["fennel"]["version"], "1.6.1");
+    assert_eq!(snapshot["fennel"]["original"]["functions.fnl"], source);
+    assert!(
+        snapshot["fennel"]["compiled"]["functions.fnl"]["lua"]
+            .as_str()
+            .unwrap()
+            .contains("getmetatable")
+    );
+    assert!(snapshot["fennel"]["compiled"]["functions.fnl"]["map"].is_array());
+    assert!(snapshot["fennel"]["compiled"].get("main.lua").is_none());
+    assert!(f.calls().is_empty());
+
+    // Fennel in a v1 bundle opts into sticky ordinary module failures, too.
+    for (source, expected) in [
+        ("(pcall (fn [] (due.log :init))) {}", "effects unavailable"),
+        (
+            "(due.start {:id :init :profile :reader :prompt :never}) {}",
+            "effects unavailable",
+        ),
+        ("(error :bad-initializer)", "bad-initializer"),
+        ("(require :local/f)", "cyclic module initialization"),
+        ("(require :missing)", "undeclared module missing"),
+        ("{:bad 42}", "function table"),
+    ] {
+        let f = fixture("pcall(require,'local/f'); return true", "lua");
+        f.write("functions.fnl", source);
+        f.edit(|m| {
+            m["schema_version"] = json!(1);
+            m["modules"] = json!({"local/f":"functions.fnl"});
+        });
+        f.run(true, 0);
+        assert!(!f.root.path().join("artifacts").exists());
+        let message = error(&f, false);
+        assert!(message.contains(expected), "{message}");
+    }
+    // The rule applies to the bundle, even for a failed Lua import before the
+    // Fennel module is first required.
+    let f = fixture("pcall(require,'missing'); return true", "lua");
+    f.write("functions.fnl", "{}");
+    f.edit(|m| {
+        m["schema_version"] = json!(1);
+        m["modules"] = json!({"local/f":"functions.fnl"});
+    });
+    assert!(error(&f, false).contains("undeclared module missing"));
+}
+
+#[test]
 fn loading_is_effect_disabled_and_failures_are_sticky_even_when_caught() {
     for (language, source) in [
         (
@@ -295,9 +363,33 @@ fn parser_macro_and_post_wait_callback_errors_have_verified_locations() {
         f.write("a-release", "go");
         let v = envelope(finish(child), 1);
         let message = v["error"].as_str().unwrap();
-        assert!(message.contains("nested/inner.fnl:6"), "{message}");
+        let snapshot = f.read("artifacts/snapshot.json");
+        let compiled = &snapshot["fennel"]["compiled"]["nested/inner.fnl"];
+        let generated = compiled["lua"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .position(|line| {
+                line.contains(if body == "(due.wait {})" {
+                    "due.wait({})"
+                } else {
+                    "after-wait"
+                })
+            })
+            .unwrap()
+            + 1;
+        assert_ne!(
+            generated, 6,
+            "fixture must distinguish source and generated lines"
+        );
+        assert_eq!(
+            compiled["map"][generated - 1],
+            json!(["nested/inner.fnl", 6])
+        );
         assert!(
-            message.contains("generated Lua nested/inner.fnl:"),
+            message.contains(&format!(
+                "nested/inner.fnl:6 (generated Lua nested/inner.fnl:{generated})"
+            )),
             "{message}"
         );
         assert_eq!(v["steps"][0]["ok"], true);
@@ -405,63 +497,85 @@ fn compiler_memory_operation_expansion_and_generated_output_budgets() {
 
 #[test]
 #[ignore = "requires native process inspection (/bin/ps); run explicitly outside a sandbox that denies it"]
-fn sigterm_during_compilation_joins_even_a_stopped_compiler() {
+fn signals_during_compilation_join_even_a_stopped_compiler() {
+    use std::os::unix::process::CommandExt;
     use std::time::{Duration, Instant};
-    for check in [false, true] {
-        let f = fixture(
-            &format!("(fn [x] {} true)", "(+ 1 2) ".repeat(14000)),
-            "fnl",
-        );
-        let mut child = f.command(check).spawn().unwrap();
-        let start = Instant::now();
-        let compiler = loop {
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "exited before compiler readiness"
-            );
-            assert!(
-                start.elapsed() < Duration::from_secs(3),
-                "compiler never started"
-            );
-            let ps = Command::new("/bin/ps")
-                .args(["-axo", "pid=,ppid="])
-                .output()
-                .unwrap();
-            assert!(ps.status.success());
-            let found = String::from_utf8(ps.stdout)
-                .unwrap()
-                .lines()
-                .find_map(|line| {
-                    let mut fields = line.split_whitespace();
-                    let pid = fields.next()?.parse::<i32>().ok()?;
-                    let parent = fields.next()?.parse::<u32>().ok()?;
-                    (parent == child.id()).then_some(pid)
-                });
-            if let Some(pid) = found
-                && unsafe { libc::kill(pid, libc::SIGSTOP) } == 0
-            {
-                break pid;
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        for target in ["parent", "group", "helper"] {
+            for check in [false, true] {
+                let f = fixture(
+                    &format!("(fn [x] {} true)", "(+ 1 2) ".repeat(14000)),
+                    "fnl",
+                );
+                // Every negative-PID signal below is scoped to this workflow's group.
+                let mut child = f.command(check).process_group(0).spawn().unwrap();
+                let start = Instant::now();
+                let compiler = loop {
+                    assert!(
+                        child.try_wait().unwrap().is_none(),
+                        "exited before compiler readiness"
+                    );
+                    assert!(
+                        start.elapsed() < Duration::from_secs(3),
+                        "compiler never started"
+                    );
+                    let ps = Command::new("/bin/ps")
+                        .args(["-axo", "pid=,ppid="])
+                        .output()
+                        .unwrap();
+                    assert!(ps.status.success());
+                    let found = String::from_utf8(ps.stdout)
+                        .unwrap()
+                        .lines()
+                        .find_map(|line| {
+                            let mut fields = line.split_whitespace();
+                            let pid = fields.next()?.parse::<i32>().ok()?;
+                            let parent = fields.next()?.parse::<u32>().ok()?;
+                            (parent == child.id()).then_some(pid)
+                        });
+                    if let Some(pid) = found
+                        && unsafe { libc::kill(pid, libc::SIGSTOP) } == 0
+                    {
+                        break pid;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                let parent = child.id() as i32;
+                assert_eq!(
+                    unsafe { libc::getpgid(compiler) },
+                    parent,
+                    "helper left parent's group"
+                );
+                let destination = match target {
+                    "group" => -parent,
+                    "helper" => compiler,
+                    _ => parent,
+                };
+                assert_eq!(unsafe { libc::kill(destination, signal) }, 0);
+                if target != "parent" {
+                    // A stopped helper needs SIGCONT to act on pending SIGINT/SIGTERM.
+                    // The parent may already have killed/reaped it during group cleanup.
+                    unsafe {
+                        libc::kill(compiler, libc::SIGCONT);
+                    }
+                }
+                let v = envelope(finish(child), 130);
+                assert_eq!(v["status"], "cancelled");
+                assert!(
+                    v["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("compilation cancelled")
+                );
+                assert_ne!(
+                    unsafe { libc::kill(compiler, 0) },
+                    0,
+                    "compiler survived parent cancellation"
+                );
+                assert!(f.calls().is_empty());
+                assert!(!f.root.path().join("artifacts").exists());
             }
-            std::thread::sleep(Duration::from_millis(1));
-        };
-        unsafe {
-            libc::kill(child.id() as i32, libc::SIGTERM);
         }
-        let v = envelope(finish(child), 130);
-        assert_eq!(v["status"], "cancelled");
-        assert!(
-            v["error"]
-                .as_str()
-                .unwrap()
-                .contains("compilation cancelled")
-        );
-        assert_ne!(
-            unsafe { libc::kill(compiler, 0) },
-            0,
-            "compiler survived parent cancellation"
-        );
-        assert!(f.calls().is_empty());
-        assert!(!f.root.path().join("artifacts").exists());
     }
 }
 

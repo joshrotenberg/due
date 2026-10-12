@@ -169,11 +169,11 @@ async fn execute_inner(
         if artifacts.is_some() && !cfg!(unix) { return Err("workflow run spike requires Unix signal cleanup".into()); }
         let bundle = Bundle::load(&options.manifest, &options.input)?;
         #[cfg(feature = "workflow-fennel-spike")]
-        let bundle = if artifacts.is_none() {
+        let bundle = if artifacts.is_none() && fennel::needs_compiler(&bundle) {
             // Source reads retain normal OS signals. Only compilation owns a
             // helper that needs explicit cancellation and joining during check.
             let signal = crate::shutdown_signal().map_err(|e| e.to_string())?;
-            let compilation = fennel::prepare(bundle, cancelled.clone());
+            let compilation = fennel::prepare(bundle, cancelled.clone(), interrupted.clone());
             tokio::pin!(compilation);
             tokio::select! {
                 result = &mut compilation => result?,
@@ -183,7 +183,7 @@ async fn execute_inner(
                     compilation.await?
                 }
             }
-        } else { fennel::prepare(bundle, cancelled.clone()).await? };
+        } else { fennel::prepare(bundle, cancelled.clone(), interrupted.clone()).await? };
         let language = bundle.language;
         language.check(&bundle)?;
         let Some(artifacts) = artifacts else {
@@ -256,4 +256,103 @@ async fn execute_inner(
         return (envelope, 1);
     }
     (envelope, code)
+}
+
+#[cfg(all(test, unix, feature = "workflow-fennel-spike"))]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        os::unix::process::{CommandExt, ExitStatusExt},
+        process::{Command, Stdio},
+    };
+
+    #[tokio::test]
+    async fn plain_check_signal_probe() {
+        let Ok(language) = std::env::var("DUE_PLAIN_CHECK_PROBE") else {
+            return;
+        };
+        // The parent owns cleanup because this probe must die by signal.
+        let path = PathBuf::from(std::env::var_os("DUE_PLAIN_CHECK_DIR").unwrap());
+        let entry = format!("main.{language}");
+        fs::write(
+            path.join(&entry),
+            if language == "lua" {
+                "return true"
+            } else {
+                "true"
+            },
+        )
+        .unwrap();
+        fs::write(path.join("schema.json"), "true").unwrap();
+        fs::write(path.join("input.json"), "{}").unwrap();
+        fs::write(path.join("workflow.json"), json!({
+            "schema_version":1,"entry":entry,"input_schema":"schema.json","output_schema":"schema.json",
+            "max_runs":1,"max_concurrency":1,"profiles":{"reader":{
+                "binary":std::env::current_exe().unwrap(),
+                "request":{"schema_version":1,"provider":"claude","cwd":".","schema":"schema.json"}
+            }}
+        }).to_string()).unwrap();
+        let bundle = Bundle::load(&path.join("workflow.json"), Path::new("input.json")).unwrap();
+        assert!(!fennel::needs_compiler(&bundle));
+        let bundle = fennel::prepare(
+            bundle,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        assert!(bundle.snapshot.get("fennel").is_none());
+        assert_eq!(
+            execute(WorkflowArgs {
+                command: WorkflowCommand::Check(Options {
+                    manifest: path.join("workflow.json"),
+                    input: "input.json".into(),
+                    output: JsonOutput::Json
+                })
+            })
+            .await,
+            ExitCode::SUCCESS
+        );
+        let signal = std::env::var("DUE_PLAIN_CHECK_SIGNAL")
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        // A completed plain check must not leave Tokio's process-wide handler
+        // swallowing the default OS disposition (registration survives drop).
+        unsafe {
+            libc::raise(signal);
+        }
+        panic!("plain check installed a persistent signal handler");
+    }
+
+    #[test]
+    fn plain_checks_leave_default_signal_handling_in_fennel_builds() {
+        let languages = [
+            "lua",
+            #[cfg(feature = "workflow-spike")]
+            "rhai",
+        ];
+        for language in languages {
+            for signal in [libc::SIGINT, libc::SIGTERM] {
+                let dir = tempfile::tempdir().unwrap();
+                let status = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "workflow::tests::plain_check_signal_probe"])
+                    .env("DUE_PLAIN_CHECK_PROBE", language)
+                    .env("DUE_PLAIN_CHECK_SIGNAL", signal.to_string())
+                    .env("DUE_PLAIN_CHECK_DIR", dir.path())
+                    .process_group(0)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    status.status.signal(),
+                    Some(signal),
+                    "{}",
+                    String::from_utf8_lossy(&status.stderr)
+                );
+            }
+        }
+    }
 }

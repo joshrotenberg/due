@@ -262,6 +262,77 @@ fn check_executes_no_initializers_and_run_initialization_is_effect_disabled() {
 }
 
 #[test]
+fn ordinary_module_errors_are_recoverable_only_in_plain_v1_lua() {
+    for version in [1, 2] {
+        for (module, expected) in [
+            (None, "undeclared module local/m"),
+            (
+                Some("return require('local/m')"),
+                "cyclic module initialization",
+            ),
+            (Some("error('bad initializer')"), "bad initializer"),
+            (Some("return 42"), "table"),
+            (Some("return {bad=42}"), "function table"),
+            (Some("return json.array()"), "plain function table"),
+        ] {
+            let body = "local ok=pcall(require,'local/m'); assert(not ok); return require('local/good').answer()";
+            let f = lua(&if version == 1 {
+                body.to_owned()
+            } else {
+                format!("return function(input) {body} end")
+            });
+            f.write("good.lua", "return {answer=function() return 42 end}");
+            f.edit(|m| {
+                m["schema_version"] = json!(version);
+                m["modules"] = json!({"local/good":"good.lua"});
+                if let Some(source) = module {
+                    f.write("module.lua", source);
+                    m["modules"]["local/m"] = json!("module.lua");
+                }
+            });
+            f.run(true, 0);
+            let v = f.run(false, if version == 1 { 0 } else { 1 });
+            if version == 1 {
+                assert_eq!(v["output"], 42);
+            } else {
+                assert!(v["error"].as_str().unwrap().contains(expected), "{v}");
+            }
+            assert!(f.calls().is_empty());
+        }
+    }
+    // Failed initializers must also clear the loading marker for a later retry.
+    for failure in ["error('first attempt')", "require('local/m')"] {
+        let f = lua("assert(not pcall(require,'local/m')); return require('local/m').answer()");
+        f.write("module.lua", &format!("attempt=(attempt or 0)+1; if attempt==1 then {failure} end; return {{answer=function() return 42 end}}"));
+        f.edit(|m| m["modules"] = json!({"local/m":"module.lua"}));
+        assert_eq!(f.run(false, 0)["output"], 42);
+    }
+}
+
+#[test]
+fn v1_module_loading_effects_remain_sticky_when_caught() {
+    for effect in [
+        "due.log('init')",
+        "due.start({id='init',profile='reader',prompt='never'})",
+    ] {
+        let f = lua("pcall(require,'local/m'); return true");
+        f.write(
+            "module.lua",
+            &format!("pcall(function() {effect} end); return {{}}"),
+        );
+        f.edit(|m| m["modules"] = json!({"local/m":"module.lua"}));
+        f.run(true, 0);
+        assert!(
+            f.run(false, 1)["error"]
+                .as_str()
+                .unwrap()
+                .contains("effects unavailable")
+        );
+        assert!(f.calls().is_empty());
+    }
+}
+
+#[test]
 fn c_table_loops_are_bounded_and_errors_join_active_children() {
     let f = lua(r#"
         local t={1,3}; table.insert(t,2,2)

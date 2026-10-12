@@ -119,13 +119,34 @@ fn compile(lua: &Lua, source: &str, name: &str) -> mlua::Result<Function> {
         .set_mode(ChunkMode::Text)
         .into_function()
 }
+fn has_fennel(bundle: &Bundle) -> bool {
+    #[cfg(feature = "workflow-fennel-spike")]
+    return !bundle.source_maps.is_empty();
+    #[cfg(not(feature = "workflow-fennel-spike"))]
+    {
+        let _ = bundle;
+        false
+    }
+}
+fn chunk_name(bundle: &Bundle, name: &str) -> String {
+    #[cfg(feature = "workflow-fennel-spike")]
+    if bundle.source_maps.contains_key(name) {
+        return format!("@{name} (generated Lua)");
+    }
+    let _ = bundle;
+    format!("@{name}")
+}
 pub fn check(bundle: &Bundle) -> Result<(), String> {
     let lua = vm().map_err(|e| e.to_string())?;
-    compile(&lua, &bundle.entry, &format!("@{}", bundle.entry_name))
+    compile(&lua, &bundle.entry, &chunk_name(bundle, &bundle.entry_name))
         .map_err(|e| map_error(bundle, &e.to_string()))?;
     for (name, source) in &bundle.modules {
-        compile(&lua, source, &format!("@{}", bundle.module_names[name]))
-            .map_err(|e| map_error(bundle, &format!("{name}: {e}")))?;
+        compile(
+            &lua,
+            source,
+            &chunk_name(bundle, &bundle.module_names[name]),
+        )
+        .map_err(|e| map_error(bundle, &format!("{name}: {e}")))?;
     }
     Ok(())
 }
@@ -385,9 +406,17 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
         )?;
     }
     lua.globals().set("json", json)?;
-    let (modules, names) = {
+    let (modules, names, sticky_loading) = {
         let h = a.host.lock();
-        (h.bundle.modules.clone(), h.bundle.module_names.clone())
+        (
+            h.bundle.modules.clone(),
+            h.bundle
+                .module_names
+                .iter()
+                .map(|(key, name)| (key.clone(), chunk_name(&h.bundle, name)))
+                .collect::<HashMap<_, _>>(),
+            h.bundle.manifest.schema_version == 2 || has_fennel(&h.bundle),
+        )
     };
     let cache = Rc::new(RefCell::new(HashMap::<String, Table>::new()));
     let loading = Rc::new(RefCell::new(HashSet::<String>::new()));
@@ -400,20 +429,29 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
             let source = modules.get(&name).cloned();
             let filename = names.get(&name).cloned();
             async move {
+                // Legacy plain v1 Lua may recover from ordinary require errors.
+                // Due effects still call host.fail in enabled(), in every version.
+                let load_error = |e: Error| {
+                    if sticky_loading {
+                        err(a.host.fail(e.to_string()))
+                    } else {
+                        e
+                    }
+                };
                 if let Some(module) = cache.borrow().get(&name) {
                     return Ok(module.clone());
                 }
                 let source =
-                    source.ok_or_else(|| err(a.host.fail(format!("undeclared module {name}"))))?;
+                    source.ok_or_else(|| load_error(err(format!("undeclared module {name}"))))?;
                 if !loading.borrow_mut().insert(name.clone()) {
-                    return Err(err(a.host.fail("cyclic module initialization".into())));
+                    return Err(load_error(err("cyclic module initialization")));
                 }
                 a.initializing.set(a.initializing.get() + 1);
                 let result = async {
                     let function = compile(
                         &lua,
                         &source,
-                        &format!("@{}", filename.unwrap_or(name.clone())),
+                        &filename.unwrap_or_else(|| format!("@{name}")),
                     )?;
                     let module: Table = function.call_async(()).await?;
                     if module.metatable().is_some() {
@@ -435,7 +473,7 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
                 .await;
                 a.initializing.set(a.initializing.get() - 1);
                 loading.borrow_mut().remove(&name);
-                let module = result.map_err(|e: Error| err(a.host.fail(e.to_string())))?;
+                let module = result.map_err(load_error)?;
                 cache.borrow_mut().insert(name, module.clone());
                 Ok(module)
             }
@@ -448,8 +486,8 @@ fn install(lua: &Lua, a: Adapter) -> mlua::Result<()> {
 }
 async fn evaluate(host: SharedHost) -> mlua::Result<Json> {
     let lua = vm()?;
-    #[cfg(feature = "workflow-fennel-spike")]
-    if !host.lock().bundle.source_maps.is_empty() {
+    let track_locations = has_fennel(&host.lock().bundle);
+    if track_locations {
         // Fennel sequence-rest emits this call. Never return a real metatable,
         // including JSON markers, string methods or opaque handle internals.
         lua.globals().set(
@@ -461,28 +499,47 @@ async fn evaluate(host: SharedHost) -> mlua::Result<Json> {
     let hook_budget = budget.clone();
     let cancelled = host.lock().cancelled.clone();
     let diagnostic_host = host.clone();
-    lua.set_global_hook(
-        HookTriggers::new().every_nth_instruction(1000).every_line(),
-        move |_, debug| {
-            // A host-only line hook survives async wait + hook suspension and
-            // tail calls, where mlua callback tracebacks may lose the caller.
-            if let (Some(source), Some(line)) = (debug.source().source, debug.current_line()) {
-                let name = source.strip_prefix('@').unwrap_or(&source);
-                let mut h = diagnostic_host.lock();
-                if name == h.bundle.entry_name || h.bundle.module_names.values().any(|n| n == name)
-                {
-                    h.script_location = Some(source_location(&h.bundle, name, line));
-                }
+    let triggers = HookTriggers::new().every_nth_instruction(1000);
+    let triggers = if track_locations {
+        triggers.every_line()
+    } else {
+        triggers
+    };
+    lua.set_global_hook(triggers, move |_, debug| {
+        // A host-only line hook survives async wait + hook suspension and
+        // tail calls, where mlua callback tracebacks may lose the caller.
+        if track_locations
+            && matches!(debug.event(), DebugEvent::Line)
+            && let (Some(source), Some(line)) = (debug.source().source, debug.current_line())
+        {
+            let name = source.strip_prefix('@').unwrap_or(&source);
+            let mut h = diagnostic_host.lock();
+            // Only generated chunks carry this suffix; leave ordinary Lua
+            // filenames alone (including names that happen to end this way).
+            let name = name
+                .strip_suffix(" (generated Lua)")
+                .filter(|n| {
+                    #[cfg(feature = "workflow-fennel-spike")]
+                    return h.bundle.source_maps.contains_key(*n);
+                    #[cfg(not(feature = "workflow-fennel-spike"))]
+                    {
+                        let _ = n;
+                        false
+                    }
+                })
+                .unwrap_or(name);
+            if name == h.bundle.entry_name || h.bundle.module_names.values().any(|n| n == name) {
+                h.script_location = Some(source_location(&h.bundle, name, line));
             }
-            if !matches!(debug.event(), DebugEvent::Count) {
-                return Ok(VmState::Continue);
-            }
-            hook_budget.set(hook_budget.get() + 1000);
-            // Always yield control to the outer future, including inside pcall.
-            // That future terminates without resuming once the sticky budget trips.
-            Ok(VmState::Yield)
-        },
-    )?;
+        }
+        if !matches!(debug.event(), DebugEvent::Count) {
+            return Ok(VmState::Continue);
+        }
+        hook_budget.set(hook_budget.get() + 1000);
+        // Always yield control to the outer future, including inside pcall.
+        // That future terminates without resuming once the sticky budget trips.
+        Ok(VmState::Yield)
+    })?;
     let object_mt = lua.create_table()?;
     let initializing = Rc::new(Cell::new(0));
     install(
@@ -498,12 +555,12 @@ async fn evaluate(host: SharedHost) -> mlua::Result<Json> {
         (
             h.bundle.entry.clone(),
             h.bundle.input.clone(),
-            h.bundle.entry_name.clone(),
+            chunk_name(&h.bundle, &h.bundle.entry_name),
             h.bundle.manifest.schema_version,
         )
     };
     lua.globals().set("input", to_lua(&lua, &input)?)?;
-    let function = compile(&lua, &entry, &format!("@{name}"))?;
+    let function = compile(&lua, &entry, &name)?;
     let future = async {
         if version == 1 {
             return function.call_async::<Value>(()).await;
@@ -552,7 +609,7 @@ pub async fn run(host: SharedHost) -> Result<Json, String> {
 fn source_location(bundle: &Bundle, name: &str, line: usize) -> String {
     #[cfg(feature = "workflow-fennel-spike")]
     if let Some(map) = bundle.source_maps.get(name) {
-        return match map.get(line.saturating_sub(1)) {
+        return match line.checked_sub(1).and_then(|index| map.get(index)) {
             Some(Some((file, original))) => {
                 format!("{file}:{original} (generated Lua {name}:{line})")
             }
@@ -568,12 +625,30 @@ pub fn map_error(bundle: &Bundle, error: &str) -> String {
     {
         let mut locations = Vec::new();
         for name in bundle.source_maps.keys() {
-            let needle = format!("{name}:");
-            for (_, rest) in error
-                .match_indices(&needle)
-                .map(|(i, s)| (s, &error[i + s.len()..]))
-            {
+            let needle = format!("{name} (generated Lua):");
+            for (i, matched) in error.match_indices(&needle) {
+                // Whitespace and punctuation are legal in filenames too. A
+                // known longer chunk must win over any matching filename suffix.
+                if bundle.source_maps.keys().any(|other| {
+                    other
+                        .strip_suffix(name.as_str())
+                        .is_some_and(|prefix| !prefix.is_empty() && error[..i].ends_with(prefix))
+                }) {
+                    continue;
+                }
+                // A path suffix (a.fnl inside lib/a.fnl) is not a chunk match.
+                if i > 0
+                    && !error[..i].chars().next_back().is_some_and(|c| {
+                        c.is_whitespace() || matches!(c, ':' | '\'' | '"' | '[' | '(')
+                    })
+                {
+                    continue;
+                }
+                let rest = &error[i + matched.len()..];
                 let number: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                if !rest[number.len()..].starts_with(':') {
+                    continue;
+                }
                 if let Ok(line) = number.parse() {
                     let location = source_location(bundle, name, line);
                     if !locations.contains(&location) {
@@ -588,4 +663,68 @@ pub fn map_error(bundle: &Bundle, error: &str) -> String {
     }
     let _ = bundle;
     error.to_owned()
+}
+
+#[cfg(all(test, feature = "workflow-fennel-spike"))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mapped_locations_require_exact_generated_chunks_and_known_map_entries() {
+        let bundle = Bundle {
+            manifest: serde_json::from_value(json!({
+                "schema_version":2,"entry":"main.lua","input_schema":"schema.json",
+                "output_schema":"schema.json","max_runs":1,"max_concurrency":1,"profiles":{}
+            }))
+            .unwrap(),
+            language: super::super::Language::Lua,
+            entry: String::new(),
+            entry_name: "main.lua".into(),
+            modules: Default::default(),
+            module_names: Default::default(),
+            source_maps: [
+                ("a.fnl".into(), vec![Some(("a.fnl".into(), 111))]),
+                (
+                    "lib/a.fnl".into(),
+                    vec![Some(("lib/a.fnl".into(), 27)), None],
+                ),
+                ("lib a.fnl".into(), vec![Some(("lib a.fnl".into(), 39))]),
+                ("lib:a.fnl".into(), vec![Some(("lib:a.fnl".into(), 41))]),
+            ]
+            .into(),
+            input: Json::Null,
+            output_validator: contract::validator(&json!(true)).unwrap(),
+            profiles: Default::default(),
+            snapshot: Json::Null,
+        };
+        let raw = "runtime error: lib/a.fnl (generated Lua):1: failure";
+        assert_eq!(
+            map_error(&bundle, raw),
+            format!("lib/a.fnl:27 (generated Lua lib/a.fnl:1)\nraw Lua error: {raw}")
+        );
+        for (name, original) in [("lib a.fnl", 39), ("lib:a.fnl", 41)] {
+            let raw = format!("runtime error: {name} (generated Lua):1: failure");
+            assert_eq!(
+                map_error(&bundle, &raw),
+                format!("{name}:{original} (generated Lua {name}:1)\nraw Lua error: {raw}")
+            );
+        }
+        for line in [0, 2, 99] {
+            let raw = format!("lib/a.fnl (generated Lua):{line}: failure");
+            assert_eq!(
+                map_error(&bundle, &raw),
+                format!("generated Lua lib/a.fnl:{line} (unmapped)\nraw Lua error: {raw}")
+            );
+        }
+        for raw in [
+            "lib/a.fnl:1: unmarked",
+            "otherlib/a.fnl (generated Lua):1: failure",
+            "a.fnl (generated Lua):1suffix",
+        ] {
+            assert_eq!(map_error(&bundle, raw), raw);
+        }
+        assert_eq!(chunk_name(&bundle, "a.fnl"), "@a.fnl (generated Lua)");
+        assert_eq!(chunk_name(&bundle, "main.lua"), "@main.lua");
+    }
 }

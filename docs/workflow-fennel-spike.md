@@ -101,11 +101,14 @@ require v2. No existing v1 file is silently reinterpreted.
 
 A v1 Lua bundle may explicitly declare a Fennel function module. Each `.fnl`
 file is compiled once before any agent admission. Plain Lua bundles skip the
-compiler entirely, including when the feature is present. `.lua` and `.fnl`
-modules share manifest-only require, cache, cycle detection, effect-disabled
-initialization and plain string-keyed function exports (at most 128). Module
-load failures, undeclared imports, cycles, and effects attempted during loading
-remain sticky even through pcall. No child can be admitted before v2 invocation.
+compiler entirely, including when the feature is present; plain Lua/Rhai checks
+also retain normal OS signal handling without registering compiler handlers.
+`.lua` and `.fnl` modules share manifest-only require, cache, cycle detection,
+effect-disabled initialization and plain string-keyed function exports (at most 128). Module
+load failures, undeclared imports and cycles are sticky through pcall for v2
+and bundles containing Fennel. Plain v1 Lua retains recoverable ordinary module
+errors. Effects attempted during module loading remain sticky in every version.
+No child can be admitted before v2 invocation.
 Input/final/per-step validation requirements are unchanged.
 
 Check parses/compiles every declared source and validates manifests/schemas/input.
@@ -166,7 +169,9 @@ JSON uses the unchanged Rust validator/converter: `json.null` versus missing
 nil, explicit `(json.array)` and `(json.object)`, exact signed i64 and finite
 floats. Empty Fennel `[]` is an untagged Lua table, hence an empty JSON object.
 Mixed/sparse/cyclic tables, opaque handles, nonfinite floats and potentially lossy
-integral floats fail. Use input or math.mininteger/maxinteger for i64 endpoints.
+integral floats fail. Tests preserve large Lua/Fennel integer literals including
+9007199254740993 and i64 max. Use input or math.mininteger/maxinteger for signed
+i64 endpoints, avoiding parser differences at the minimum decimal literal.
 
 ## Resource and cancellation boundaries
 
@@ -190,8 +195,11 @@ The hook limit is sticky and checked after protected compilation returns. It is
 and C pattern/table/string loops may never execute another VM instruction.
 The parent async task continues observing shutdown and its fixed compiler-only
 wall clock. It kills and waits for the helper on cancellation/deadline/error,
-including when the parent future is dropped. There is no offloaded compiler
-thread to abandon. Source, generated-output and map checks also bound Rust-side
+including when the parent future is dropped. The helper stays in the parent's
+process group. Helper SIGINT/SIGTERM exits explicitly mark compilation interrupted
+(cancelled/130), even if helper completion wins the parent signal race; other
+abnormal exits remain compiler failures. There is no offloaded compiler thread
+to abandon. Source, generated-output and map checks also bound Rust-side
 transport. Parser stack failures and memory failures are compiler errors (or a
 failed helper exit), never reasons to admit work. Failed compilation creates no
 workflow receipt directory. Successful run snapshots are private.
@@ -206,10 +214,12 @@ escaped descendants; the compiler deadline does not change that contract.
 
 ## Diagnostics and provenance
 
-Compilation and generated Lua use actual manifest source names, including nested
-paths. Successful snapshots retain original Fennel, generated Lua, compiler
-version/hash/upstream commit/URL, fixed options, limits, the integration driver,
-and generated-line mappings. The compiler library is unmodified; provenance and
+Compilation uses actual manifest source names, including nested paths. Generated
+Lua chunks append ` (generated Lua)` to those names, so a raw generated line
+cannot masquerade as a mapped original Fennel line. Successful snapshots retain
+original Fennel, generated Lua, compiler version/hash/upstream commit/URL, fixed
+options, limits, the integration driver, and generated-line mappings. The compiler
+library is unmodified; provenance and
 MIT license are in [the vendor directory](../assets/vendor/fennel/README.md).
 No runtime metadata or compiler require is injected into generated workflow code.
 
@@ -222,14 +232,21 @@ as unmapped, never fabricated into exact source positions. Upstream macro
 locations may also appear. Upgrade requires provenance and map regression tests.
 
 Runtime diagnostics retain raw Lua errors and append mapped locations when
-available. A host-only line hook retains the last workflow file/line, including
-a tail-called callback after real due.wait suspension and instruction-hook
-yields, where mlua's callback traceback loses its script frame. The error text
+available, matching complete chunk names rather than path suffixes. Only bundles
+containing Fennel enable the extra host-only line hook; plain Lua retains its
+instruction-count hook without per-line location locking or formatting. The line
+hook retains the last workflow file/line, including a tail-called callback after
+real due.wait suspension and instruction-hook yields, where mlua's callback traceback loses its script frame. The error text
 labels that context as **last workflow location**, not necessarily the origin
 of an independent native collector failure. Debug is never exposed to scripts.
 Some generated lines have no map; their raw generated location remains useful
 alongside the snapshotted output. Arbitrary user error text is not trusted as
-proof of a source location; tests assert known file/line pairs after suspension.
+proof of a source location; post-wait tests assert the exact mapped form against
+the snapshotted map and require different generated and original line numbers.
+Lua may truncate long chunk names in raw errors, with the generated marker
+using some of that space. The host line hook retains the full path: an independent
+long-path probe verified the original line alongside the truncated raw error.
+Mapping arbitrary message text remains heuristic; it is not source provenance.
 
 ## Validation and comparison limits
 
@@ -243,27 +260,132 @@ Test-binary-only probes directly enter compiler C table/string/pattern paths to
 verify the helper watchdog and joining; that injection is not in the shipped
 helper or supported authoring subset.
 
-`sigterm_during_compilation_joins_even_a_stopped_compiler` additionally inspects
-the parent process tree, stops the actual compiler, sends SIGTERM to Due, and
-checks both check/run cleanup. It is ignored by default because this host's
+`signals_during_compilation_join_even_a_stopped_compiler` additionally inspects
+the parent process tree, stops the actual compiler, and tests SIGINT/SIGTERM
+to the parent, the isolated workflow process group and the helper alone, checking
+both check/run cancellation and cleanup. It verifies that the helper inherits
+the workflow parent's group. It is ignored by default because this host's
 sandbox denied `/bin/ps` (`Operation not permitted`) on the attempted run. Run
 explicitly where native process inspection is authorized:
 
 ```sh
 cargo test --locked --offline --features workflow-fennel-spike --target-dir target/fennel \
-  --test workflow_fennel sigterm_during_compilation -- --ignored
+  --test workflow_fennel signals_during_compilation -- --ignored
 ```
 
-CI configurations include Fennel-only and the full comparison, but remote CI has
-an account billing block; configuration is not evidence that remote jobs ran.
-The outer caller owns independent matrix/probes, Claude review, real read-only
-smoke, footprint measurements, sanitized publication and final recommendations.
-The unrelated intermittent sibling-cancellation timeout in issue #19 remains
-unresolved; a passing rerun does not repair it. No providers, delegation, issues,
-PRs, commits, pushes, installation or other checkouts were used for implementation.
+## Caller acceptance results
 
-The supported surface demonstrates Lisp authoring conveniences over Lua, with
-extra compiler isolation and diagnostic machinery. It adds no job capability and
-does not repair Lua's JSON conventions, restricted C APIs or native cleanup limits.
-No runtime winner, authoring-quality advantage, performance result or footprint
-claim follows from passing these fake-child tests.
+Codex implemented `9baafe3` and its review repairs through stable Due. Claude
+independently reviewed frozen snapshots through Due, approving the final changes.
+The caller verified the source and ran the post-repair matrix below on macOS arm64
+with explicit Cargo/rustc **1.90.0**. Main and installed Due were not modified.
+
+| Feature selection | Passing tests | Ignored by the ordinary suite |
+| --- | ---: | ---: |
+| Default | 114 | 0 |
+| Rhai | 146 | 0 |
+| Lua | 136 | 0 |
+| Lua + Fennel | 157 | 1 |
+| Full comparison | 178 | 1 |
+
+All five Clippy configurations passed with warnings denied, along with current
+rustfmt, whitespace checks and 22 Node caller tests. The expanded ignored compiler
+process-inspection test above **passed separately** with caller-side permission,
+checking parent/group/helper signals in both check and run. The worker's earlier
+EPERM was an environment boundary, not a reproduced compiler-lifecycle failure.
+A subsequent small filename-with-spaces guard passed its augmented unit test,
+Fennel Clippy and two independent release-binary diagnostic cases; no job logic
+changed after the matrix.
+
+The caller's separate fake-native fixture passed **44/44** cases. It verifies
+arrival-order branching and replacement, early return/error/budget/signal cleanup,
+mixed modules and sticky initialization, explicit null/empty containers, exact
+integer literals, rejected cyclic/mixed/sparse values, compiler restrictions and
+precise nested `.fnl:6` diagnostics after a real asynchronous wait. An initial
+caller validator incorrectly assumed every cancelled child's raw stdout was
+valid JSON; it was corrected to require that only when a decoded child result
+exists. Empty/partial cancellation captures are retained, not invented as results.
+
+A [two-provider authoring trial](https://github.com/joshrotenberg/due/issues/22)
+used one prompt/reference/schema. Claude and Codex each wrote both languages;
+all four scripts ran unchanged in four scenarios, **16/16 passed**. The independently
+selected outcome is a tie. Model/effort defaults were omitted and observed values
+remain unknown. This is no evidence of a general agent-authoring advantage.
+
+The pre-repair release Fennel build (`9baafe3`) also ran a real read-only workflow: concurrent Claude
+and Codex reviews of a synthetic fixture, then Claude synthesis. All three native
+envelopes, answer contracts and traces validated (16, 14 and 16 trace records,
+contiguous with successful terminals and no drops). Saved native receipts were
+preserved, the final answer retained the known defect, and workspace hashes did
+not change. No arbitrary provider deadline was imposed; the caller monitored
+progress. The subsequent fixes change interruption reporting, legacy module error
+handling and diagnostics. They were checked with the full post-repair matrix and
+fake-native probes; the paid happy-path calls were not repeated.
+
+## Review repairs and independently reproduced failures
+
+- Group-delivered SIGINT/SIGTERM could produce failed/1 instead of cancelled/130
+  when helper exit won the select race. The caller reproduced **30/32** wrong
+  statuses while all helpers were still cleaned up. Explicit interrupted-exit
+  classification passed the same **32/32** stressed cases, without moving the
+  helper out of the parent's group or masking other compiler crashes.
+- Plain v1 Lua inadvertently lost ordinary module-error recovery. Four independent
+  before/after cases cover missing modules, bad exports, initializer errors and
+  cycles. Recovery is restored only for plain v1; v2/Fennel failures and all Due
+  effects during initialization remain sticky.
+- Overlapping filenames could produce spurious source mappings. Generated chunks
+  now carry an explicit marker; matching prefers complete known filenames and
+  handles spaces/colons as well as slash-separated paths. Tests distinguish the
+  exact original line from generated lines and verify the saved map. The caller's
+  **10/10** compatibility/diagnostic cases and final space/colon cases passed.
+- Plain Lua/Rhai checks no longer install Fennel compiler signal handlers. Extra
+  per-line location tracking runs only in bundles containing Fennel. The documented
+  v1 Lua entry importing a Fennel component now has a regression test.
+- A superseded test harness hung because Rust consumed an externally sent SIGSEGV.
+  The worker disclosed the remaining test child; caller process inspection found
+  and terminated that exact orphan and verified its absence. The corrected
+  test-only probe restores the OS disposition and bounds waiting with kill/join
+  cleanup. This was a test-harness failure, not a production compiler leak.
+
+Claude's focused repair review approved the changes. A final small review also
+approved the filename guard and test-only cleanup repair with no findings.
+Long-path truncation above remains a documented diagnostic limitation.
+
+## Incremental footprint and assessment
+
+Local release builds from the same source/compiler/profile, without stripping:
+
+| Build | Executable bytes | MiB | Unique normal dependency entries, including Due |
+| --- | ---: | ---: | ---: |
+| Default | 3,147,920 | 3.002 | 61 |
+| Rhai | 12,092,224 | 11.532 | 119 |
+| Lua | 9,917,344 | 9.458 | 121 |
+| Lua + Fennel | 10,362,112 | 9.882 | 121 |
+| Full comparison | 13,294,784 | 12.679 | 132 |
+
+Fennel adds **444,768 bytes (about 434 KiB)** over the Lua build and no additional
+normal Rust dependencies. Vendored compiler source, license and compiler-binding
+maintenance still count as added dependencies/responsibilities. Normal dependency
+counts exclude build dependencies; cached build times are not comparable.
+`otool -L` shows only system libraries. These are local footprint measurements,
+not portable promises or interpreter-speed results.
+
+Fennel's tested benefit is authoring: destructuring, match, comprehensions,
+threading and Lisp syntax over ordinary Lua functions. It adds no host job
+capability and does not repair Lua's table/JSON conventions, native build,
+restricted C APIs or native cleanup limits. It adds a compiler subprocess and
+pinned implementation-dependent source-map integration. User macro libraries
+are excluded here, so this experiment establishes no broader ecosystem benefit.
+
+The Rhai-versus-Lua decision remains open. The previous narrower recommendation
+in [the Lua comparison](workflow-language-comparison.md) is not overturned by
+Fennel syntax; if Lua is chosen, Fennel is a viable optional authoring front end.
+Combined runtime features exist for experiments, not a shipping recommendation.
+Keep the job lifecycle and outcome truth in Rust and composition policy in scripts.
+
+The unrelated intermittent sibling-cancellation timeout in
+[#19](https://github.com/joshrotenberg/due/issues/19) remains unresolved; passing
+this batch does not establish a repair. Remote
+[CI](https://github.com/joshrotenberg/due/actions/runs/38312111499) was rejected
+before any steps ran because of GitHub's account payment/spending-limit check.
+Local green checks are not presented as remote or cross-platform CI evidence.

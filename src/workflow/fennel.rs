@@ -191,6 +191,7 @@ impl Drop for JoinedChild {
 async fn join_compiler(
     child: &mut JoinedChild,
     cancelled: &AtomicBool,
+    interrupted: &AtomicBool,
     deadline: Duration,
 ) -> Result<(), String> {
     let start = Instant::now();
@@ -198,20 +199,36 @@ async fn join_compiler(
         if cancelled.load(Ordering::SeqCst) {
             return Err("Fennel compilation cancelled; compiler joined".into());
         }
-        if start.elapsed() >= deadline {
-            return Err("Fennel compiler wall-time budget exhausted; compiler joined".into());
-        }
         if let Some(status) = child.0.try_wait().map_err(|e| e.to_string())? {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if matches!(status.signal(), Some(libc::SIGINT | libc::SIGTERM)) {
+                    // Group delivery can reap the helper before the parent's
+                    // signal future is polled. Classify its exit directly; no
+                    // scheduling yield can guarantee the other select arm wins.
+                    interrupted.store(true, Ordering::SeqCst);
+                    cancelled.store(true, Ordering::SeqCst);
+                    return Err("Fennel compilation cancelled; compiler joined".into());
+                }
+            }
             return if status.success() {
                 Ok(())
             } else {
                 Err(format!("Fennel compiler exited {status}"))
             };
         }
+        if start.elapsed() >= deadline {
+            return Err("Fennel compiler wall-time budget exhausted; compiler joined".into());
+        }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
-async fn isolated_compile(sources: Sources, cancelled: Arc<AtomicBool>) -> Response {
+async fn isolated_compile(
+    sources: Sources,
+    cancelled: Arc<AtomicBool>,
+    interrupted: Arc<AtomicBool>,
+) -> Response {
     validate_sources(&sources)?;
     if cancelled.load(Ordering::SeqCst) {
         return Err("Fennel compilation cancelled".into());
@@ -222,6 +239,8 @@ async fn isolated_compile(sources: Sources, cancelled: Arc<AtomicBool>) -> Respo
     serde_json::to_writer(&mut input, &sources).map_err(|e| e.to_string())?;
     input.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
+    // Inherit the parent's process group, so group SIGKILL also stops a helper
+    // stuck in C. SIGINT/SIGTERM exits are explicitly classified by the joiner.
     let mut child = JoinedChild(
         Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
             .arg("--workflow-fennel-compiler")
@@ -232,7 +251,7 @@ async fn isolated_compile(sources: Sources, cancelled: Arc<AtomicBool>) -> Respo
             .spawn()
             .map_err(|e| format!("start isolated Fennel compiler: {e}"))?,
     );
-    let result = join_compiler(&mut child, &cancelled, DEADLINE).await;
+    let result = join_compiler(&mut child, &cancelled, &interrupted, DEADLINE).await;
     drop(child); // kill and join before returning on every path
     result?;
     output.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
@@ -247,9 +266,16 @@ async fn isolated_compile(sources: Sources, cancelled: Arc<AtomicBool>) -> Respo
     serde_json::from_slice(&bytes).map_err(|e| format!("Fennel compiler response: {e}"))?
 }
 
-pub async fn prepare(mut bundle: Bundle, cancelled: Arc<AtomicBool>) -> Result<Bundle, String> {
-    let is_fennel = |name: &str| name.ends_with(".fnl");
-    if !is_fennel(&bundle.entry_name) && !bundle.module_names.values().any(|n| is_fennel(n)) {
+pub fn needs_compiler(bundle: &Bundle) -> bool {
+    bundle.entry_name.ends_with(".fnl") || bundle.module_names.values().any(|n| n.ends_with(".fnl"))
+}
+
+pub async fn prepare(
+    mut bundle: Bundle,
+    cancelled: Arc<AtomicBool>,
+    interrupted: Arc<AtomicBool>,
+) -> Result<Bundle, String> {
+    if !needs_compiler(&bundle) {
         return Ok(bundle); // No compiler initialization/process for plain Lua.
     }
     let total = bundle.entry.len() + bundle.modules.values().map(String::len).sum::<usize>();
@@ -257,16 +283,16 @@ pub async fn prepare(mut bundle: Bundle, cancelled: Arc<AtomicBool>) -> Result<B
         return Err("Fennel total bundle source input exceeds 512 KiB".into());
     }
     let mut sources = BTreeMap::new();
-    if is_fennel(&bundle.entry_name) {
+    if bundle.entry_name.ends_with(".fnl") {
         sources.insert(bundle.entry_name.clone(), bundle.entry.clone());
     }
     for (key, name) in &bundle.module_names {
-        if is_fennel(name) {
+        if name.ends_with(".fnl") {
             sources.insert(name.clone(), bundle.modules[key].clone());
         }
     }
     let original = sources.clone();
-    let compiled = isolated_compile(sources, cancelled).await?;
+    let compiled = isolated_compile(sources, cancelled, interrupted).await?;
     if let Some(entry) = compiled.get(&bundle.entry_name) {
         bundle.entry.clone_from(&entry.lua);
     }
@@ -332,6 +358,24 @@ mod tests {
             return;
         };
         let ready = std::env::var_os("DUE_FENNEL_TEST_READY").unwrap();
+        // Signal classification also probes crashes; leave no core artifact.
+        assert_eq!(
+            unsafe {
+                libc::setrlimit(
+                    libc::RLIMIT_CORE,
+                    &libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    },
+                )
+            },
+            0
+        );
+        // Rust's stack-overflow handler can consume an externally sent SIGSEGV
+        // once. This test-only process needs the OS disposition for that probe.
+        unsafe {
+            libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+        }
         let (lua, _) = compiler_vm(MEMORY, OPERATIONS).unwrap();
         std::fs::write(ready, "ready").unwrap();
         let source = match probe.to_str().unwrap() {
@@ -343,6 +387,69 @@ mod tests {
             _ => panic!("unknown test probe"),
         };
         lua.load(source).exec().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn helper_signal_exit_is_classified_before_parent_signal_delivery() {
+        use std::os::unix::process::ExitStatusExt;
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGKILL, libc::SIGSEGV] {
+            let dir = tempfile::tempdir().unwrap();
+            let ready = dir.path().join("ready");
+            let mut child = JoinedChild(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "workflow::fennel::tests::compiler_process_probe"])
+                    .env("DUE_FENNEL_TEST_PROBE", "move")
+                    .env("DUE_FENNEL_TEST_READY", &ready)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let pid = child.0.id();
+            let start = Instant::now();
+            while !ready.exists() {
+                assert!(start.elapsed() < Duration::from_secs(3));
+                assert!(child.0.try_wait().unwrap().is_none());
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // Signal only this owned child; it inherits the parent's group just
+            // like the production helper. Whole-group probes isolate the parent
+            // workflow in the ignored integration test.
+            assert_eq!(unsafe { libc::kill(pid as i32, signal) }, 0);
+            // Force completion to precede joining, without ever setting either
+            // parent flag. This reproduces the losing signal-select ordering.
+            let start = Instant::now();
+            let status = loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(3),
+                    "probe {pid} did not exit on signal {signal}"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            assert_eq!(status.signal(), Some(signal));
+            let cancelled = AtomicBool::new(false);
+            let interrupted = AtomicBool::new(false);
+            let message = join_compiler(&mut child, &cancelled, &interrupted, DEADLINE)
+                .await
+                .unwrap_err();
+            let is_interruption = matches!(signal, libc::SIGINT | libc::SIGTERM);
+            assert_eq!(cancelled.load(Ordering::SeqCst), is_interruption);
+            assert_eq!(interrupted.load(Ordering::SeqCst), is_interruption);
+            assert!(
+                message.contains(if is_interruption {
+                    "compilation cancelled"
+                } else {
+                    "compiler exited"
+                }),
+                "{message}"
+            );
+            drop(child);
+            assert_ne!(unsafe { libc::kill(pid as i32, 0) }, 0);
+        }
     }
 
     #[cfg(unix)]
@@ -370,9 +477,11 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 let stopped = AtomicBool::new(mode == "cancelled");
+                let interrupted = AtomicBool::new(false);
                 let result = if mode == "signal" {
                     let signal = crate::shutdown_signal().unwrap();
-                    let work = join_compiler(&mut child, &stopped, Duration::from_secs(2));
+                    let work =
+                        join_compiler(&mut child, &stopped, &interrupted, Duration::from_secs(2));
                     tokio::pin!(work);
                     assert_eq!(
                         unsafe { libc::kill(std::process::id() as i32, libc::SIGTERM) },
@@ -386,7 +495,13 @@ mod tests {
                         }
                     }
                 } else {
-                    join_compiler(&mut child, &stopped, Duration::from_millis(100)).await
+                    join_compiler(
+                        &mut child,
+                        &stopped,
+                        &interrupted,
+                        Duration::from_millis(100),
+                    )
+                    .await
                 };
                 assert!(result.unwrap_err().contains(if mode == "signal" {
                     "cancelled"
