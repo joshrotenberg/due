@@ -2,7 +2,6 @@
   "schema_version": 1,
   "provider": "codex",
   "effort": "medium",
-  "timeout": "5m",
   "ephemeral": true,
   "native_args": []
 }

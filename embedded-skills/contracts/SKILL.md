@@ -18,7 +18,7 @@ or use `--stdin` for the prompt. Optional file fields are `model`, `effort`,
 
 ```sh
 due run --request - --prompt 'Summarize without changing files.' --output json <<'JSON'
-{"schema_version":1,"provider":"claude","timeout":"2m"}
+{"schema_version":1,"provider":"claude"}
 JSON
 ```
 
@@ -26,7 +26,9 @@ Malformed JSON, unknown/duplicate keys, unsupported versions, and bad JSON types
 fail even if CLI flags would replace them. Semantic checks follow merging: an
 invalid duration string can be replaced with `--timeout 5m`. Provider/prompt may
 be omitted but not null. Nullable optional fields mean absent; model/resume must
-be nonempty. Effort is low/medium/high; timeout is a positive duration.
+be nonempty. Effort is low/medium/high; timeout is a positive duration. Due has
+no default timeout; omitting `--timeout` inherits a file value, so remove the
+field or set it null to run without that deadline.
 `ephemeral` is a boolean defaulting false; `native_args` is a string array defaulting
 empty. Neither accepts null. `--no-ephemeral` overrides profile true; final resume
 conflicts with ephemeral true. Native arguments after `--` replace the entire list;
@@ -52,7 +54,7 @@ Save a provider-supported schema as `answer.schema.json`, for example:
 
 ```sh
 printf '%s\n' 'Summarize this repository without changing files.' |
-  due run --provider claude --cwd "$PWD" --stdin --timeout 5m \
+  due run --provider claude --cwd "$PWD" --stdin \
     --schema answer.schema.json --output json
 ```
 

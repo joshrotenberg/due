@@ -82,7 +82,10 @@ The included `pr-101.request.json` uses a schema path relative to this repositor
 root, so run it from there. Copy/edit the request and prompt for the actual PR:
 set request `cwd` to the intended local repository, replace the prompt's
 `BASE..HEAD` placeholders, and give the validator the expected PR number
-independently of the worker's answer.
+independently of the worker's answer. The request sets no `timeout`, which suits
+a caller that monitors the run and can cancel it. For an unmonitored run, add a
+generous task-specific `timeout`; see
+[deadlines and monitoring](../../docs/cli.md#deadlines-and-monitoring).
 
 Run the example's offline checks from the repository root:
 

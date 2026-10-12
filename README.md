@@ -13,7 +13,7 @@ scheduling, and any retry.
 
 ```sh
 due run --provider claude -p "Explain this repository" --effort high
-cat task.txt | due run --provider codex --stdin --output json --timeout 5m
+cat task.txt | due run --provider codex --stdin --output json
 due run --provider codex -p "Fix the tests" -- --sandbox workspace-write
 ```
 
@@ -61,7 +61,7 @@ Then run a real turn. Send longer prompts through stdin so they do not appear in
 Due's own argv:
 
 ```sh
-due run --provider claude --stdin --output json --timeout 5m <<'PROMPT'
+due run --provider claude --stdin --output json <<'PROMPT'
 Summarize this repository without changing files. List the paths you read.
 PROMPT
 ```
@@ -78,19 +78,31 @@ due run --provider claude --stdin -- --permission-mode acceptEdits --max-turns 5
 work, grant the task's edits and checks explicitly and deny unresolved approval
 requests; see [unattended permissions](docs/cli.md#unattended-claude-permissions).
 
+Due has no default timeout. Omit `--timeout` while you watch the run and can
+cancel it; unattended permissions do not mean nobody is watching. For an
+unmonitored run or a real time budget, set a generous, task-specific absolute
+limit; progress does not extend it. See
+[deadlines and monitoring](docs/cli.md#deadlines-and-monitoring).
+
+```sh
+# Explicit time budget for an unmonitored run.
+due run --provider codex --stdin --output json --timeout 45m < task.txt
+```
+
 ## Profiles and dry runs
 
 `--request FILE` reads a versioned JSON request. It can be a complete task or a
 partial profile; only `schema_version: 1` is required. Explicit flags override
-file values, and omitted flags inherit them.
+file values, and omitted flags inherit them. An inherited `timeout` applies
+unless you remove it from the file or set it to `null`.
 
 ```json
-{"schema_version":1,"provider":"codex","effort":"medium","timeout":"5m","ephemeral":true}
+{"schema_version":1,"provider":"codex","effort":"medium","ephemeral":true}
 ```
 
 ```sh
 due run --request examples/profile.json --stdin --dry-run --output json < task.txt
-due run --request examples/profile.json --provider claude -p "Review the diff" --timeout 2m
+due run --request examples/profile.json --provider claude -p "Review the diff"
 ```
 
 `--dry-run` validates the merged request, native-option conflicts, working
@@ -160,6 +172,8 @@ due trace summarize run.jsonl --output json
 
 - [docs/cli.md](docs/cli.md): full CLI reference covering options, request
   fields, structured answers, tracing, native passthrough, results, and errors.
+- [Native subagent comparison](docs/native-comparison.md): defaults, existing
+  controls, and deferred gaps.
 - [docs/install.md](docs/install.md): installation, including the Codex plugin.
 - [docs/dogfooding.md](docs/dogfooding.md): trying Due and reporting issues.
 - [Node caller example](examples/node-caller/README.md): capture one run safely

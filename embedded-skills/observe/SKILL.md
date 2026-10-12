@@ -10,7 +10,7 @@ Tracing changes observation, not the task's authorization or native permissions.
 For a prepared prompt in `task.txt`, choose a new log path and run:
 
 ```sh
-due run --provider claude --stdin --output json --timeout 5m \
+due run --provider claude --stdin --output json \
   --trace=json --trace-file run.jsonl --trace-interval 1s < task.txt
 ```
 
@@ -26,6 +26,14 @@ when available. Records carry `schema_version`, `provider`, `event`, timestamps,
 elapsed time, and observed counters. A heartbeat reports waiting and `idle_ms`;
 it is a liveness signal, not proof of work or a completion percentage.
 The default heartbeat interval is 5s, beginning after prompt input is complete.
+
+Heartbeats show only that Due is alive and waiting. Native silence can be
+legitimate reasoning, a long tool call, or missing provider telemetry; frequent
+activity can still be repetitive. Due has no idle watchdog. Judge progress from
+observed events and the artifacts the task produces, and cancel deliberately
+rather than automatically from `idle_ms`. A run you actively monitor needs no
+`--timeout`; Due has no default. For an unmonitored run, choose a generous
+task-specific `--timeout`. It is absolute and does not extend with activity.
 
 `activity_started` and `activity_completed` carry an `activity` category:
 `command`, `file_change`, `mcp_call`, `web_search`, `plan_update`, `status_update`,
@@ -83,7 +91,7 @@ forced kill of the remaining owned group and direct-child reaping. Detached tool
 cleanup depends on the provider's cooperation; group kill alone cannot reach it.
 Cleanup can extend beyond the deadline. Handled signals exit 130; timeouts exit 124.
 SIGKILL cannot be handled and may leave provider/tool processes running; prefer
-`--timeout` to an external hard kill. Cancellation is not rollback.
+SIGINT/SIGTERM/SIGHUP or `--timeout` to an external hard kill. Cancellation is not rollback.
 Inspect artifacts and authorized external effects independently after interruption
 or completion; trace events describe observations, not a verified effect inventory.
 Do not retry automatically. Use `due skills show contracts` to interpret the

@@ -76,7 +76,7 @@ committed for reproducible application builds.
 | `--model ID` | Native model name/alias. Omitted values inherit the profile, then the provider default. |
 | `--effort low\|medium\|high` | Native effort level. Support and computation vary by provider/model. |
 | `-C, --cwd DIR` | Child working directory, resolved from the caller's cwd. |
-| `--timeout 30s` | Execution deadline; supports durations such as `5m`. No default. |
+| `--timeout 30s` | Absolute execution limit; supports durations such as `5m`. No default. See [deadlines and monitoring](#deadlines-and-monitoring). |
 | `--output text\|json` | Final answer text by default, or one versioned JSON result. |
 | `--schema FILE` | Request a structured answer using a JSON Schema; preserve it as a JSON value in the result. |
 | `--resume ID` | Continue a native session/thread with the supplied prompt. |
@@ -120,8 +120,37 @@ available process cleanup. Due performs no automatic retries.
 
 Handled signals produce a cancelled result and exit 130 after cleanup; timeouts
 exit 124. SIGKILL cannot be handled and may leave provider/tool processes running.
-Prefer Due's `--timeout` to an external hard kill; the trace's pid/pgid can help
-inspect processes after an abrupt stop.
+Prefer Due's cooperative cancellation (`--timeout` or SIGINT/SIGTERM/SIGHUP) to an
+external hard kill; the trace's pid/pgid can help inspect processes after an
+abrupt stop.
+
+### Deadlines and monitoring
+
+Due has no default execution timeout. When a caller actively watches the run's
+events and artifacts and can cancel it, omit `--timeout` and any profile
+`timeout`. Unattended permission settings (no approval prompts) describe the
+provider's permissions, not whether someone is monitoring the run.
+
+For a run nobody is monitoring, or one with an actual time budget, choose
+a generous, task-specific `--timeout` deliberately. It is an absolute limit from
+provider start: progress does not reset or extend it, and it cannot be extended
+during the run. There is no recommended universal value.
+
+```sh
+# Explicit time budget for an unmonitored run.
+due run --provider codex --stdin --output json --timeout 45m < task.txt
+```
+
+A profile's `timeout` applies whenever the CLI omits `--timeout`. To run without
+it, remove the field or set it to `null` in the file.
+
+Heartbeats show that Due is alive and waiting; they do not show whether the
+provider is making progress. Native silence can be legitimate reasoning, a long
+tool call, or missing provider telemetry, and frequent activity can be
+repetitive. Due has no idle watchdog. Inspect observed events and artifacts
+rather than cancelling or extending automatically from heartbeats. To stop a
+run, send SIGINT, SIGTERM, or SIGHUP to Due, then inspect the partial effects it
+may have left before any follow-up.
 
 ### Sessions
 
@@ -136,13 +165,14 @@ replace its values; omitted flags retain them. This supports both complete tasks
 and reusable partial profiles:
 
 ```json
-{"schema_version":1,"provider":"codex","timeout":"5m","ephemeral":true}
+{"schema_version":1,"provider":"codex","ephemeral":true}
 ```
 
 ```sh
 due run --request examples/profile.json --stdin --output json < task.txt
 due run --request examples/profile.json --provider claude -p "Review the diff" \
-  --timeout 2m --dry-run --output json
+  --dry-run --output json
+due run --request task.json --timeout 30m --output json   # explicit time budget
 due run --request task.json --no-ephemeral --resume native-session-id --output json
 cat task.json | due run --request - -p "Use this replacement prompt" --output json
 ```
@@ -161,7 +191,7 @@ are examples. There is no profile search path, inheritance chain, or config stor
 | `model` | Nonempty native model string; omitted or null keeps the provider default. |
 | `effort` | `low`, `medium`, `high`, or null. |
 | `cwd` | Working directory string or null; defaults to the caller's directory. |
-| `timeout` | Positive duration string such as `30s` or `5m`, or null for no deadline. |
+| `timeout` | Positive duration string such as `30s` or `5m`, or null for no deadline. Omitting `--timeout` inherits it. |
 | `schema` | Answer-schema filename string or null. |
 | `resume` | Nonempty native session ID string or null. |
 | `ephemeral` | Boolean, default false; true conflicts with a non-null `resume`. |
@@ -402,7 +432,7 @@ or individual-file allowlist. The prompt still defines the task's narrower scope
 independently verify which files changed.
 
 ```sh
-due run --provider codex --cwd /path/to/repo --stdin --output json --timeout 5m \
+due run --provider codex --cwd /path/to/repo --stdin --output json \
   -- --sandbox workspace-write \
   -c 'approval_policy="never"' \
   -c 'sandbox_workspace_write.network_access=false' \
@@ -448,7 +478,6 @@ For a bounded repair to `receipt.py` with Python unit tests, use a partial profi
 {
   "schema_version": 1,
   "provider": "claude",
-  "timeout": "3m",
   "ephemeral": true,
   "native_args": [
     "--permission-mode", "dontAsk",

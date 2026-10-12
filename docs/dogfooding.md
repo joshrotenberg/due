@@ -31,6 +31,10 @@ content, but results, errors, dry-run plans and `--trace-detail` can contain it.
 Trace summaries are observed events, not proof of side effects or complete log
 delivery. Check the result's `trace.incomplete` too.
 
+The profile sets no timeout. Watch the trace and artifacts and cancel with
+Ctrl-C if needed, or add a deliberate `--timeout` when nobody is monitoring; see
+[deadlines and monitoring](cli.md#deadlines-and-monitoring).
+
 Inspect the actual diff, files, artifacts and relevant checks. Failure, timeout,
 or cancellation can leave completed edits. Before any follow-up, inspect those
 effects; do not retry a mutation simply to obtain cleaner diagnostic evidence.

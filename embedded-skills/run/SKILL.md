@@ -13,21 +13,38 @@ or make the providers' permission policies equivalent.
 
 Define the concrete deliverable, working directory, allowed changes, and stopping
 condition in the prompt. Carry existing user authorization into the task without
-expanding it. Choose a timeout appropriate to that bounded task; Due has no default.
-Inspect existing workspace changes when they matter to later verification.
+expanding it. Inspect existing workspace changes when they matter to later verification.
+
+Due has no default timeout. If you will watch the run's events and artifacts and
+can cancel it, omit `--timeout`. Unattended permission settings (no approval
+prompts) do not mean nobody is monitoring. If nobody will monitor the run, or the
+task has a real time budget, choose a generous task-specific `--timeout`
+deliberately. It is an absolute limit from provider start: progress does not
+reset or extend it, and it cannot be extended mid-run. There is no universal value.
 
 Send the prompt through stdin and request the result envelope for agent callers:
 
 ```sh
-due run --provider codex --cwd "$PWD" --stdin --output json --timeout 5m <<'PROMPT'
+due run --provider codex --cwd "$PWD" --stdin --output json <<'PROMPT'
 Inspect this repository without changing files. Identify the failing test's
 likely cause and report the relevant files and evidence. Stop after diagnosis.
 PROMPT
 ```
 
+For an unmonitored run with an explicit time budget, add a limit such as
+`--timeout 45m`, sized to the task.
+
 Replace the example scope with the actual assignment. `--provider claude` uses
 the same shared options. Omit `--model` and `--effort` to retain native defaults;
-model names and supported effort levels remain provider-specific.
+model names and supported effort levels remain provider-specific. These are the
+new CLI session's settings, not the calling agent's model, conversation, or
+per-turn permission grants. Include the necessary context in the prompt.
+
+Due starts one foreground provider invocation; it does not disable native
+subagents. State whether delegation is in scope. To disable built-in subagent
+tools for a task, use Codex passthrough `-c agents.enabled=false` or Claude
+`--disallowedTools Agent`, alongside the task's other native permissions. These
+controls do not prevent every possible subprocess launch.
 With execution flags, exactly one of `--stdin` and `--prompt TEXT` is required. Both reach the child
 through stdin, but `--prompt` exposes the prompt in Due's own argv.
 
@@ -37,8 +54,11 @@ after merging. Explicit CLI execution flags replace file values; absent flags
 inherit them. For example, save this as `profile.json`:
 
 ```json
-{"schema_version":1,"provider":"codex","timeout":"5m","ephemeral":true}
+{"schema_version":1,"provider":"codex","ephemeral":true}
 ```
+
+A profile `timeout` applies whenever `--timeout` is omitted. To run without it,
+remove the field or set it to `null`.
 
 ```sh
 due run --request profile.json --stdin --dry-run --output json < task.txt > plan.json
@@ -79,7 +99,7 @@ Native permissions remain in force; do not add bypass flags as a default.
 For unattended Codex work, use a workspace sandbox with no approval escalation:
 
 ```sh
-due run --provider codex --cwd "$PWD" --stdin --output json --timeout 5m \
+due run --provider codex --cwd "$PWD" --stdin --output json \
   -- --sandbox workspace-write -c 'approval_policy="never"' \
   -c 'sandbox_workspace_write.network_access=false' \
   -c 'sandbox_workspace_write.writable_roots=[]' \
@@ -100,7 +120,7 @@ authorize their use. `acceptEdits` permits edits, not arbitrary shell commands. 
 edits and checks authorized for this task, using native permission rules:
 
 ```sh
-due run --provider claude --cwd "$PWD" --stdin --output json --timeout 3m \
+due run --provider claude --cwd "$PWD" --stdin --output json \
   -- --permission-mode dontAsk --permission-prompts none \
   --tools Read,Edit,Bash \
   --allowedTools 'Edit(/receipt.py)' 'Bash(python3 -B -m unittest -v)' < task.txt
@@ -122,6 +142,10 @@ If a check is denied, report it as blocked even if the Due execution succeeds.
 Use `--resume ID` only for the intended provider's session and authorized follow-up.
 It requires a new prompt. `--ephemeral` disables persistence and conflicts with
 resume; an ID returned by an ephemeral run may not be resumable.
+Persistence is allowed by default. If follow-up is likely, omit `--ephemeral`
+(or override a profile with `--no-ephemeral`) from the first run and save its
+native `session_id`. Due does not keep its own session store or resume a nested
+child agent directly. Disabling ephemeral mode later cannot recover lost context.
 
 After the run, inspect its exit status and result. For structured answers, require
 `structured_output_present` and independently validate the value when correctness
@@ -132,6 +156,9 @@ external system the task was authorized to change. A provider's narrative and
 activity records are reported evidence; label effects as verified only after
 independent observation. Preserve unrelated workspace changes.
 
+To stop a run you are monitoring, send Due SIGINT, SIGTERM, or SIGHUP; it cancels
+the provider cooperatively. Decide from observed events and artifacts, not from
+heartbeats alone (`due skills show observe`).
 Do not retry automatically after failure, timeout, or cancellation. Report the
 partial outcome and inspect possible effects before any authorized follow-up.
 Due does not roll back changes or collect a verified side-effect inventory.
