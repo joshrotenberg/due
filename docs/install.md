@@ -43,6 +43,47 @@ Use the same Git commit on both machines when comparing behavior. During source
 dogfooding `due --version` is not a unique build identifier; record the checkout's
 commit alongside the resolved binary path.
 
+## Run the release binary from the checkout
+
+For a pull-and-build trial, keep a checkout in a stable development directory
+outside temporary or cloud-synchronized storage. A symlink to its release binary
+gives normal `due` invocations with no build or wrapper process on startup:
+
+```sh
+git clone git@github.com:joshrotenberg/due.git "$HOME/Code/github.com/due"
+cd "$HOME/Code/github.com/due"
+cargo build --release --locked --target-dir "$PWD/target"
+mkdir -p "$HOME/.cargo/bin"
+ln -s "$PWD/target/release/due" "$HOME/.cargo/bin/due"
+command -v due
+due --version
+due skills show run
+```
+
+The `ln` command fails if an executable or symlink already exists. Inspect and
+move that entry to a separate backup before replacing it. Inspect and update an
+existing checkout rather than cloning over it. Keep `~/.cargo/bin` on the host's
+PATH and verify resolution from the agent itself. Do not use `cargo install` to
+update this mode: it can replace the symlink.
+
+From the checkout, preserve local changes, then update:
+
+```sh
+git pull --ff-only
+cargo build --release --locked --target-dir "$PWD/target"
+git rev-parse HEAD
+git status --short
+due --version
+due skills show run
+```
+
+Pulling alone does not rebuild Rust or embedded guides. If the build fails, the
+previous binary may remain; do not report the pulled commit as the installed
+build. Record the successful build's commit and dirty state with trial evidence.
+The symlink preserves the caller's working directory. Removing the checkout or
+running `cargo clean` makes it unusable until rebuilt. To undo this setup, remove
+the symlink and restore the saved executable or use the regular Cargo install.
+
 ## Install the plugin in Codex
 
 From the checkout root:
@@ -64,6 +105,39 @@ Keep this checkout in place: the local marketplace points to it. Hosts can cache
 an installed plugin; edits in the checkout alone do not prove the cached skill
 was refreshed. The package follows [Agent Plugins](https://agent-plugins.org/plugin-authors/build-an-agent-plugin);
 other clients need their own supported installation flow.
+
+If moving an existing `due-dev` marketplace, inspect `marketplace list`, register
+the new checkout with `codex plugin marketplace add`, and verify its resulting
+path before reinstalling the plugin. Use the remove/add flow below if required
+by the host. A binary update needs no plugin reinstall when its entry skill is
+unchanged.
+
+## Enable the caller trial policy
+
+The optional [caller policy](caller-policy.md) covers Due-only delegation,
+positive and negative findings, and bounded A/B trials. Installing the plugin
+does not enable that global preference automatically.
+
+For Codex in every repository, add a pointer to the active global instruction
+file. Codex uses `AGENTS.override.md` if present, otherwise `AGENTS.md`, under
+its configured Codex home (normally `~/.codex`). Preserve existing instructions
+and use the absolute checkout path on that machine:
+
+```markdown
+## Due source trial
+
+Use Due exclusively for delegated model work. At the start of each task, read
+/ABSOLUTE/PATH/TO/due/docs/caller-policy.md and follow its reporting and A/B
+workflow. Direct work by the calling agent remains allowed. If that file or Due
+is unavailable, report it and do not substitute another delegation mechanism.
+```
+
+Start a fresh chat after changing global instructions. The pointer follows
+checkout policy updates on subsequent reads. Host/project instructions can
+override global guidance, so verify it with a real task. See
+[Codex instruction discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md).
+Other hosts need their own persistent-instruction mechanism; a Codex global file
+does not configure Claude Code. No background automation is installed.
 
 ## Check installation without a provider call
 
@@ -87,15 +161,27 @@ the package alone is not a successful behavioral smoke test.
 
 ## Update or remove
 
-From your checkout, preserve local changes before updating:
+Choose the update procedure for the binary installation you actually use.
+Preserve local changes before updating the checkout.
+
+For a **Cargo-installed binary**:
 
 ```sh
 git pull --ff-only
 cargo install --path . --locked --force
-codex plugin remove due@due-dev
-codex plugin add due@due-dev
 due --version
 git rev-parse HEAD
+```
+
+For a **checkout symlink**, use the pull-and-build procedure in
+[checkout installation](#run-the-release-binary-from-the-checkout). Do not run
+`cargo install --force` in that mode.
+
+When the plugin package changes, refresh it separately:
+
+```sh
+codex plugin remove due@due-dev
+codex plugin add due@due-dev
 ```
 
 Removing and adding the plugin refreshes its cached package without changing the
@@ -107,9 +193,13 @@ checkout workflow above is the default for this trial. Do not edit plugin caches
 ```sh
 codex plugin remove due@due-dev
 codex plugin marketplace remove due-dev
-cargo uninstall due
 ```
 
-These are separate removals: uninstalling the plugin does not uninstall the CLI.
+To remove a Cargo-installed binary, use `cargo uninstall due`. For a checkout
+symlink, remove the verified symlink and restore the saved executable if desired;
+Cargo does not reliably track manually installed symlinks. Do not remove the
+checkout until no active runs or plugin registrations use it.
+
+Uninstalling the plugin does not uninstall the CLI.
 See [dogfooding and issue reports](dogfooding.md) for what to capture when a step
 fails, and the [CLI reference](cli.md) for execution semantics.

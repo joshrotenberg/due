@@ -176,6 +176,8 @@ due trace summarize run.jsonl --output json
   controls, and deferred gaps.
 - [docs/install.md](docs/install.md): installation, including the Codex plugin.
 - [docs/dogfooding.md](docs/dogfooding.md): trying Due and reporting issues.
+- [Caller trial policy](docs/caller-policy.md): opt-in Due-only delegation,
+  positive and negative reports, and bounded A/B comparisons.
 - [Node caller example](examples/node-caller/README.md): capture one run safely
   and validate a task-specific review answer using Node built-ins.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development workflow and checks.

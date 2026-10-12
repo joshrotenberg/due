@@ -4,6 +4,10 @@ Features are frozen. Use Due for ordinary bounded work and report reproducible
 problems, confusing behavior, or inaccurate documentation. Fix reliability and
 installation defects before considering new commands or runner features.
 
+For an opt-in policy covering all delegated work, positive and negative reports,
+and controlled comparisons, use the [caller policy](caller-policy.md). Enable it
+through [global host instructions](install.md#enable-the-caller-trial-policy).
+
 ## Keep enough evidence
 
 Record the Due source commit, resolved executable path, Due/provider versions,
