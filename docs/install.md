@@ -118,6 +118,8 @@ The optional [caller policy](caller-policy.md) covers Due-only delegation,
 positive and negative findings, and bounded A/B trials. Installing the plugin
 does not enable that global preference automatically.
 
+### Codex
+
 For Codex in every repository, add a pointer to the active global instruction
 file. Codex uses `AGENTS.override.md` if present, otherwise `AGENTS.md`, under
 its configured Codex home (normally `~/.codex`). Preserve existing instructions
@@ -136,8 +138,56 @@ Start a fresh chat after changing global instructions. The pointer follows
 checkout policy updates on subsequent reads. Host/project instructions can
 override global guidance, so verify it with a real task. See
 [Codex instruction discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md).
-Other hosts need their own persistent-instruction mechanism; a Codex global file
-does not configure Claude Code. No background automation is installed.
+
+### Claude Code
+
+Merge the following block into `~/.claude/CLAUDE.md`, Claude Code's user-level
+instructions for all projects. Preserve existing instructions and replace the
+placeholder with the absolute Due checkout path on that machine. You can also
+run `/memory`, select the user `CLAUDE.md` entry, and edit it there; opening a
+missing file creates it.
+
+```markdown
+## Due source trial
+
+At the start of each task, read
+/ABSOLUTE/PATH/TO/due/docs/caller-policy.md and follow its workflow.
+If the assignment identifies this session as a Due worker, return observations
+to the caller. Do not publish reports or initiate A/B trials. Do not recursively
+delegate unless the assignment explicitly authorizes it; use Due if authorized.
+
+As the outer caller, use Due exclusively for delegated model work and identify
+each recipient as a Due worker in its assignment. Report all favorable and
+unfavorable Due findings as sanitized issues or evidence in joshrotenberg/due:
+search existing issues first and aggregate routine successes per work batch.
+Periodically consider a controlled two-arm comparison, following the policy's
+cadence and deferral rules. Use the same prompt, inputs, schema, permissions and
+rubric, deliberately varying provider, model or effort. Independently select the
+better supported response when one exists and report the outcome; a tie, neither
+acceptable, or inconclusive result is valid.
+
+Direct work by the calling agent remains allowed. If Due or the policy file
+is unavailable, report the blocker and do not substitute another delegation
+mechanism. Explicit task constraints and host permissions still apply.
+```
+
+For example, begin worker prompts with: "You are a Due worker. Return your
+findings to the caller; do not delegate, publish issues or start A/B trials."
+This makes the role explicit even when a worker loads the same user instructions.
+
+Start a fresh Claude Code session and use `/context` to check that the user
+`CLAUDE.md` loaded. Then ask it to read the policy and inspect a scratch repository
+through Due without changing files. Confirm it finds `due` on PATH, reads
+`due --help` and `due skills show run`, and verifies the worker's output.
+The Codex plugin installation above does not configure Claude Code; Claude can
+use the installed CLI and its embedded guides directly.
+
+These are behavioral instructions, not permission grants. For scoped unattended
+permissions, read `due skills show run`. Reconcile conflicting user/project
+instructions and verify behavior in a real task. See
+[Claude Code instruction files](https://code.claude.com/docs/en/memory).
+The pointer reads the checkout policy on subsequent tasks; a new session avoids
+relying on previously loaded policy text. No background automation is installed.
 
 ## Check installation without a provider call
 
