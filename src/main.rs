@@ -24,6 +24,12 @@ use result::{RunError, RunResult};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    #[cfg(feature = "workflow-fennel-spike")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--workflow-fennel-compiler"))
+    {
+        return workflow::fennel::worker();
+    }
     match Cli::parse().command {
         Command::Run(run) => run_command(*run).await,
         Command::Skills(args) => skills::execute(&args),

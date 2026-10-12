@@ -1,5 +1,10 @@
 # Lua / Rhai comparison
 
+Follow-up: [Fennel authoring spike](workflow-fennel-spike.md) layers an optional
+pinned compiler onto the Lua candidate. The measurements and recommendations
+below describe the prior Lua comparison, not new Fennel results. Combined
+features remain comparative tests, not an intent to ship both runtimes.
+
 This is an experiment on `spike/lua-workflows`, based on the Rhai spike
 `f6aec6e` / draft PR #16. Stable `main`, the installed Due binary and wrapper
 Git pins are unchanged. Neither interpreter is enabled in default builds.

@@ -19,6 +19,12 @@ struct Skill {
 }
 
 const SKILLS: &[Skill] = &[
+    #[cfg(feature = "workflow-fennel-spike")]
+    Skill {
+        name: "workflow-fennel",
+        description: "Author an experimental Fennel function over the optional Lua workflow runtime with bounded offline compilation.",
+        content: include_str!("../embedded-skills/workflow-fennel/SKILL.md"),
+    },
     #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
     Skill {
         name: "workflow",

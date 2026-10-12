@@ -10,6 +10,7 @@ publish = false
 [features]
 workflow-spike = ["dep:rhai", "dep:jsonschema", "dep:libc"]
 workflow-lua-spike = ["dep:mlua", "dep:jsonschema", "dep:libc"]
+workflow-fennel-spike = ["workflow-lua-spike"]
 
 [dependencies]
 mlua = { version = "=0.12.2", optional = true, default-features = false, features = ["lua54", "vendored", "async", "serde"] }

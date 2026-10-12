@@ -1,5 +1,10 @@
 # Experimental Lua / Rhai workflows
 
+The optional Fennel follow-up is documented in
+[workflow-fennel-spike.md](workflow-fennel-spike.md). It adds a compiler front end,
+mixed Lua/Fennel modules and an explicit v2 returned-function entry contract;
+the v1 behaviors below remain available.
+
 `spike/lua-workflows` extends the completed Rhai spike `f6aec6e`. It retains both
 interpreters behind independent, optional features. Default builds expose neither
 workflow commands nor workflow guidance. Due/wrapper pins and native permissions
@@ -30,7 +35,8 @@ bindings without the previous handwritten lexer. Normal syntax, interpolation
 and data keys are parsed by Rhai itself.
 
 The entry's `.lua` or `.rhai` extension selects the language; every declared module
-must match. Unknown extensions and unavailable runtimes fail before receipts or
+must match, except that the Fennel feature permits mixed `.lua`/`.fnl` modules.
+Unknown extensions and unavailable runtimes fail before receipts or
 children. There is no fallback, dynamic filesystem resolver or native Lua loader.
 
 ```sh

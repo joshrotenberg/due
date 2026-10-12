@@ -1,0 +1,1 @@
+{"type":"object","required":["first","cancelled","replacement"],"properties":{"first":{"type":"object"},"cancelled":{"type":"object"},"replacement":{"type":"object"}},"additionalProperties":false}

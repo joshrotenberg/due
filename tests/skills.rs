@@ -7,8 +7,13 @@ use tempfile::TempDir;
 
 #[cfg(not(any(feature = "workflow-spike", feature = "workflow-lua-spike")))]
 const SKILLS: [&str; 3] = ["run", "contracts", "observe"];
-#[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
+#[cfg(all(
+    any(feature = "workflow-spike", feature = "workflow-lua-spike"),
+    not(feature = "workflow-fennel-spike")
+))]
 const SKILLS: [&str; 4] = ["run", "contracts", "observe", "workflow"];
+#[cfg(feature = "workflow-fennel-spike")]
+const SKILLS: [&str; 5] = ["run", "contracts", "observe", "workflow", "workflow-fennel"];
 
 struct Standalone {
     root: TempDir,

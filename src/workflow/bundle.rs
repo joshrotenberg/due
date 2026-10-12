@@ -38,6 +38,12 @@ pub struct Bundle {
     pub language: Language,
     pub entry: String,
     pub modules: BTreeMap<String, String>,
+    #[cfg(feature = "workflow-lua-spike")]
+    pub entry_name: String,
+    #[cfg(feature = "workflow-lua-spike")]
+    pub module_names: BTreeMap<String, String>,
+    #[cfg(feature = "workflow-fennel-spike")]
+    pub source_maps: BTreeMap<String, Vec<Option<(String, usize)>>>,
     pub input: Value,
     pub output_validator: jsonschema::Validator,
     pub profiles: BTreeMap<String, ResolvedProfile>,
@@ -85,8 +91,8 @@ impl Bundle {
         let source = read(&manifest_path)?;
         let manifest: Manifest =
             serde_json::from_str(&source).map_err(|e| format!("manifest: {e}"))?;
-        if manifest.schema_version != 1 {
-            return Err("manifest schema_version must be 1".into());
+        if !matches!(manifest.schema_version, 1 | 2) {
+            return Err("manifest schema_version must be 1 or 2".into());
         }
         if !(1..=64).contains(&manifest.max_runs)
             || !(1..=8).contains(&manifest.max_concurrency)
@@ -113,6 +119,13 @@ impl Bundle {
             Ok(text)
         };
         let language = Language::from_path(&manifest.entry)?;
+        if manifest.schema_version == 2 && manifest.entry.extension().is_none_or(|e| e == "rhai") {
+            return Err("manifest v2 returned-function entries require Lua or Fennel".into());
+        }
+        if manifest.schema_version != 2 && manifest.entry.extension().is_some_and(|e| e == "fnl") {
+            return Err("Fennel entries require manifest schema_version 2".into());
+        }
+        let entry_name = manifest.entry.to_string_lossy().into_owned();
         let entry = snapshot_file(&manifest.entry)?;
         let input_schema: Value = serde_json::from_str(&snapshot_file(&manifest.input_schema)?)
             .map_err(|e| e.to_string())?;
@@ -126,7 +139,9 @@ impl Bundle {
         contract::check_value(&input)?;
         let output_validator = contract::validator(&output_schema)?;
         let mut modules = BTreeMap::new();
+        let mut module_names = BTreeMap::new();
         modules.insert("patterns/v1".into(), language.patterns().into());
+        module_names.insert("patterns/v1".into(), "@bundled/patterns-v1".into());
         for (key, path) in &manifest.modules {
             name(key.strip_prefix("local/").ok_or(
                 "module names must start with local/; bundled and host names are reserved",
@@ -135,6 +150,7 @@ impl Bundle {
                 return Err("module language must match entry".into());
             }
             modules.insert(key.clone(), snapshot_file(path)?);
+            module_names.insert(key.clone(), path.to_string_lossy().into_owned());
         }
         let mut profiles = BTreeMap::new();
         for (key, profile) in &manifest.profiles {
@@ -194,12 +210,18 @@ impl Bundle {
             .iter()
             .map(|(key, p)| (key.clone(), json!({"request":p.request,"binary":p.binary})))
             .collect();
-        let snapshot = json!({"manifest_path":manifest_path,"manifest_source":source,"sources":sources,"modules":modules,"input":input,"profiles":resolved});
+        let snapshot = json!({"manifest_path":manifest_path,"manifest_source":source,"sources":sources,"modules":modules,"input":input,"profiles":resolved,"entry_name":entry_name,"module_names":module_names});
         Ok(Self {
             manifest,
             language,
             entry,
             modules,
+            #[cfg(feature = "workflow-lua-spike")]
+            entry_name,
+            #[cfg(feature = "workflow-lua-spike")]
+            module_names,
+            #[cfg(feature = "workflow-fennel-spike")]
+            source_maps: BTreeMap::new(),
             input,
             output_validator,
             profiles,

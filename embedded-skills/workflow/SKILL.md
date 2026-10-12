@@ -18,13 +18,16 @@ Unix execution spike, not a production release or an OS sandbox. For one task,
    remain trusted caller configuration, including their native path semantics.
 3. Run `due workflow check workflow.json --input task.json --output json`.
    Check compiles the entry and every declared module and validates definitions
-   and input. It evaluates no script or module initializers and starts no child.
+   and input. It evaluates no script or module initializers and starts no agent.
+   Builds with `workflow-fennel-spike` also expose `workflow-fennel` guidance:
+   bounded compilation executes compiler/built-in macro code in a joined helper.
    It does not prove imports, dynamic branches, job IDs/budgets or final output.
 4. Under the caller's existing authorization, use
    `due workflow run workflow.json --input task.json --artifacts new-receipt --output json`.
    The artifact directory must be new, and its parent must exist. SIGINT, SIGTERM
    or SIGHUP stop admissions and signal/wait for active ordinary Due children.
-   Check retains normal OS signal handling; it has no child cleanup to await.
+   Check retains normal OS signal handling during source reads; Fennel compiler
+   helpers have signal-aware cleanup. See the feature-specific guide.
 5. Inspect workflow.json and each step's step.json, result.json, stderr.txt,
    trace.jsonl and exit.json. Verify actual effects separately. Failed or
    cancelled jobs may already have edited files; there is no rollback or retry.

@@ -35,11 +35,13 @@ jobs:
       - run: cargo test --locked --target-dir target/default
       - name: Check the opt-in workflow spike
         run: |
-          for variant in rhai lua both; do
+          for variant in rhai lua both fennel all; do
             case "$variant" in
               rhai) features=workflow-spike ;;
               lua) features=workflow-lua-spike ;;
               both) features=workflow-spike,workflow-lua-spike ;;
+              fennel) features=workflow-fennel-spike ;;
+              all) features=workflow-spike,workflow-fennel-spike ;;
             esac
             cargo clippy --locked --all-targets --features "$features" --target-dir "target/$variant" -- -D warnings
             cargo test --locked --features "$features" --target-dir "target/$variant"
@@ -69,3 +71,5 @@ jobs:
       - run: cargo check --locked --all-targets --features workflow-spike --target-dir target/rhai
       - run: cargo check --locked --all-targets --features workflow-lua-spike --target-dir target/lua
       - run: cargo check --locked --all-targets --features workflow-spike,workflow-lua-spike --target-dir target/both
+      - run: cargo check --locked --all-targets --features workflow-fennel-spike --target-dir target/fennel
+      - run: cargo check --locked --all-targets --features workflow-spike,workflow-fennel-spike --target-dir target/all

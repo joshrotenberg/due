@@ -47,6 +47,8 @@ struct Run {
 }
 pub struct Host {
     pub bundle: Bundle,
+    #[cfg(feature = "workflow-lua-spike")]
+    pub script_location: Option<String>,
     pub artifacts: PathBuf,
     events: File,
     event_bytes: usize,
@@ -78,6 +80,8 @@ impl SharedHost {
         Self {
             state: Arc::new(Mutex::new(Host {
                 bundle,
+                #[cfg(feature = "workflow-lua-spike")]
+                script_location: None,
                 artifacts,
                 events,
                 event_bytes: 0,

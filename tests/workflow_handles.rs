@@ -341,3 +341,28 @@ fn unavailable_language_never_falls_back_or_launches() {
     assert!(f.calls().is_empty());
     assert!(!f.root.path().join("artifacts").exists());
 }
+
+#[cfg(not(feature = "workflow-fennel-spike"))]
+#[test]
+fn fennel_unavailable_fails_before_native_work() {
+    let f = Fixture::new("");
+    f.write(
+        "main.fnl",
+        "(fn [input] (due.start {:id :a :profile :reader :prompt :never}))",
+    );
+    f.edit(|m| {
+        m["schema_version"] = json!(2);
+        m["entry"] = json!("main.fnl");
+    });
+    for check in [true, false] {
+        let v = f.run(check, 1);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains("Fennel language unavailable")
+        );
+        assert!(f.calls().is_empty());
+        assert!(!f.root.path().join("artifacts").exists());
+    }
+}

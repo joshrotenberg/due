@@ -1,6 +1,8 @@
 //! Opt-in bounded workflows; all provider work uses ordinary Due subprocesses.
 mod bundle;
 mod contract;
+#[cfg(feature = "workflow-fennel-spike")]
+pub(crate) mod fennel;
 mod host;
 #[cfg(feature = "workflow-lua-spike")]
 mod lua;
@@ -38,11 +40,15 @@ impl Language {
             Some("rhai") => Ok(Self::Rhai),
             #[cfg(feature = "workflow-lua-spike")]
             Some("lua") => Ok(Self::Lua),
+            #[cfg(feature = "workflow-fennel-spike")]
+            Some("fnl") => Ok(Self::Lua),
+            #[cfg(not(feature = "workflow-fennel-spike"))]
+            Some("fnl") => Err("Fennel language unavailable in this build".into()),
             #[cfg(not(feature = "workflow-spike"))]
             Some("rhai") => Err("entry/module language unavailable in this build".into()),
             #[cfg(not(feature = "workflow-lua-spike"))]
             Some("lua") => Err("entry/module language unavailable in this build".into()),
-            _ => Err("entry/module must have .rhai or .lua extension".into()),
+            _ => Err("entry/module must have .rhai, .lua or .fnl extension".into()),
         }
     }
     fn patterns(self) -> &'static str {
@@ -162,6 +168,22 @@ async fn execute_inner(
     let result = async {
         if artifacts.is_some() && !cfg!(unix) { return Err("workflow run spike requires Unix signal cleanup".into()); }
         let bundle = Bundle::load(&options.manifest, &options.input)?;
+        #[cfg(feature = "workflow-fennel-spike")]
+        let bundle = if artifacts.is_none() {
+            // Source reads retain normal OS signals. Only compilation owns a
+            // helper that needs explicit cancellation and joining during check.
+            let signal = crate::shutdown_signal().map_err(|e| e.to_string())?;
+            let compilation = fennel::prepare(bundle, cancelled.clone());
+            tokio::pin!(compilation);
+            tokio::select! {
+                result = &mut compilation => result?,
+                _ = signal => {
+                    interrupted.store(true, Ordering::SeqCst);
+                    cancelled.store(true, Ordering::SeqCst);
+                    compilation.await?
+                }
+            }
+        } else { fennel::prepare(bundle, cancelled.clone()).await? };
         let language = bundle.language;
         language.check(&bundle)?;
         let Some(artifacts) = artifacts else {
@@ -182,6 +204,15 @@ async fn execute_inner(
         host.lock().event("started", json!({}))?;
         let evaluated = language.run(host.clone()).await;
         let final_value = host.finish(evaluated).await;
+        #[cfg(feature = "workflow-lua-spike")]
+        let final_value = final_value.map_err(|error| {
+            let h = host.lock();
+            let error = lua::map_error(&h.bundle, &error);
+            match &h.script_location {
+                Some(site) => format!("{error}\nlast workflow location: {site}"),
+                None => error,
+            }
+        });
         let final_value = if interrupted.load(Ordering::SeqCst) && host.lock().fatal_cause().is_none() {
             Err("shutdown signal received; active Due children joined".into())
         } else {
