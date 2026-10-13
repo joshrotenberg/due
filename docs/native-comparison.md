@@ -48,6 +48,10 @@ examples, not new Due defaults. When using a request profile, arguments after
 `--` replace its **entire** `native_args` list; keep any required permission
 arguments in the replacement.
 
+For a review that prohibits commands, include the bounded source snapshot inline
+unless that provider has an authorized non-command file reader. Read-only and
+command-free are different scopes; do not treat unread files as reviewed.
+
 Use a self-contained prompt for a fresh run. For a later refinement, save the
 result's native `session_id`, avoid `--ephemeral`, and use `--resume` with the
 same provider and available native session storage. Turning off ephemeral mode

@@ -31,6 +31,14 @@ available. Inspect the diff, run relevant checks and independently validate
 answer contracts before accepting work. If the other provider is unavailable,
 keep that review pending rather than claiming it passed.
 
+Match the task's restrictions to the provider's available readers. A read-only
+assignment may still need permitted read commands. If all commands are forbidden,
+include the required bounded source snapshot in the prompt unless an authorized
+non-command reader is available; paths alone may be unusable. In a comparison,
+provide the same inline snapshot to both arms from the start. Do not interpret
+an unread file or empty findings as approval, or expand permissions to conceal
+an input/interface mismatch.
+
 ## Report every finding
 
 The user enabling this trial authorizes sanitized Due findings to be reported
