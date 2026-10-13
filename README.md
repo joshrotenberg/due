@@ -193,6 +193,12 @@ due trace summarize run.jsonl --output json
   positive and negative reports, and bounded A/B comparisons.
 - [Node caller example](examples/node-caller/README.md): capture one run safely
   and validate a task-specific review answer using Node built-ins.
+- [Offline validation example](examples/offline-validation/README.md): optional
+  Python caller validation of saved answers, separate from execution and verdict.
+- [Native schema smoke example](examples/native-schema-smoke/README.md): explicit
+  caller-owned probes with private evidence and provider-free offline tests.
+- [Backlog readiness](docs/backlog-readiness.md): freeze-compatible evidence,
+  pending integration and external release gates.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development workflow and checks.
 - `due run --help` and `due skills show NAME`: the authoritative reference for
   the installed version.

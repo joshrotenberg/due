@@ -256,6 +256,10 @@ with its own prompt, result, and trace. The caller owns any follow-up or repair.
 
 ## Structured answers
 
+Optional caller examples cover [offline answer validation](../examples/offline-validation/README.md)
+and [native schema smoke probes](../examples/native-schema-smoke/README.md).
+They keep validation and compatibility evidence outside Due's execution status.
+
 `--output json` serializes Due's result envelope. `--schema FILE` additionally
 asks the model for an answer with a particular structure:
 
@@ -442,9 +446,11 @@ independently verify which files changed.
 
 The reusable [Codex workspace profile](../examples/codex-workspace-profile.json)
 sets `sandbox_mode="workspace-write"`, `approval_policy="never"`,
-`agents.enabled=false`, and these `sandbox_workspace_write` values:
+`agents.enabled=false`, `features.multi_agent_v2=false`, and these
+`sandbox_workspace_write` values:
 `network_access=false`, `writable_roots=[]`, `exclude_slash_tmp=true`, and
-`exclude_tmpdir_env_var=true`. All seven settings are native `-c` overrides.
+`exclude_tmpdir_env_var=true`. All eight settings are native `-c` overrides. The explicit v2 disable closes
+the precedence exception in the [versioned native control audit](native-control-audit.md).
 `ephemeral: false` allows persistence; the profile contains no task-specific
 cwd, prompt, session, answer schema, model, effort, deadline, or credentials.
 
@@ -480,7 +486,9 @@ activity (known issue #6). The caller matched the actual `PermissionError` in
 native session tool output and checked unchanged canaries. This batch did not
 inspect raw native `exec --json` before parsing, so it does not establish where
 the event was lost. Zero failed activities or zero dropped trace records does
-not prove that no permissions were denied.
+not prove that no permissions were denied. A later [correlated capture](native-trace-evidence.md)
+reproduced one inline-command omission in native stdout before Due parsing,
+while separate script controls emitted failures correctly.
 
 ### Reusable Codex workspace profile
 
@@ -489,17 +497,23 @@ both commands below. Codex CLI **0.162.0** exposes `-c/--config` on `exec` and
 `exec resume`, but `--sandbox` only on `exec`.
 
 Caller live acceptance with installed Due **0.1.0**, Codex **0.162.0**, and
-**macOS 27 arm64** used this exact unchanged profile for two same-workspace turns
+**macOS 27 arm64** used the earlier seven-setting profile for two same-workspace turns
 with new prompts and separate results/traces, supplying the answer schema per turn. The native session ID stayed
 the same, and the follow-up recalled a token absent from its prompt. Receipt edits
 and unit tests passed in both turns. One outside write per turn raised a native
 `PermissionError`; both canaries remained unchanged. The 18/19-record traces were
 contiguous and complete with no reported drops, subject to the denial gap above.
 Native contexts recorded workspace-write, approval `never`, networking disabled,
-and both excluded temporary-directory grants true. All seven requested settings
+and both excluded temporary-directory grants true. All seven original requested settings
 were forwarded, but the native record did not expose `agents.enabled` or explicit
 `writable_roots`: their effective values were not independently confirmed.
 No delegation was observed; that does not confirm effective agent disabling.
+The profile now additionally disables `features.multi_agent_v2`, which takes
+precedence over `agents.enabled` in published Codex 0.162.0 source. The revised
+eight-setting profile was accepted in fresh/resumed 0.162.0 trace probes with
+workspace writes and denied outside controls; this does not establish a runtime
+tool inventory. See [the control audit](native-control-audit.md) and
+[the correlated trace evidence](native-trace-evidence.md).
 
 This establishes CLI acceptance and observed effects on that version and host,
 not a security guarantee for every system. Confirm settings in native effective

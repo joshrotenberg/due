@@ -1,1 +1,5 @@
 /target
+
+# Optional Python caller examples
+__pycache__/
+*.py[cod]

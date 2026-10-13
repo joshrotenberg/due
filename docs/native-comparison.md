@@ -33,11 +33,15 @@ For a task that must not use the providers' built-in subagent tools:
 
 ```sh
 due run --provider codex --stdin --output json \
-  -- -c agents.enabled=false < task.txt
+  -- -c agents.enabled=false -c features.multi_agent_v2=false < task.txt
 due run --provider claude --stdin --output json \
   -- --disallowedTools Agent < task.txt
 ```
 
+Codex 0.162.0 resolves an enabled `features.multi_agent_v2` before
+`agents.enabled=false`; disable both for this example. The `multi_agent` feature
+listing may remain true with `agents.enabled=false`: it reports feature values,
+not the final per-model tool gate. See the [versioned control audit](native-control-audit.md).
 These narrow native delegation tools, not all possible subprocess creation.
 Combine them with the task's actual sandbox/tool permissions. They are opt-in
 examples, not new Due defaults. When using a request profile, arguments after

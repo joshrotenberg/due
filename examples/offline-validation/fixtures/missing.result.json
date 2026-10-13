@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "provider": "codex",
+  "status": "succeeded",
+  "text": "",
+  "structured_output": null,
+  "structured_output_present": false,
+  "answer_schema_validation": "not_performed",
+  "session_id": null,
+  "usage": null,
+  "cost_usd": null,
+  "duration_ms": 1,
+  "error": null
+}

@@ -97,3 +97,10 @@ The tests use an executable fixture to check argument/stdin transport, exclusive
 artifacts, spawn and stdin failures, cancellation, exit/signal preservation, and
 review validation. They do not start a provider or spend model calls. The real
 launcher performs a provider run unless `--dry-run` is supplied.
+
+Additional optional caller examples:
+
+- [Offline validation](../offline-validation/README.md): reusable Python answer
+  validation with separate execution evidence and domain verdict handling.
+- [Native schema smoke](../native-schema-smoke/README.md): explicit compatibility
+  probes using this launcher, private artifacts, and fake-Due offline tests.

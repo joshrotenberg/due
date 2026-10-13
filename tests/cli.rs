@@ -320,6 +320,7 @@ fn codex_workspace_profile_preserves_policy_for_fresh_and_explicit_resume() {
         "sandbox_mode=\"workspace-write\"",
         "approval_policy=\"never\"",
         "agents.enabled=false",
+        "features.multi_agent_v2=false",
         "sandbox_workspace_write.network_access=false",
         "sandbox_workspace_write.writable_roots=[]",
         "sandbox_workspace_write.exclude_slash_tmp=true",

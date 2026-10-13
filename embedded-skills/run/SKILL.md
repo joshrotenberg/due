@@ -42,7 +42,7 @@ per-turn permission grants. Include the necessary context in the prompt.
 
 Due starts one foreground provider invocation; it does not disable native
 subagents. State whether delegation is in scope. To disable built-in subagent
-tools for a task, use Codex passthrough `-c agents.enabled=false` or Claude
+tools for a task, use Codex passthrough `-c agents.enabled=false -c features.multi_agent_v2=false` or Claude
 `--disallowedTools Agent`, alongside the task's other native permissions. These
 controls do not prevent every possible subprocess launch.
 With execution flags, exactly one of `--stdin` and `--prompt TEXT` is required. Both reach the child
@@ -114,6 +114,7 @@ copy is [here](../../examples/codex-workspace-profile.json).
     "-c", "sandbox_mode=\"workspace-write\"",
     "-c", "approval_policy=\"never\"",
     "-c", "agents.enabled=false",
+    "-c", "features.multi_agent_v2=false",
     "-c", "sandbox_workspace_write.network_access=false",
     "-c", "sandbox_workspace_write.writable_roots=[]",
     "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
@@ -210,12 +211,15 @@ jq -e --arg id "$verified_session_id" '
 Each run gets a new prompt and artifacts. Preserve its execution status before
 summarizing traces or validating answers. Due has no implicit last-session
 selection or session database. Caller acceptance on Due 0.1.0 / Codex 0.162.0 /
-macOS 27 arm64 used this unchanged profile for two same-workspace turns: session
+macOS 27 arm64 used the earlier seven-setting profile for two same-workspace turns: session
 continuity, remembered context, edits/tests, and actual denied outside writes
 were checked. Native contexts exposed workspace-write, approval never, network
-access false, and both excluded temp grants true. All seven settings were
+access false, and both excluded temp grants true. All seven original settings were
 forwarded, but effective `agents.enabled` and explicit `writable_roots` were not
-exposed; no observed delegation does not confirm agent disabling. Confirm native
+exposed; no observed delegation does not confirm agent disabling. The profile now
+also disables `features.multi_agent_v2`, which takes precedence over
+`agents.enabled` in the version-matched native source. This static check is
+separate from live tool-availability evidence. Confirm native
 settings where possible and report unconfirmed or unsupported values without
 silently removing them. This is bounded host/version evidence, not a general
 security guarantee; synthetic tests establish routing only. Due neither enforces
