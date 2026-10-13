@@ -49,17 +49,22 @@ spending another model call or retrying a rejected schema.
 none of the stack is merged to main or installed. Language/runtime integration
 and removing comparison-only implementations remain an unfreeze product decision.
 
-Hosted CI cannot start recent jobs because GitHub reported an account
-payment/spending-limit restriction. Local macOS checks do not replace Linux or
-hosted matrix evidence. Provider-free Python CI checks were prepared locally, but GitHub rejected
-the initial branch push because the current OAuth credential lacks `workflow`
-scope. The workflow change is preserved as an unpublished local patch; this
-published branch retains the existing CI configuration. Integrate that patch
-with an appropriately authorized credential before expecting hosted Python
-coverage. Its explicit dependency-installation step uses the package index;
-the tests themselves use local fixtures without provider or network calls. The optional requirements file pins tested Python validation
-libraries, not Due runtime dependencies. Resolve the account gate, then obtain
-checks on reviewed commits before release acceptance.
+Earlier stack jobs failed before startup with a GitHub account payment/spending
+restriction. During this batch newer jobs started successfully: #35's Linux,
+macOS and minimum-Rust-version checks passed, and #32's Node matrix passed while
+its Rust checks were still running at observation. Use the latest checks for the
+reviewed commit; the earlier failure is historical, not proof of a current gate.
+Local macOS checks alone do not replace hosted platform evidence.
+
+Provider-free Python CI checks were prepared locally, but GitHub rejected the
+initial branch push because the OAuth credential lacked `workflow` scope. The
+workflow change is preserved as an unpublished patch; this branch retains the
+existing CI configuration. Integrate it with an appropriately authorized
+credential before expecting hosted Python coverage. Its explicit dependency
+installation uses the package index; the tests themselves use local fixtures
+without provider/network calls. The optional requirements file pins caller
+validation libraries, not Due runtime dependencies. Verify platform checks on
+reviewed commits before release acceptance.
 
 ## Post-freeze features and ongoing evidence
 
