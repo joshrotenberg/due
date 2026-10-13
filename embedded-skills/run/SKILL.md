@@ -74,10 +74,12 @@ answer. `due schema request|result|trace` exports each installed contract (choos
 one name). Load `due skills show contracts` for input and result rules.
 
 `--no-ephemeral` overrides profile true. Native arguments after `--` replace the
-whole profile list; `--clear-native-args` clears it. Paths for cwd and schema use
+whole profile list, including permission grants and restrictions;
+`--clear-native-args` clears it. Paths for cwd and schema use
 the caller's directory. `--request -` reads a whole JSON document from stdin and
 cannot share stdin with `--stdin`; a CLI `--prompt` can override that document.
-Changing provider does not clear other inherited options.
+Changing provider does not reset inherited policy or other options; review them
+for the selected provider.
 
 Add `--trace` for readable progress, or load `due skills show observe` for JSONL
 monitoring. Load `due skills show contracts` when the caller needs structured
@@ -87,7 +89,8 @@ answers or must interpret result fields. `due skills` lists the available skills
 
 Use `--dry-run` to validate the merged task, native conflicts, cwd, and schema
 JSON without launching a provider. It works without an installed provider and
-does not verify authentication, model availability, or provider schema support.
+does not verify authentication, model availability, native CLI option/config
+support, effective sandbox policy, or provider schema support.
 It omits prompt text but shows native option values and the inline Claude schema;
 requested tracing and temporary schema snapshots may still write files.
 Pass native options after `--`, for example `-- --max-turns 5` for Claude.
@@ -96,24 +99,141 @@ Passthrough accepts options, not another command or positional prompt. For an
 unknown option whose value begins with `-`, use `--option=value`.
 Native permissions remain in force; do not add bypass flags as a default.
 
-For unattended Codex work, use a workspace sandbox with no approval escalation:
+For persistent unattended Codex work, save this exact JSON as
+`codex-workspace-profile.json` in a caller-owned location outside every worker
+writable root. Use it unchanged for fresh and explicitly resumed runs; per-run
+inputs remain with the caller. No source checkout is needed. An optional source
+copy is [here](../../examples/codex-workspace-profile.json).
 
-```sh
-due run --provider codex --cwd "$PWD" --stdin --output json \
-  -- --sandbox workspace-write -c 'approval_policy="never"' \
-  -c 'sandbox_workspace_write.network_access=false' \
-  -c 'sandbox_workspace_write.writable_roots=[]' \
-  -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
-  -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' < task.txt
+```json
+{
+  "schema_version": 1,
+  "provider": "codex",
+  "ephemeral": false,
+  "native_args": [
+    "-c", "sandbox_mode=\"workspace-write\"",
+    "-c", "approval_policy=\"never\"",
+    "-c", "agents.enabled=false",
+    "-c", "sandbox_workspace_write.network_access=false",
+    "-c", "sandbox_workspace_write.writable_roots=[]",
+    "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+    "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"
+  ]
+}
 ```
 
+Use config-form sandbox mode: Codex CLI 0.162.0 exposes `-c` on both paths but
+rejects `--sandbox` on `exec resume`, even if Due's dry run succeeds.
+
+Use an existing authorized Git checkout, or initialize an authorized disposable
+repository first. The normal Codex Git/trust check stays enabled; the preflight
+below does not override it. Never add `--skip-git-repo-check` automatically.
+Any authorized new native option belongs in a copy of the **full** profile list;
+passing it alone after `--` replaces all seven settings.
+
+Choose an existing caller-writable `artifact_root` outside every worker writable
+root. The Due commands below set `TMPDIR` to that protected artifact
+directory for their schema snapshot and final-message file. The profile excludes
+that directory's temporary write grant. Do not export workspace-local `TMPDIR`
+to Due. If tests need temporary files, tell the task to set `TMPDIR` only
+on its test commands, for example `TMPDIR="$PWD/test-tmp" python3 -m unittest`
+from the task cwd. Worker commands inherit the protected `TMPDIR` and cannot
+write there; set a workspace-local value on any command that needs temporary
+files. Do not widen worker grants.
+
+This example uses `jq`, the saved profile, and a caller-supplied answer schema
+also kept outside worker writable roots. Keep the separate bounded prompts
+`first-task.txt` and `follow-up.txt` in that caller-owned inputs directory too:
+
+```sh
+input_root=/absolute/path/to/caller-owned-inputs
+profile="$input_root/codex-workspace-profile.json"
+answer_schema="$input_root/answer.schema.json"
+workspace=/absolute/path/to/authorized-git-checkout
+artifact_root=/absolute/path/to/caller-owned-artifacts-outside-workspace
+git -C "$workspace" rev-parse --git-dir > /dev/null || exit 1
+artifacts=$(mktemp -d "$artifact_root/due-run.XXXXXX") || exit 1
+mkdir -p "$workspace/test-tmp" || exit 1
+fresh_status=0
+TMPDIR="$artifacts" due run --request "$profile" --cwd "$workspace" --stdin --output json \
+  --schema "$answer_schema" --trace --trace-file "$artifacts/fresh.jsonl" \
+  < "$input_root/first-task.txt" > "$artifacts/fresh.result.json" || fresh_status=$?
+printf '%s\n' "$fresh_status" > "$artifacts/fresh.exit"
+[ "$fresh_status" -eq 0 ] || exit "$fresh_status"
+```
+
+Before continuing, the calling agent independently validates `structured_output`
+against `answer_schema` and checks the intended task, actual cwd, permissions,
+and effects. Native session data is optional extra evidence when accessible.
+These checks can be automated under existing authorization; no human approval
+or manual ID paste is required. Due does not validate the answer or effective
+policy. Report missing evidence and blocked checks as such. Use the same
+workspace: native resume can restore its workspace, and `--cwd` is not a proven
+way to relocate history.
+
+After those checks, correlate this fresh result with its trace and set the
+verified ID programmatically. This trace-enabled recipe requires a session
+marker and completion; investigate missing evidence before follow-up:
+
+```sh
+session_id=$(jq -er '
+  select(.provider == "codex" and .status == "succeeded" and
+         .structured_output_present == true) |
+  .session_id | select(type == "string" and length > 0)
+' "$artifacts/fresh.result.json") || exit 1
+run_id=$(jq -er '.run_id | select(type == "string" and length > 0)' \
+  "$artifacts/fresh.result.json") || exit 1
+jq -es --arg run "$run_id" --arg id "$session_id" '
+  length > 0 and .[0].event == "run_started" and
+  .[-1].event == "run_finished" and .[-1].status == "succeeded" and
+  .[-1].exit_code == 0 and
+  all(.[]; .run_id == $run and .provider == "codex") and
+  any(.[]; .event == "session_started") and
+  all(.[] | select(.event == "session_started" or has("session_id"));
+      .session_id == $id)
+' "$artifacts/fresh.jsonl" > /dev/null || exit 1
+verified_session_id=$session_id
+printf '%s\n' "$verified_session_id" > "$artifacts/native-session-id.txt"
+resume_status=0
+TMPDIR="$artifacts" due run --request "$profile" --cwd "$workspace" --resume "$verified_session_id" \
+  --stdin --output json --schema "$answer_schema" \
+  --trace --trace-file "$artifacts/resumed.jsonl" \
+  < "$input_root/follow-up.txt" > "$artifacts/resumed.result.json" || resume_status=$?
+printf '%s\n' "$resume_status" > "$artifacts/resumed.exit"
+[ "$resume_status" -eq 0 ] || exit "$resume_status"
+jq -e --arg id "$verified_session_id" '
+  .provider == "codex" and .status == "succeeded" and
+  .structured_output_present == true and .session_id == $id
+' "$artifacts/resumed.result.json" > /dev/null || exit 1
+```
+
+Each run gets a new prompt and artifacts. Preserve its execution status before
+summarizing traces or validating answers. Due has no implicit last-session
+selection or session database. Caller acceptance on Due 0.1.0 / Codex 0.162.0 /
+macOS 27 arm64 used this unchanged profile for two same-workspace turns: session
+continuity, remembered context, edits/tests, and actual denied outside writes
+were checked. Native contexts exposed workspace-write, approval never, network
+access false, and both excluded temp grants true. All seven settings were
+forwarded, but effective `agents.enabled` and explicit `writable_roots` were not
+exposed; no observed delegation does not confirm agent disabling. Confirm native
+settings where possible and report unconfirmed or unsupported values without
+silently removing them. This is bounded host/version evidence, not a general
+security guarantee; synthetic tests establish routing only. Due neither enforces
+nor validates the sandbox independently. The optional
+[full recipe](../../docs/cli.md#reusable-codex-workspace-profile) has more detail.
+
 This grants workspace edits and sandboxed commands, not only one file or command.
-It removes extra writable roots and default temporary-directory grants; additional
-paths require explicit authorization. Reads can extend outside the workspace.
+It requests no extra writable roots or default temporary-directory grants; additional
+paths require explicit authorization. Put test temporary files inside the
+workspace only for the task's test commands. Reads can extend outside the workspace.
 Command networking is disabled; provider API and connected-tool permissions are
 separate. Inherited native rules and managed requirements still apply. Preserve
 them and report blocked checks without retries or expanding permission grants.
 Keep the task's narrower scope in the prompt and independently verify effects.
+Due traces omitted the acceptance test's denied write as a failed activity
+(known issue #6); native session tool output and unchanged canaries established
+the denial. Raw native exec JSON before parsing was not checked in this batch.
+Trace completeness alone therefore does not prove that checks were allowed.
 
 For unattended Claude work, `--tools` exposes built-in tools but does not
 authorize their use. `acceptEdits` permits edits, not arbitrary shell commands. Grant only the

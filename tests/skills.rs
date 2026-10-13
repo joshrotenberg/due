@@ -249,3 +249,30 @@ fn help_exposes_run_and_skills_routes_without_a_provider() {
     }
     standalone.assert_no_files_written();
 }
+
+#[test]
+fn standalone_run_guide_profile_matches_the_example() {
+    let standalone = Standalone::new();
+    let output = standalone.run(&["skills", "show", "run"]);
+    success(&output);
+    let guide = String::from_utf8(output.stdout).unwrap();
+    let profile_section = guide
+        .split_once("For persistent unattended Codex work, save this exact JSON as")
+        .expect("run guide must teach the persistent profile")
+        .1;
+    let profile_json = profile_section
+        .split_once("```json\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .expect("run guide must include standalone profile JSON")
+        .0;
+    let embedded: Value = serde_json::from_str(profile_json).unwrap();
+    let example: Value = serde_json::from_slice(
+        &fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/codex-workspace-profile.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(embedded, example);
+    standalone.assert_no_files_written();
+}

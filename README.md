@@ -14,7 +14,7 @@ scheduling, and any retry.
 ```sh
 due run --provider claude -p "Explain this repository" --effort high
 cat task.txt | due run --provider codex --stdin --output json
-due run --provider codex -p "Fix the tests" -- --sandbox workspace-write
+due run --request examples/codex-workspace-profile.json -p "Fix the tests"
 ```
 
 ## Install from source
@@ -108,13 +108,26 @@ due run --request examples/profile.json --provider claude -p "Review the diff"
 `--dry-run` validates the merged request, native-option conflicts, working
 directory, and answer-schema JSON, then reports the executable, argv, cwd, and
 stdin size without launching a provider. It does not check authentication, model
-support, or provider schema support. Prompt text is omitted, but native option
-values and an inline Claude schema are shown unredacted.
+support, native CLI option/config compatibility, effective sandbox policy, or
+provider schema support. Prompt text is omitted, but native option values and an
+inline Claude schema are shown unredacted.
 
-Native arguments after `--` replace the profile's entire `native_args` list.
+Native arguments after `--` replace the profile's entire `native_args` list,
+including permission grants. Changing provider retains inherited policy options;
+review them for the selected provider.
 Paths in a profile resolve from the caller's directory, not the profile's. There
 is no profile search path, inheritance, or config store. Examples are in
 [`examples/`](examples).
+
+For persistent Codex work, use
+[`examples/codex-workspace-profile.json`](examples/codex-workspace-profile.json).
+It uses `-c 'sandbox_mode="workspace-write"'` for both fresh and explicit resumed
+runs; Codex CLI 0.162.0 rejects `--sandbox` on `exec resume`. Follow the
+[fresh/resume recipe](docs/cli.md#reusable-codex-workspace-profile) to supply each
+prompt, cwd, schema, and fresh trace path, then verify the native session ID and
+workspace before follow-up. `--ephemeral` conflicts with resume; a later override
+cannot recover history that was never persisted. Due adds no session store or
+independent sandbox enforcement.
 
 ## Contracts, structured answers, and tracing
 

@@ -34,8 +34,14 @@ impl Fixture {
     }
 
     fn command(&self, mode: &str) -> Command {
+        let mut cmd = self.command_without_provider(mode);
+        cmd.args(["--provider", self.provider]);
+        cmd
+    }
+
+    fn command_without_provider(&self, mode: &str) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_due"));
-        cmd.args(["run", "--provider", self.provider, "--binary"])
+        cmd.args(["run", "--binary"])
             .arg(&self.binary)
             .env("DUE_TEST_DIR", self.root.path())
             .env("DUE_TEST_PROVIDER", self.provider)
@@ -298,6 +304,222 @@ fn resume_and_ephemeral_map_to_provider_flags() {
         };
         assert!(fixture.argv().iter().any(|arg| arg == expected));
     }
+}
+
+#[test]
+fn codex_workspace_profile_preserves_policy_for_fresh_and_explicit_resume() {
+    // This checks Due's routing and result contract, not native sandbox support
+    // or enforcement. The fake provider does not persist conversation history.
+    let fixture = Fixture::new("codex");
+    let profile =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/codex-workspace-profile.json");
+    let original_profile = fs::read(&profile).unwrap();
+    let cwd = fixture.root.path().join("authorized workspace");
+    fs::create_dir(&cwd).unwrap();
+    let expected_config = [
+        "sandbox_mode=\"workspace-write\"",
+        "approval_policy=\"never\"",
+        "agents.enabled=false",
+        "sandbox_workspace_write.network_access=false",
+        "sandbox_workspace_write.writable_roots=[]",
+        "sandbox_workspace_write.exclude_slash_tmp=true",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+    ];
+    let mut session_id: Option<String> = None;
+    let mut run_ids = Vec::new();
+    let mut schema_paths = Vec::new();
+    let mut message_paths = Vec::new();
+    let mut traces = Vec::new();
+    for turn in ["fresh", "resumed"] {
+        let resumed = session_id.is_some();
+        let prompt = format!("{turn} task\nKeep $HOME and $(false) literal.\n");
+        let schema_name = format!("{turn}.schema.json");
+        let schema = serde_json::json!({
+            "type": "object", "properties": {turn: {"type": "string"}},
+            "required": [turn], "additionalProperties": false
+        });
+        fs::write(fixture.root.path().join(&schema_name), schema.to_string()).unwrap();
+        // A decoy proves the schema resolves from the caller, not the task cwd.
+        fs::write(cwd.join(&schema_name), "false").unwrap();
+        let answer = serde_json::json!({turn: "fixture answer"});
+        let trace = fixture.root.path().join(format!("{turn}.jsonl"));
+        assert!(!trace.exists());
+        let mut command = fixture.command_without_provider("structured");
+        command
+            .arg("--request")
+            .arg(&profile)
+            .args([
+                "--cwd",
+                "authorized workspace",
+                "--stdin",
+                "--output",
+                "json",
+                "--schema",
+                &schema_name,
+                "--trace=json",
+                "--trace-file",
+            ])
+            .arg(&trace)
+            .current_dir(fixture.root.path())
+            .env("DUE_TEST_ANSWER", answer.to_string())
+            .env("TMPDIR", fixture.root.path())
+            .stdin(Stdio::piped());
+        if let Some(id) = &session_id {
+            command.arg("--resume").arg(id);
+        }
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(prompt.as_bytes())
+            .unwrap();
+        let result = json(&finish(child), 0, "succeeded");
+        assert_eq!(result["provider"], "codex");
+        assert_eq!(result["session_id"], "codex-test-thread");
+        assert_eq!(result["structured_output_present"], true);
+        assert_eq!(result["structured_output"], answer);
+        assert_eq!(result["answer_schema_validation"], "not_performed");
+        assert_eq!(
+            serde_json::from_str::<Value>(result["text"].as_str().unwrap()).unwrap(),
+            answer
+        );
+        let args = fixture.argv();
+        if let Some(id) = &session_id {
+            assert_eq!(&args[..2], ["exec", "resume"]);
+            assert_eq!(&args[args.len() - 2..], [id.as_str(), "-"]);
+            assert_eq!(result["session_id"].as_str(), Some(id.as_str()));
+        } else {
+            assert_eq!(args[0], "exec");
+            assert!(!args.iter().any(|arg| arg == "resume"));
+            assert_eq!(args.last().unwrap(), "-");
+        }
+        let configs: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(configs, expected_config);
+        for forbidden in [
+            "--sandbox",
+            "--ephemeral",
+            "--last",
+            "--all",
+            "--model",
+            "--cd",
+        ] {
+            assert!(!args.iter().any(|arg| arg == forbidden), "{args:?}");
+        }
+        assert!(args.iter().any(|arg| arg == "--json"));
+        for (flag, paths) in [
+            ("--output-schema", &mut schema_paths),
+            ("--output-last-message", &mut message_paths),
+        ] {
+            paths.push(args.windows(2).find(|pair| pair[0] == flag).unwrap()[1].clone());
+        }
+        assert_eq!(
+            fs::read(fixture.root.path().join("stdin")).unwrap(),
+            prompt.as_bytes()
+        );
+        assert_eq!(
+            Path::new(
+                fs::read_to_string(fixture.root.path().join("cwd"))
+                    .unwrap()
+                    .trim()
+            ),
+            cwd.canonicalize().unwrap()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(fixture.root.path().join("schema")).unwrap())
+                .unwrap(),
+            schema
+        );
+        let trace_bytes = fs::read(&trace).unwrap();
+        let events: Vec<Value> = std::str::from_utf8(&trace_bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.first().unwrap()["event"], "run_started");
+        assert_eq!(events[0]["resumed"], resumed);
+        assert_eq!(events[0]["ephemeral"], false);
+        assert_eq!(events[0]["dry_run"], false);
+        assert!(events[0].get("timeout_ms").is_none());
+        assert_eq!(events.last().unwrap()["event"], "run_finished");
+        assert_eq!(events.last().unwrap()["status"], "succeeded");
+        assert_eq!(events.last().unwrap()["exit_code"], 0);
+        assert!(
+            events
+                .iter()
+                .all(|event| event["run_id"] == result["run_id"])
+        );
+        let session_started = events
+            .iter()
+            .position(|event| event["event"] == "session_started")
+            .expect("native thread.started must emit a trace session marker");
+        assert!(
+            events[session_started..]
+                .iter()
+                .all(|event| event["session_id"] == result["session_id"])
+        );
+        run_ids.push(result["run_id"].as_str().unwrap().to_owned());
+        traces.push((trace, trace_bytes));
+        session_id = Some(result["session_id"].as_str().unwrap().to_owned());
+    }
+    assert_ne!(run_ids[0], run_ids[1]);
+    for path in schema_paths.iter().chain(message_paths.iter()) {
+        assert!(Path::new(path).starts_with(fixture.root.path()));
+        assert!(
+            !Path::new(path).starts_with(&cwd),
+            "caller transport must be outside worker cwd"
+        );
+    }
+    assert_ne!(schema_paths[0], schema_paths[1]);
+    assert_ne!(message_paths[0], message_paths[1]);
+    for (path, bytes) in traces {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            bytes,
+            "follow-up must not overwrite the first trace"
+        );
+    }
+    assert_eq!(fs::read(profile).unwrap(), original_profile);
+}
+
+#[test]
+fn replacing_codex_workspace_profile_native_args_removes_all_policy_settings() {
+    let fixture = Fixture::new("codex");
+    let profile =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/codex-workspace-profile.json");
+    // A dry run makes this pitfall visible without launching a weakened provider.
+    let result = json(
+        &run(fixture
+            .command_without_provider("success")
+            .arg("--request")
+            .arg(profile)
+            .args([
+                "--prompt",
+                "inspect",
+                "--resume",
+                "explicit-session",
+                "--dry-run",
+                "--output",
+                "json",
+                "--",
+                "-c",
+                "model_reasoning_effort=\"high\"",
+            ])),
+        0,
+        "planned",
+    );
+    let args = result["invocation"]["args"].as_array().unwrap();
+    let configs: Vec<_> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].as_str().unwrap())
+        .collect();
+    assert_eq!(configs, ["model_reasoning_effort=\"high\""]);
+    assert!(!fixture.root.path().join("argv").exists());
 }
 
 #[test]

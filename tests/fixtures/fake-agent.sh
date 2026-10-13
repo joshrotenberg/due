@@ -10,8 +10,10 @@ printf '%s\0' "$@" > "$DUE_TEST_DIR/argv"
 /bin/cat > "$DUE_TEST_DIR/stdin"
 
 last_message=''
+schema=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --output-schema) shift; schema="$1" ;;
         --output-last-message|-o)
             shift
             last_message="$1"
@@ -20,6 +22,7 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+if [ -n "$schema" ]; then /bin/cat "$schema" > "$DUE_TEST_DIR/schema"; fi
 
 case "$DUE_TEST_MODE" in
     success_stderr) printf 'fixture progress diagnostic\n' >&2 ;;
@@ -123,6 +126,8 @@ else
             if [ -n "$last_message" ]; then
                 if [ "$DUE_TEST_MODE" = missing_final ]; then
                     /bin/rm -f "$last_message"
+                elif [ "$DUE_TEST_MODE" = structured ]; then
+                    printf '%s\n' "$DUE_TEST_ANSWER" > "$last_message"
                 else
                     printf 'FINAL ANSWER\n' > "$last_message"
                 fi
