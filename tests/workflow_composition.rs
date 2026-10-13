@@ -11,6 +11,128 @@ use std::{
 };
 use support::*;
 
+// Finocchio's async probe uses this actual supervisor path, not a second fake
+// job host. Only the native agent protocol is synthetic (existing fixture).
+#[cfg(feature = "workflow-fennel-spike")]
+mod finocchio {
+    use super::*;
+    fn fixture(entry: &str) -> Fixture {
+        let f = lua("");
+        f.write("main.fnl", entry);
+        f.write(
+            "component.fnl",
+            include_str!("../spikes/finocchio/examples/async/component.fnl"),
+        );
+        f.write(
+            "adapter.lua",
+            include_str!("../spikes/finocchio/examples/async/adapter.lua"),
+        );
+        f.edit(|m| {
+            m["schema_version"] = json!(2);
+            m["entry"] = json!("main.fnl");
+            m["modules"] = json!({"local/component":"component.fnl","local/adapter":"adapter.lua"});
+        });
+        f
+    }
+    fn settled(f: &Fixture, v: &Value) {
+        let events = events(f);
+        for step in v["steps"].as_array().unwrap() {
+            let id = step["id"].as_str().unwrap();
+            let receipt = f.read(&format!("artifacts/steps/{id}/step.json"));
+            assert_eq!(receipt["scope"], step["scope"]);
+            assert_eq!(receipt["exit"], step["exit"]);
+            let completed = events
+                .iter()
+                .position(|e| e["event"] == "step_completed" && e["data"]["step_id"] == id)
+                .unwrap();
+            let scope = &step["scope"]["id"];
+            // A child's owner may only finish after its jobs have settled.
+            if *scope != json!(0) {
+                let closes: Vec<_> = events
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e["event"] == "scope_finished" && e["scope"]["id"] == *scope)
+                    .collect();
+                assert_eq!(closes.len(), 1, "owner must close exactly once");
+                assert!(closes[0].0 > completed);
+            }
+        }
+        assert_native_cleanup(f);
+    }
+    #[test]
+    fn reusable_components_overlap_across_lua_and_rust_boundaries() {
+        let f = fixture(include_str!("../spikes/finocchio/examples/async/main.fnl"));
+        let mut child = Running::new(&f);
+        child.ready("a-ready");
+        child.ready("b-ready"); // Neither can finish until explicitly released.
+        assert!(!f.root.path().join("artifacts/steps/a/step.json").exists());
+        assert!(!f.root.path().join("artifacts/steps/b/step.json").exists());
+        f.write("b-release", "go");
+        child.ready("artifacts/steps/b/step.json");
+        assert!(!f.root.path().join("artifacts/steps/a/step.json").exists());
+        f.write("a-release", "go");
+        let v = child.finish(0);
+        assert_eq!(v["output"][0]["id"], "a");
+        assert_eq!(v["output"][1]["id"], "b");
+        assert_ne!(v["steps"][0]["scope"]["id"], v["steps"][1]["scope"]["id"]);
+        assert_eq!(v["steps"][0]["scope"]["id"], 1);
+        assert_eq!(v["steps"][1]["scope"]["id"], 2);
+        settled(&f, &v);
+    }
+    #[test]
+    fn cancelling_suspended_parent_joins_active_and_queued_children_despite_pcall() {
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            let f = fixture(
+                r#"(local {: run} (require :local/adapter))
+              (fn [input]
+                (pcall (fn [] (pcall (fn []
+                  (due.concurrent :components [(fn [] (run :a)) (fn [] (run :b)) (fn [] (run :queued))])))))
+                (due.run {:id :after :profile :reader :prompt :must-not-launch}))"#,
+            );
+            let mut child = Running::new(&f);
+            child.ready("a-ready");
+            child.ready("b-ready");
+            child.ready("artifacts/steps/queued/admitted.json");
+            child.signal(signal);
+            let v = child.finish(130);
+            assert_eq!(v["status"], "cancelled");
+            assert_eq!(v["steps"].as_array().unwrap().len(), 3);
+            for step in &v["steps"].as_array().unwrap()[..2] {
+                assert_eq!(step["exit"]["code"], 130);
+                assert_eq!(step["exit"]["started"], true);
+            }
+            assert_eq!(v["steps"][2]["exit"]["started"], false);
+            assert_eq!(v["steps"][2]["exit"]["code"], Value::Null);
+            assert!(
+                !f.calls()
+                    .iter()
+                    .any(|p| p == "must-not-launch" || p == "barrier-queued")
+            );
+            settled(&f, &v);
+        }
+    }
+    #[test]
+    fn caught_cross_scope_handle_failure_still_cancels_owned_work() {
+        let f = fixture(
+            r#"(fn [input]
+          (local handle (due.start {:id :a :profile :reader :prompt :barrier-a}))
+          (due.run {:id :gate :profile :reader :prompt :barrier-gate})
+          (pcall (fn [] (due.concurrent :wrong-owner [(fn [] (due.wait handle))])))
+          (due.run {:id :after :profile :reader :prompt :must-not-launch}))"#,
+        );
+        let mut child = Running::new(&f);
+        child.ready("a-ready");
+        child.ready("gate-ready");
+        f.write("gate-release", "go");
+        let v = child.finish(1);
+        assert!(v["error"].as_str().unwrap().contains("scope"), "{v}");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(v["steps"][0]["exit"]["code"], 130);
+        assert!(!f.calls().iter().any(|p| p == "must-not-launch"));
+        settled(&f, &v);
+    }
+}
+
 fn lua(source: &str) -> Fixture {
     let f = Fixture::new("");
     f.write("main.lua", source);
