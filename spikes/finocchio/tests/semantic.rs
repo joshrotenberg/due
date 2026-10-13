@@ -297,12 +297,24 @@ fn rename_rejects_generated_contract_capture_in_locals_and_parameters() {
         let at = source.find("x").unwrap();
         let s: Sources = [("m".into(), source)].into();
         assert_eq!(check(&s)["supported"], true);
-        let rejected = rename(&s, "m", at, "contract");
-        assert_eq!(rejected["supported"], false, "{rejected}");
-        assert!(rejected.get("edits").is_none());
+        for name in ["contract", "_ENV"] {
+            let rejected = rename(&s, "m", at, name);
+            assert_eq!(rejected["supported"], false, "{rejected}");
+            assert!(rejected.get("edits").is_none());
+        }
         let renamed = rename(&s, "m", at, "_G");
         assert_eq!(renamed["supported"], true, "{renamed}");
         let code = compiler::compile(renamed["sources"]["m"].as_str().unwrap(), "m").unwrap();
         assert_eq!(runtime().unwrap().load(code).eval::<i64>().unwrap(), 1);
     }
+    // _ENV can also capture ordinary global lookups, independent of defn.
+    let mut s = sources();
+    let source = "(local x 1) (local m (require :math)) (m.bump x)";
+    s.insert("main".into(), source.into());
+    assert_eq!(evaluate(&s), 3);
+    let rejected = rename(&s, "main", source.find("x").unwrap(), "_ENV");
+    assert_eq!(rejected["supported"], false);
+    assert!(rejected.get("edits").is_none());
+    s.insert("main".into(), source.replacen("local x", "local _ENV", 1));
+    assert_eq!(check(&s)["supported"], false);
 }

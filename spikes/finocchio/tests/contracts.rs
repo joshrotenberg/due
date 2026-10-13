@@ -92,6 +92,10 @@ fn defn_rejects_contract_capture_without_introducing_a_global_table_capture() {
         "(fn outer [contract] (defn f [] \"f\" 1) (f))",
         "(defn f [contract :integer] \"f\" contract)",
         "(defn contract [] \"f\" 1)",
+        "(local _ENV 1) (defn f [] \"f\" 1)",
+        "(fn outer [_ENV] (defn f [] \"f\" 1) (f))",
+        "(defn f [_ENV :integer] \"f\" _ENV)",
+        "(defn _ENV [] \"f\" 1)",
     ] {
         let error = compiler::compile(
             &format!("(import-macros {{: defn}} :finocchio) {source}"),

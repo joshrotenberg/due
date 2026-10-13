@@ -14,7 +14,7 @@ return function(f, sources, request, array_mt)
     for _,name in ipairs({"fn", "local", "let", "do", "if", "import-macros", "require",
         "defn", "twice", "nil", "true", "false", "var", "set", "macro", "macros",
         "each", "for", "match", "quote", "unquote", "values", "global",
-        "contract"}) do reserved[name]=true end
+        "contract", "_ENV"}) do reserved[name]=true end
     for name, metadata in pairs(f.syntax()) do
         if metadata["special?"] or metadata["macro?"] then reserved[name]=true end
     end

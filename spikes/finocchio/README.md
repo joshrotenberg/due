@@ -49,11 +49,13 @@ for Due evidence.
 `defn` expands to a local binding with a closure builder. Its generated
 `contract.define` reference requires an unshadowed global `contract`: the macro
 uses public `in-scope?`/`assert-compile` to reject an enclosing local or parameter
-with that name, and also rejects `contract` as its own name or parameter. It does
+named `contract` or `_ENV`, and rejects both as its own name or parameter. Lua's
+`_ENV` changes how free globals resolve, including the generated lookup. It does
 not use `_G` as a workaround; a local/parameter `_G` remains safe. The semantic
-subset conservatively reserves `contract` for all bindings and rename targets,
+subset conservatively reserves `contract` and `_ENV` for all bindings and rename targets,
 even in modules without `defn`. This is rejection of capture, not general hygiene
-for arbitrary generated free references.
+for arbitrary generated free references. It does not prevent trusted code from
+rebinding globals or using Fennel's raw Lua escape.
 
 Recursion receives the
 public checked function, so recursive calls cannot bypass checks. The resulting
