@@ -227,6 +227,7 @@ impl StreamState {
 
     fn finish(self, output_path: &Path) -> RunResult {
         let mut result = RunResult {
+            text: self.last_assistant,
             session_id: self.thread_id.or(self.session_id),
             usage: self.usage.map(normalize_usage),
             ..RunResult::new(Provider::Codex)
@@ -234,7 +235,7 @@ impl StreamState {
         if let Some(error) = self.terminal_error {
             result.text = std::fs::read_to_string(output_path)
                 .map(normalize_final_newline)
-                .unwrap_or(self.last_assistant);
+                .unwrap_or(result.text);
             return result.fail(error);
         }
         if !self.completed {
@@ -393,6 +394,14 @@ fn parse(stdout: &str, output_path: &Path) -> RunResult {
     }
     let query = QueryResult::from_events(events);
     let mut result = RunResult {
+        // Retain the last received assistant message even if the turn stops
+        // before its terminal event. Success still requires the final file.
+        text: query
+            .events
+            .iter()
+            .rev()
+            .find_map(JsonLineEvent::agent_message_text)
+            .unwrap_or_default(),
         session_id: query
             .thread_id
             .or(query.session_id)
@@ -417,14 +426,7 @@ fn parse(stdout: &str, output_path: &Path) -> RunResult {
         // text-mode answer. Native failures may not write the final-message file.
         result.text = std::fs::read_to_string(output_path)
             .map(normalize_final_newline)
-            .unwrap_or_else(|_| {
-                query
-                    .events
-                    .iter()
-                    .rev()
-                    .find_map(JsonLineEvent::agent_message_text)
-                    .unwrap_or_default()
-            });
+            .unwrap_or(result.text);
         return result.fail(terminal_error(failed));
     }
     if !query.events.iter().any(JsonLineEvent::is_turn_completed) {
@@ -486,8 +488,9 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
                 Some(ErrorKind::Protocol)
             ) {
                 // A failed process can stop before its terminal event or final
-                // file. Preserve observed metadata while reporting the actual
-                // process failure, just as the streaming path does.
+                // file. Preserve observed text and metadata while reporting the
+                // actual process failure, just as the streaming path does.
+                result.text = parsed.text;
                 result.session_id = parsed.session_id;
                 result.usage = parsed.usage;
             } else {

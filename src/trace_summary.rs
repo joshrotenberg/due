@@ -466,9 +466,11 @@ fn write_text(out: &mut impl Write, summary: &Summary) -> io::Result<()> {
             "{} {}: {} ({} terminal records, {} ms)",
             run.provider,
             run.run_id,
-            run.status
-                .as_deref()
-                .unwrap_or("unknown: terminal record absent"),
+            run.status.as_deref().unwrap_or(if run.terminal_conflict {
+                "unknown: conflicting terminal records"
+            } else {
+                "unknown: terminal record absent"
+            }),
             run.terminal_records,
             run.elapsed_ms
         )?;
