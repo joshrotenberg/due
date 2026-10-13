@@ -128,8 +128,88 @@ fn concurrency_slots_and_cancelled_queued_job_do_not_poison_sibling() {
     }
 }
 
+fn sibling_cancellation(language: Language, inject: bool) {
+    let f = fixture(
+        language,
+        r#"
+            import "patterns/v1" as p;
+            let a=due::start(p::job("a","reader","barrier-a"));
+            let b=due::start(p::job("b","reader","barrier-b"));
+            let ready=due::start(p::job("ready","reader","ordinary"));
+            due::wait(ready); due::cancel(a); due::wait(b)
+        "#,
+        r#"
+            local p=require("patterns/v1")
+            local a=due.start(p.job("a","reader","barrier-a"))
+            local b=due.start(p.job("b","reader","barrier-b"))
+            local ready=due.start(p.job("ready","reader","ordinary"))
+            due.wait(ready); due.cancel(a); return due.wait(b)
+        "#,
+    );
+    // The third child waits for the outer readiness release, proving both
+    // cancelland and sibling are at native protocol boundaries first.
+    f.write("agent", &include_str!("fixtures/workflow-agent.sh").replace("    trace-flood*)", "    ordinary*)\n        while [ ! -f \"$DUE_WORKFLOW_TEST_DIR/go\" ]; do /bin/sleep 0.01; done ;;\n    trace-flood*)"));
+    f.edit(|m| m["max_concurrency"] = json!(3));
+    let command = f.command(false);
+    #[cfg(target_os = "macos")]
+    let command = {
+        let mut command = command;
+        if inject {
+            inject_pipe_window(&f, &mut command);
+        }
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    assert!(!inject);
+    let mut child = Running::with_command(&f, command);
+    child.ready("a-ready");
+    child.ready("b-ready");
+    if inject {
+        let log = fs::read_to_string(f.root.path().join("pipe-window.log")).unwrap();
+        assert!(
+            log.lines()
+                .filter(|s| s.split_whitespace().last() != Some("0"))
+                .count()
+                >= 2,
+            "fault injection must exercise concurrent stdio pipe setup: {log}"
+        );
+    }
+    f.write("go", "go");
+    let a = child.receipt("artifacts/steps/a/step.json");
+    assert_eq!(a["child_result"]["status"], "cancelled");
+    assert_eq!(a["exit"]["code"], 130);
+    assert!(!f.root.path().join("artifacts/steps/b/step.json").exists());
+    assert!(child.alive());
+    f.write("b-release", "go");
+    let v = child.finish(0);
+    assert_eq!(v["output"]["ok"], true);
+    assert_eq!(v["steps"][0]["exit"]["code"], 130);
+    assert_eq!(v["steps"][1]["exit"]["code"], 0);
+    assert_eq!(outcomes(&v), 3);
+    assert_native_cleanup(&f);
+}
+
 #[test]
 fn cancel_active_job_joins_while_sibling_keeps_running() {
+    for language in languages() {
+        sibling_cancellation(language, false);
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "workflow-spike"))]
+#[test]
+fn darwin_pipe_window_does_not_block_sibling_cancellation_rhai() {
+    sibling_cancellation(Language::Rhai, true);
+}
+
+#[cfg(all(target_os = "macos", feature = "workflow-lua-spike"))]
+#[test]
+fn darwin_pipe_window_does_not_block_sibling_cancellation_lua() {
+    sibling_cancellation(Language::Lua, true);
+}
+
+#[test]
+fn cancellation_receipt_joins_native_cleanup_while_sibling_answers_challenge() {
     for language in languages() {
         let f = fixture(
             language,
@@ -138,35 +218,171 @@ fn cancel_active_job_joins_while_sibling_keeps_running() {
             let a=due::start(p::job("a","reader","barrier-a"));
             let b=due::start(p::job("b","reader","barrier-b"));
             let ready=due::start(p::job("ready","reader","ordinary"));
-            due::wait(ready); due::cancel(a); due::wait(b)
+            due::wait(ready); due::log("ready joined; cancelling a");
+            let stopped=due::cancel(a); let again=due::wait(a);
+            if stopped != again { throw "cancel/wait mismatch"; }
+            due::log("a joined"); due::wait(b)
         "#,
             r#"
             local p=require("patterns/v1")
             local a=due.start(p.job("a","reader","barrier-a"))
             local b=due.start(p.job("b","reader","barrier-b"))
             local ready=due.start(p.job("ready","reader","ordinary"))
-            due.wait(ready); due.cancel(a); return due.wait(b)
+            due.wait(ready); due.log("ready joined; cancelling a")
+            local stopped=due.cancel(a); local again=due.wait(a)
+            assert(stopped.id == again.id and stopped.completion_seq == again.completion_seq)
+            due.log("a joined"); return due.wait(b)
         "#,
         );
         // The third child waits for the outer readiness release, proving both
         // cancelland and sibling are at native protocol boundaries first.
-        f.write("agent", &include_str!("fixtures/workflow-agent.sh").replace("    trace-flood*)", "    ordinary*)\n        while [ ! -f \"$DUE_WORKFLOW_TEST_DIR/go\" ]; do /bin/sleep 0.01; done ;;\n    trace-flood*)"));
+        f.write("agent", include_str!("fixtures/workflow-sibling.sh"));
         f.edit(|m| m["max_concurrency"] = json!(3));
-        let mut child = f.command(false).spawn().unwrap();
-        wait_for(&f.root.path().join("a-ready"), &mut child);
-        wait_for(&f.root.path().join("b-ready"), &mut child);
+        let mut child = Running::new(&f);
+        for name in ["a-ready", "b-ready", "third-ready"] {
+            child.ready(name);
+        }
+        let descendant: i32 = fs::read_to_string(f.root.path().join("a-descendant"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
         f.write("go", "go");
-        wait_for(
-            &f.root.path().join("artifacts/steps/a/step.json"),
-            &mut child,
+        let a = child.receipt("artifacts/steps/a/step.json");
+        assert_eq!(a["child_result"]["status"], "cancelled");
+        assert_eq!(a["exit"]["code"], 130);
+        assert_eq!(a["cancel_requested"], true);
+        assert_eq!(a["ok"], false);
+        assert_eq!(a["completion_seq"], 1);
+        assert_eq!(
+            f.read("artifacts/steps/ready/step.json")["child_result"]["status"],
+            "succeeded"
         );
+        assert_eq!(
+            fs::read_to_string(f.root.path().join("a-effect")).unwrap(),
+            "partial"
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.path().join("a-cleaned")).unwrap(),
+            "joined"
+        );
+        assert_eq!(
+            unsafe { libc::kill(descendant, 0) },
+            -1,
+            "A's descendant was not joined"
+        );
+        assert!(
+            fs::read_to_string(f.root.path().join("artifacts/steps/a/trace.jsonl"))
+                .unwrap()
+                .contains("message_completed")
+        );
+        // A native challenge response proves B is executing, not merely a PID
+        // (possibly a zombie) or a missing receipt. Release stays withheld.
+        f.write("b-challenge", "ping");
+        child.ready("b-alive");
         assert!(!f.root.path().join("artifacts/steps/b/step.json").exists());
-        assert!(child.try_wait().unwrap().is_none());
+        assert!(child.alive());
+        assert!(!f.root.path().join("a-post-cancel").exists());
+        assert!(!f.root.path().join("unexpected-launch").exists());
         f.write("b-release", "go");
-        let v = envelope(finish(child), 0);
+        let v = child.finish(0);
         assert_eq!(v["output"]["ok"], true);
+        assert_eq!(outcomes(&v), 3);
         assert_eq!(v["steps"][0]["exit"]["code"], 130);
         assert_eq!(v["steps"][1]["exit"]["code"], 0);
+        assert_eq!(
+            f.read("artifacts/steps/b/step.json")["child_result"]["status"],
+            "succeeded"
+        );
+        assert!(!f.root.path().join("a-post-cancel").exists());
+        assert_native_cleanup(&f);
+    }
+}
+
+#[test]
+fn sibling_fixture_panic_joins_children_and_preserves_pre_cleanup_evidence() {
+    for language in languages() {
+        let f = fixture(
+            language,
+            r#"
+            import "patterns/v1" as p;
+            let a=due::start(p::job("a","reader","barrier-a"));
+            let b=due::start(p::job("b","reader","barrier-b"));
+            let q=due::start(p::job("q","reader","must-not-launch"));
+            due::wait(a); due::wait(b); due::wait(q)
+            "#,
+            r#"
+            local p=require("patterns/v1")
+            local a=due.start(p.job("a","reader","barrier-a"))
+            local b=due.start(p.job("b","reader","barrier-b"))
+            local q=due.start(p.job("q","reader","must-not-launch"))
+            due.wait(a); due.wait(b); return due.wait(q)
+            "#,
+        );
+        f.write("agent", include_str!("fixtures/workflow-sibling.sh"));
+        // Panic only after both native children and the queued reservation exist.
+        // Catch outside the process owner so this exercises real unwind cleanup.
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut child = Running::new(&f);
+            for name in ["a-ready", "b-ready", "artifacts/steps/q/admitted.json"] {
+                child.ready(name);
+            }
+            panic!("deliberate sibling fixture assertion");
+        }));
+        assert_eq!(
+            panic.unwrap_err().downcast_ref::<&str>(),
+            Some(&"deliberate sibling fixture assertion")
+        );
+        assert!(
+            f.root
+                .path()
+                .join("before-cleanup/steps/a/started.json")
+                .exists()
+        );
+        assert!(
+            f.root
+                .path()
+                .join("before-cleanup/steps/b/started.json")
+                .exists()
+        );
+        assert!(
+            !f.root
+                .path()
+                .join("before-cleanup/steps/a/step.json")
+                .exists()
+        );
+        let output = f.read("test-stdout");
+        assert_eq!(output["status"], "cancelled");
+        assert_eq!(outcomes(&output), 3);
+        for id in ["a", "b"] {
+            let step = f.read(&format!("artifacts/steps/{id}/step.json"));
+            assert_eq!(step["child_result"]["status"], "cancelled");
+            assert_eq!(step["exit"]["code"], 130);
+        }
+        assert_eq!(
+            f.read("artifacts/steps/q/step.json")["exit"]["started"],
+            false
+        );
+        assert!(!f.root.path().join("unexpected-launch").exists());
+        assert!(!f.root.path().join("a-post-cancel").exists());
+        assert_eq!(
+            fs::read_to_string(f.root.path().join("a-effect")).unwrap(),
+            "partial"
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.path().join("a-cleaned")).unwrap(),
+            "joined"
+        );
+        let mut calls = f.calls();
+        calls.sort();
+        assert_eq!(calls, ["barrier-a", "barrier-b"]);
+        assert!(
+            fs::read_to_string(f.root.path().join("test-cleanup"))
+                .unwrap()
+                .contains("joined=Ok(")
+        );
+        assert_native_cleanup(&f);
     }
 }
 

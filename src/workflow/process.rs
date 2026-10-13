@@ -17,6 +17,20 @@ use tokio::{
     process::Command,
 };
 
+/// Cover pipe creation through exec, never the child's lifetime. Rust 1.90 on
+/// Darwin sets CLOEXEC after pipe(); a concurrent spawn can inherit a sibling's
+/// writer in that window and prevent capture EOF even after that sibling exits.
+/// All subprocess spawn sites in the experimental host must use this boundary,
+/// including spawns that do not themselves create pipes. See the #19 evidence.
+#[cfg(target_os = "macos")]
+static SPAWN: Mutex<()> = Mutex::new(());
+
+pub(super) fn with_spawn_lock<T>(spawn: impl FnOnce() -> T) -> T {
+    #[cfg(target_os = "macos")]
+    let _guard = SPAWN.lock().expect("workflow spawn lock");
+    spawn()
+}
+
 pub fn private_dir(path: &Path) -> Result<(), String> {
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
@@ -204,12 +218,15 @@ async fn run_inner(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if stop.cancelled.load(Ordering::SeqCst) || local.load(Ordering::SeqCst) {
-        return Err(Failure::Cancelled);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("spawn Due child: {e}"))?;
+    let mut child = with_spawn_lock(|| {
+        // A job may have been cancelled while waiting for the spawn boundary.
+        if stop.cancelled.load(Ordering::SeqCst) || local.load(Ordering::SeqCst) {
+            return Err(Failure::Cancelled);
+        }
+        command
+            .spawn()
+            .map_err(|e| Failure::Host(format!("spawn Due child: {e}")))
+    })?;
     let pid = child.id().ok_or_else(|| "child has no PID".to_string())?;
     collected.exit = json!({"started":true,"pid":pid,"code":null,"signal":null});
     // Persist identity while the child is still running, including interrupted runs.

@@ -241,7 +241,7 @@ async fn isolated_compile(
     let mut output = tempfile::tempfile().map_err(|e| e.to_string())?;
     // Inherit the parent's process group, so group SIGKILL also stops a helper
     // stuck in C. SIGINT/SIGTERM exits are explicitly classified by the joiner.
-    let mut child = JoinedChild(
+    let mut child = JoinedChild(super::process::with_spawn_lock(|| {
         Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
             .arg("--workflow-fennel-compiler")
             .env_clear()
@@ -249,8 +249,8 @@ async fn isolated_compile(
             .stdout(output.try_clone().map_err(|e| e.to_string())?)
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("start isolated Fennel compiler: {e}"))?,
-    );
+            .map_err(|e| format!("start isolated Fennel compiler: {e}"))
+    })?);
     let result = join_compiler(&mut child, &cancelled, &interrupted, DEADLINE).await;
     drop(child); // kill and join before returning on every path
     result?;

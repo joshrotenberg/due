@@ -392,8 +392,10 @@ Combined runtime features exist for experiments, not a shipping recommendation.
 Keep the job lifecycle and outcome truth in Rust and composition policy in scripts.
 
 The unrelated intermittent sibling-cancellation timeout in
-[#19](https://github.com/joshrotenberg/due/issues/19) remains unresolved; passing
-this batch does not establish a repair. Remote
+[#19](https://github.com/joshrotenberg/due/issues/19) was not diagnosed by this
+batch. The subsequent [pipe-race investigation](workflow-sibling-cancellation.md)
+provides a candidate shared-host repair with controlled before/after evidence,
+approved by independent Claude review but still under the feature freeze. Remote
 [CI](https://github.com/joshrotenberg/due/actions/runs/38312111499) was rejected
 before any steps ran because of GitHub's account payment/spending-limit check.
 Local green checks are not presented as remote or cross-platform CI evidence.

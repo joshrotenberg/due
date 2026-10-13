@@ -164,7 +164,7 @@ The restrictions and guards are choices in this embedding, not inherent limits o
 Lua or a proof of a complete hostile-code sandbox. Provider resource limits and
 permissions remain Rust/native-runner responsibilities.
 
-An intermittent **shared-host sibling-cancellation test** remains unresolved in
+An intermittent **shared-host sibling-cancellation test** is tracked in
 [#19](https://github.com/joshrotenberg/due/issues/19).
 The implementation worker saw one readiness timeout, and the caller reproduced
 it in a full Rhai-only suite while other probes were running. Twelve standalone
@@ -175,6 +175,12 @@ and the issue must be resolved before promoting this spike. It is not evidence
 favoring either language. No processes tied to the spike checkout remained when
 independently inspected. Native cleanup can still wait indefinitely for an
 unresponsive child, and escaped descendants remain outside the host guarantee.
+
+The subsequent [#19 investigation](workflow-sibling-cancellation.md) reproduces
+a Darwin pipe-inheritance race and provides a shared-host spawn repair with
+before/after fault-injection coverage. Historical unsaved failures remain
+retrospectively uncertain; independent Claude review approved the candidate,
+while the issue remains open and the feature freeze remains in force.
 
 ## Boundary to retain
 

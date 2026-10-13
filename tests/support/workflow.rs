@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -12,6 +12,178 @@ use tempfile::TempDir;
 
 pub struct Fixture {
     pub root: TempDir,
+}
+
+/// Own the workflow through assertions too, with file captures that cannot fill
+/// an unread pipe. Keep the readiness guard at ten seconds, including JSON writes.
+pub struct Running {
+    child: Option<Child>,
+    root: PathBuf,
+}
+impl Running {
+    pub fn new(f: &Fixture) -> Self {
+        Self::with_command(f, f.command(false))
+    }
+    pub fn with_command(f: &Fixture, mut command: Command) -> Self {
+        command.stdout(fs::File::create(f.root.path().join("test-stdout")).unwrap());
+        command.stderr(fs::File::create(f.root.path().join("test-stderr")).unwrap());
+        Self {
+            child: Some(command.spawn().unwrap()),
+            root: f.root.path().into(),
+        }
+    }
+    pub fn ready(&mut self, name: &str) {
+        self.until(name, |path| path.exists().then_some(()));
+    }
+    pub fn receipt(&mut self, name: &str) -> Value {
+        // save() creates its destination before serializing. Existence alone
+        // does not mean a receipt is complete; the newline is its final write.
+        self.until(name, |path| {
+            let bytes = fs::read(path).ok()?;
+            if bytes.last() != Some(&b'\n') {
+                return None;
+            }
+            Some(serde_json::from_slice(&bytes).expect("complete JSON receipt"))
+        })
+    }
+    fn until<T>(&mut self, name: &str, read: impl Fn(&Path) -> Option<T>) -> T {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(value) = read(&self.root.join(name)) {
+                return value;
+            }
+            assert!(self.alive(), "workflow exited before {name}");
+            assert!(Instant::now() < until, "never ready: {name}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    pub fn alive(&mut self) -> bool {
+        self.child.as_mut().unwrap().try_wait().unwrap().is_none()
+    }
+    pub fn finish(mut self, code: i32) -> Value {
+        let until = Instant::now() + Duration::from_secs(20);
+        while self.alive() {
+            assert!(Instant::now() < until, "workflow fixture deadline");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut output = self.child.take().unwrap().wait_with_output().unwrap();
+        output.stdout = fs::read(self.root.join("test-stdout")).unwrap();
+        output.stderr = fs::read(self.root.join("test-stderr")).unwrap();
+        envelope(output, code)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn inject_pipe_window(f: &Fixture, command: &mut Command) {
+    let library = f.root.path().join("pipe-window.dylib");
+    f.write(
+        "pipe-window.c",
+        include_str!("../fixtures/workflow-pipe-window.c"),
+    );
+    let compiler = Command::new("/usr/bin/clang")
+        .args(["-std=c11", "-dynamiclib", "-Wall", "-Wextra", "-Werror"])
+        .arg(f.root.path().join("pipe-window.c"))
+        .arg("-o")
+        .arg(&library)
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(f.root.path().join("compiler-stdout")).unwrap())
+        .stderr(fs::File::create(f.root.path().join("compiler-stderr")).unwrap())
+        .status()
+        .unwrap();
+    assert!(
+        compiler.success(),
+        "pipe interposer compilation: {}",
+        fs::read_to_string(f.root.path().join("compiler-stderr")).unwrap()
+    );
+    command
+        .env("DYLD_INSERT_LIBRARIES", library)
+        .env("DUE_PIPE_WINDOW_LOG", f.root.path().join("pipe-window.log"))
+        .env("TOKIO_WORKER_THREADS", "4");
+}
+impl Drop for Running {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        // Snapshot before TERM changes receipts/traces. Fixture retains this
+        // directory on unwind; cleanup output stays alongside the snapshot.
+        fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+            fs::create_dir(to)?;
+            for entry in fs::read_dir(from)? {
+                let entry = entry?;
+                let target = to.join(entry.file_name());
+                if entry.file_type()?.is_dir() {
+                    copy_tree(&entry.path(), &target)?;
+                } else {
+                    fs::copy(entry.path(), target)?;
+                }
+            }
+            Ok(())
+        }
+        let snapshot = copy_tree(
+            &self.root.join("artifacts"),
+            &self.root.join("before-cleanup"),
+        );
+        let _ = fs::write(
+            self.root.join("test-cleanup"),
+            format!("workflow_pid={} snapshot={snapshot:?}\n", child.id()),
+        );
+        if matches!(child.try_wait(), Ok(None)) {
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
+            let until = Instant::now() + Duration::from_secs(10);
+            while matches!(child.try_wait(), Ok(None)) && Instant::now() < until {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if matches!(child.try_wait(), Ok(None)) {
+                // Emergency cleanup uses only this synthetic fixture's recorded
+                // native identities, then lets Due reap them before killing Due.
+                for pid in fs::read_to_string(self.root.join("pids"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|s| s.parse::<i32>().ok())
+                {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+                let until = Instant::now() + Duration::from_secs(3);
+                while matches!(child.try_wait(), Ok(None)) && Instant::now() < until {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                if matches!(child.try_wait(), Ok(None)) {
+                    // A stuck Due supervisor must not outlive a failed test.
+                    for entry in fs::read_dir(self.root.join("artifacts/steps"))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                    {
+                        if entry.path().join("exit.json").exists() {
+                            continue;
+                        }
+                        if let Ok(bytes) = fs::read(entry.path().join("started.json"))
+                            && let Ok(v) = serde_json::from_slice::<Value>(&bytes)
+                            && let Some(pid) = v["pid"].as_i64()
+                        {
+                            unsafe {
+                                libc::kill(pid as i32, libc::SIGKILL);
+                            }
+                        }
+                    }
+                    let _ = child.kill();
+                }
+            }
+        }
+        let joined = child.wait();
+        let _ = fs::OpenOptions::new()
+            .append(true)
+            .open(self.root.join("test-cleanup"))
+            .and_then(|mut file| {
+                use std::io::Write;
+                writeln!(file, "joined={joined:?}")
+            });
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

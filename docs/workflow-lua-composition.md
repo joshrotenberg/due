@@ -377,8 +377,10 @@ remain unchanged; this work is a draft branch, not a release.
 
 Native cleanup still can wait indefinitely on an unresponsive child and does
 not guarantee containment of escaped descendants, process crashes or SIGKILL.
-[#19](https://github.com/joshrotenberg/due/issues/19) remains unresolved: the
-nested hook progress finding does not diagnose that older native readiness timeout.
+The nested hook progress finding did not diagnose
+[#19](https://github.com/joshrotenberg/due/issues/19). A subsequent
+[shared-host pipe-race repair](workflow-sibling-cancellation.md) has controlled
+before/after evidence and independent Claude approval; historical failures remain uncertain.
 Before unfreezing, native cleanup investigation including #19, hosted/platform
 CI, and broader authoring/real-provider acceptance remain. Local passes and a
 review approval do not establish those gates. There is no daemon, persistent
