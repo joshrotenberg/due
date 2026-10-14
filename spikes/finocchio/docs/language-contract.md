@@ -3,8 +3,10 @@
 Status: feasibility contract for this isolated spike, pinned to Fennel 1.6.1,
 Lua 5.4 and mlua 0.12.2. **v0 is not a stability promise.** “Executable” below
 means observed in this checkout; “selected” is the policy we choose for further
-experiments; “deferred” is not implemented. The compiler, data library, semantic
-analyzer and Due ownership probes remain separate, not an integrated language.
+experiments; “deferred” is not implemented. The original probes retain their
+boundaries; the [integrated module/workflow slice](integrated-workflow.md) now
+combines this compiler, data library and runtime contracts with a public Due CLI
+adapter. The semantic analyzer remains a separate, restricted tooling experiment.
 
 ## Executable behavior and evidence
 
@@ -33,8 +35,9 @@ be explicit if the dependency convention is pursued.
 
 Keep semantic operations fail-closed on their documented subset. This is an
 owned scope IR, not compiler-backed general type checking. Static modules and
-stable explicit export keys are the selected tooling policy; a runtime bundle
-loader and deployment semantics remain deferred.
+stable explicit export keys are the selected tooling policy. The integrated
+entry point now has an explicit configured loader; broader deployment and
+runtime bundle distribution semantics remain deferred.
 
 Spans use **zero-based UTF-8 byte offsets, end-exclusive**, with one-based lines.
 Semantic diagnostics currently use `file,line,start,finish,message`; legacy
@@ -61,6 +64,19 @@ are separate. Macro code can affect compiler state, C-library calls lack hard
 preemption, and runtime tests execute trusted Lua. These are bounded experiments,
 **not universal sandboxing**. Production-adjacent Due compiler restrictions stay
 unchanged and are checked by `test.sh`.
+
+## Integrated extension
+
+`workflow run/describe/check` uses the same compiler, immutable data and runtime
+contracts with an explicit host-configured module loader and Due CLI adapter.
+The table above describes original standalone probes; its statements about no
+runtime loader and separate async ownership do not describe this new entry point.
+`data.pack/object/array` add explicit owned snapshot construction, with ambiguous
+empty native tables, cycles and non-JSON values rejected. Integrated JSON
+boundaries add depth 32 and 1 MiB limits. Loading may execute pure initializers
+but never admits agents. The integrated VM is deliberately narrower than
+`runtime()`, including selected C-loop controls and sticky cooperative yielding.
+See [the complete integrated contract and limits](integrated-workflow.md).
 
 ## Deferred surface
 

@@ -40,7 +40,14 @@ checked_tests() {
     fi
 }
 export CARGO_TARGET_DIR="$root/target/finocchio"
-cargo test --offline --locked --manifest-path "$root/spikes/finocchio/Cargo.toml"
+# 32 original language tests + 29 integrated tests. One invocation runs them all;
+# a missing test binary/cfg must not silently shrink the acceptance surface.
+checked_tests 29 "$TMPDIR/spike-tests.log" --manifest-path "$root/spikes/finocchio/Cargo.toml"
+spike_total=$(awk '/^test result: ok\./ { sum += $4 } END { print sum+0 }' "$TMPDIR/spike-tests.log")
+if [ "$spike_total" != 61 ]; then
+    echo "Finocchio expected 61 spike tests (32 prior + 29 integrated), got $spike_total" >&2
+    exit 1
+fi
 export CARGO_TARGET_DIR="$root/target/finocchio-due"
 checked_tests 3 "$TMPDIR/ownership-tests.log" --manifest-path "$root/Cargo.toml" \
     --features workflow-fennel-spike --test workflow_composition finocchio::

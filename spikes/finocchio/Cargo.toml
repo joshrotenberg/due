@@ -8,6 +8,9 @@ publish = false
 [workspace]
 
 [dependencies]
-mlua = { version = "=0.12.2", default-features = false, features = ["lua54", "vendored", "serde"] }
+mlua = { version = "=0.12.2", default-features = false, features = ["lua54", "vendored", "serde", "async"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+tokio = { version = "1", features = ["macros", "rt", "signal", "time", "process", "io-util", "sync", "net"] }
+libc = "0.2"
+jsonschema = { version = "=0.56.0", default-features = false }

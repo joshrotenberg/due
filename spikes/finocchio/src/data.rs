@@ -3,7 +3,7 @@ use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value};
 use serde_json::Value as Json;
 
 #[derive(Clone)]
-pub struct Data(Json);
+pub struct Data(pub(crate) Json);
 
 impl UserData for Data {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
@@ -49,6 +49,20 @@ fn scalar(lua: &Lua, value: &Json) -> mlua::Result<Value> {
 
 pub fn install(lua: &Lua) -> mlua::Result<()> {
     let api = lua.create_table()?;
+    api.set(
+        "pack",
+        lua.create_function(|_, value: Value| from_lua(value).map(Data))?,
+    )?;
+    for kind in ["array", "object"] {
+        api.set(
+            kind,
+            lua.create_function(move |_, table: mlua::Table| {
+                let value = convert(Value::Table(table), Some(kind), &mut Vec::new(), 0, &mut 0)?;
+                check(&value)?;
+                Ok(Data(value))
+            })?,
+        )?;
+    }
     api.set(
         "parse",
         lua.create_function(|_, source: String| {
@@ -129,4 +143,131 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     lua.globals().set("data", api)
+}
+
+/// No serde-to-Lua conversion: arbitrary_precision's private number encoding
+/// must never become a native table. Empty native tables require an explicit tag.
+pub fn from_lua(value: Value) -> mlua::Result<Json> {
+    let value = convert(value, None, &mut Vec::new(), 0, &mut 0)?;
+    check(&value)?;
+    Ok(value)
+}
+
+pub fn check(value: &Json) -> mlua::Result<()> {
+    fn depth(value: &Json, n: usize) -> mlua::Result<()> {
+        if n > 32 {
+            return Err(err("JSON nesting exceeds 32"));
+        }
+        match value {
+            Json::Array(a) => {
+                for v in a {
+                    depth(v, n + 1)?;
+                }
+            }
+            Json::Object(o) => {
+                for v in o.values() {
+                    depth(v, n + 1)?;
+                }
+            }
+            _ => (),
+        }
+        Ok(())
+    }
+    depth(value, 0)?;
+    if value.to_string().len() > 1024 * 1024 {
+        return Err(err("JSON exceeds 1 MiB"));
+    }
+    Ok(())
+}
+
+fn charge(budget: &mut usize, bytes: usize) -> mlua::Result<()> {
+    *budget = budget.saturating_add(bytes);
+    if *budget > 1024 * 1024 {
+        return Err(err("JSON conversion exceeds 1 MiB"));
+    }
+    Ok(())
+}
+fn convert(
+    value: Value,
+    tag: Option<&str>,
+    seen: &mut Vec<usize>,
+    depth: usize,
+    budget: &mut usize,
+) -> mlua::Result<Json> {
+    if depth > 32 {
+        return Err(err("JSON nesting exceeds 32"));
+    }
+    charge(budget, 1)?;
+    Ok(match value {
+        Value::UserData(u) => {
+            let value = u.borrow::<Data>()?;
+            charge(budget, value.0.to_string().len())?;
+            value.0.clone()
+        }
+        Value::Boolean(v) => v.into(),
+        Value::String(v) => {
+            charge(budget, v.as_bytes().len())?;
+            v.to_str()?.to_string().into()
+        }
+        Value::Integer(v) => v.into(),
+        Value::Number(v) => serde_json::Number::from_f64(v)
+            .ok_or_else(|| err("non-finite JSON number"))?
+            .into(),
+        Value::Table(t) => {
+            if t.metatable().is_some() {
+                return Err(err("JSON table must have no metatable"));
+            }
+            let id = t.to_pointer() as usize;
+            if seen.contains(&id) {
+                return Err(err("cyclic JSON table"));
+            }
+            seen.push(id);
+            let pairs = t
+                .pairs::<Value, Value>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            if pairs.len() > 65536 {
+                return Err(err("JSON table exceeds 65536 entries"));
+            }
+            let array = tag == Some("array")
+                || (tag.is_none()
+                    && !pairs.is_empty()
+                    && pairs.iter().all(|(k, _)| matches!(k, Value::Integer(_))));
+            if pairs.is_empty() && tag.is_none() {
+                return Err(err("empty table ambiguous; use data.array or data.object"));
+            }
+            let result = if array {
+                let mut a = vec![Json::Null; pairs.len()];
+                for (k, v) in pairs {
+                    let Value::Integer(k) = k else {
+                        return Err(err("array key must be an integer"));
+                    };
+                    if k <= 0 || k as usize > a.len() {
+                        return Err(err("array must be dense"));
+                    }
+                    a[k as usize - 1] = convert(v, None, seen, depth + 1, budget)?;
+                }
+                Json::Array(a)
+            } else {
+                let mut o = serde_json::Map::new();
+                for (k, v) in pairs {
+                    let Value::String(k) = k else {
+                        return Err(err("object key must be a string"));
+                    };
+                    charge(budget, k.as_bytes().len())?;
+                    o.insert(
+                        k.to_str()?.to_string(),
+                        convert(v, None, seen, depth + 1, budget)?,
+                    );
+                }
+                Json::Object(o)
+            };
+            seen.pop();
+            result
+        }
+        _ => {
+            return Err(err(
+                "expected JSON value; nil, functions, threads and foreign userdata are not JSON",
+            ));
+        }
+    })
 }

@@ -1,0 +1,32 @@
+{
+  "entry": "pair",
+  "modules": {
+    "pair": "live-pair.fnl",
+    "reviewer": "reviewer.fnl",
+    "reviser": "reviser.fnl"
+  },
+  "due_binary": "/CALLER/SELECTS/EXACT/FROZEN/due",
+  "workspaces": {"trial": "/CALLER/CREATES/ISOLATED/WORKSPACE"},
+  "profiles": {
+    "review": {
+      "provider": "codex",
+      "model": "CALLER-SELECTS-MODEL",
+      "effort": "high",
+      "preferences": ["careful"],
+      "native_args": ["--sandbox", "read-only"]
+    },
+    "revision": {
+      "provider": "codex",
+      "model": "CALLER-SELECTS-MODEL",
+      "effort": "medium",
+      "preferences": ["balanced"],
+      "native_args": ["--sandbox", "workspace-write"]
+    }
+  },
+  "roles": {
+    "reviewer": {"module": "reviewer", "profiles": ["review"], "workspaces": ["trial"], "access": "read"},
+    "reviser": {"module": "reviser", "profiles": ["revision"], "workspaces": ["trial"], "access": "write"}
+  },
+  "max_jobs": 2,
+  "max_active": 1
+}

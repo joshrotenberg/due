@@ -1,8 +1,29 @@
 # Finocchio decision plan
 
-Status: bounded experiment plan, 2026-10-13. Only chunk 0 is implemented in this
-change. Later chunks are proposed acceptance work, not shipped capabilities or
-authorization to unfreeze Due. No decision here pauses another project's work.
+Status: bounded experiment plan, 2026-10-13. Chunk 0 and an isolated integrated
+module/workflow slice are implemented. The slice demonstrates part of chunk 1's
+CLI/library boundary and chunk 2's synthetic ownership gate. It does not complete
+chunk 1's findings tool/tooling trial, chunk 2's live provider gate, or chunk 3.
+No change authorizes an unfreeze or pauses another project's work.
+
+Implemented slice: `workflow run/describe/check`, ordinary reusable agent modules,
+the same Finocchio compiler/data/contracts in the integrated VM, caller-owned
+profiles/roles/workspaces, finite review/revise policy in Fennel, ordinary stage
+replacement and synthesis, shared admission limits, cooperative cancellation and
+retained receipts. Tests execute real Fennel against synthetic Due-compatible
+children, including barriers, both OS signals, library cancellation/drop and
+hostile output/pipe cases. All 36 prior tests remain. The root binary-only Due
+boundary requires a small duplicated CLI adapter; see its
+[maintenance and limits inventory](integrated-workflow.md). Installed Due and
+root sources/Cargo/vendor remain frozen. A
+[minimal live pair](live-trial.md) is prepared for the outer caller, not executed.
+
+Remaining counterevidence includes generated-Lua rather than general macro
+callsite diagnostics, selected VM controls rather than a universal sandbox,
+no hard live trace spool quota, no native cleanup ownership after Due exits and
+leaves unknown writers, and dependence on cooperative Due shutdown. These must
+remain visible in any product decision. No A/B or independent model review was
+performed by this worker.
 
 The decision is where the reusable agent-and-tool language should live. Due's
 existing single-run CLI remains useful under either outcome. Finocchio needs to
@@ -169,3 +190,8 @@ implements and the other reviews, with caller verification of tests and effects.
 Sanitize favorable and unfavorable findings onto matching Due issues. Main and the
 installed CLI stay frozen throughout these experiments. Execution of future chunks
 and any release/unfreeze remain explicit follow-up decisions.
+
+The subsequent [caller evidence](live-evidence.md) verifies one real
+review/revise/review cycle and two full synthetic cycles in parallel. It completes
+that bounded integration gate, not the remaining ordinary-tool/repair and
+authoring comparison or the A/B/C product decision.

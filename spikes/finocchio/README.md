@@ -5,16 +5,37 @@ macros, immutable data and Rust-owned async composition without a compiler fork.
 Semantic tooling needs its own analyzed representation; precise nested macro
 source mapping remains a partial outcome. This is an experiment, not a release.
 
-The next bounded experiment adds a [v0 language contract](docs/language-contract.md)
+The language probes include a [v0 language contract](docs/language-contract.md)
 and a [compiler-boundary evidence matrix](docs/compiler-boundary.md). The opt-in
 `Compiler::boundary_probe` tests an explicit builder convention (`defn-with`) and
 public AST identity evidence for descendants and compile errors. It does not
-change existing `defn`, integrate the semantic/async probes, or supply exact
+change existing `defn` or supply exact
 runtime provenance. Small examples: `examples/boundary-bindings.fnl` and
 `examples/boundary-provenance.fnl`; execution is covered by `tests/compiler_boundary.rs`.
 Fennel's plugin API is explicitly unstable; the observation hooks are tested only
 against this pin. The [decision plan](docs/decision-plan.md) sets three further
 chunks and a product-choice gate before any unfreeze.
+
+The new [integrated module/workflow slice](docs/integrated-workflow.md) ships
+`workflow run`, `workflow describe`, `workflow check` and a Rust library. Ordinary
+Fennel agent modules expose metadata, preparation, validation and run functions.
+The same reviewer works directly, in a bounded review/revise cycle, and in two
+concurrent saved workflows with caller-granted workspaces. It uses this spike's
+compiler, immutable JSON and contract library inside the actual workflow.
+Rust owns admission, jobs, cancellation and receipts; Fennel owns policy.
+
+Try the provider-free example (use absolute paths from another directory):
+
+```sh
+target/finocchio/debug/finocchio-spike workflow describe spikes/finocchio/examples/workflow/pure.json
+target/finocchio/debug/finocchio-spike workflow run spikes/finocchio/examples/workflow/pure.json spikes/finocchio/examples/workflow/input.json target/fresh-pure-artifacts
+```
+
+An explicit adapter invokes a caller-selected frozen Due binary via its public
+run JSON contract. Tests use only synthetic children. See the
+[caller-owned live fixture](docs/live-trial.md) for a bounded real revision/review
+pair that has **not** been run here. This does not complete chunk 1's findings
+tool/authoring work, the real-provider gate, or the product decision.
 
 Run all probes and the compiler-boundary regressions, from the checkout:
 
@@ -25,9 +46,12 @@ sh spikes/finocchio/test.sh
 Use Rust 1.90 or newer on `PATH` (or set `FINOCCHIO_TOOLCHAIN_BIN` to its bin
 directory). The script runs Cargo offline/locked,
 checks the vendor SHA256, and keeps targets and temporary files under `target/`.
-It runs 32 standalone tests, three Due ownership tests (both signals in one),
-and the existing no-user-macros regression. No model/provider invocation occurs.
-The native protocol fixture is a local shell program, not an agent.
+It retains all 36 prior acceptance tests: 32 language tests, three Due ownership
+tests (both signals in one), and the no-user-macros regression. The 29 new
+integrated tests use a synthetic Due-compatible Python child; older Due ownership
+probes use a synthetic native shell program. No live model/provider run occurs.
+The script asserts both the integrated count and combined spike count (61),
+followed by the four unchanged root checks: 65 acceptance tests in total.
 The ownership checks require a Unix target and a working native toolchain. The
 script fails on missing/ignored filtered tests rather than accepting a zero-test
 pass. SHA256 verification uses `shasum` or, if absent, `sha256sum`.
@@ -36,9 +60,11 @@ This crate has its own `[workspace]` and lockfile. The initial spike added a gat
 `finocchio` module to `tests/workflow_composition.rs`; this next experiment leaves
 that integration unchanged and changes files only under `spikes/finocchio/`.
 Due's runtime, root Cargo manifest/lock, feature defaults, installed CLI and
-restricted compiler are unchanged. The async probe uses the existing Due host
-directly; there is no standalone fake-job scheduler whose cleanup is substituted
-for Due evidence.
+restricted compiler are unchanged. The earlier async probe still uses the Due
+host directly. The integrated slice has its own documented CLI adapter and real
+Rust ownership layer; its tests substitute only the Due child process. Necessary
+duplication and limits are documented, not evidence that root Due has become an
+embeddable library.
 
 | Probe | Demonstrated capability / evidence | Deliberate limit | API / coupling |
 |---|---|---|---|
@@ -164,8 +190,8 @@ target/finocchio/debug/finocchio-spike provenance spikes/finocchio/examples/prov
 ```
 
 `compile FILE` also returns generated Lua plus the evidence fields. Tests execute
-that Lua in a separate runtime VM. The CLI does not execute the generated runtime
-Lua. `compile` and `provenance` do execute user macro bodies in the compiler VM,
+that Lua in a separate runtime VM. These two commands do not execute generated
+runtime Lua; the new `workflow run` does. `compile` and `provenance` execute user macro bodies in the compiler VM,
 with the resource limits and qualifications below.
 
 Supported source subset: simple `local`, named/anonymous `fn` with fixed simple
@@ -231,7 +257,9 @@ settle. Cancellation observes two active jobs plus a third admitted/queued job;
 active exits are 130 and the queued job has `started=false`, `code=null`. Recorded
 native PIDs are checked for cleanup. A caught cross-owner handle error cancels
 the original owner's active work and prevents post-error admission. Dropping a
-future alone is not counted as cleanup evidence.
+future alone is not counted as cleanup evidence in that older probe. The new
+integrated library separately tests cancellation and joining when its execution
+future is dropped.
 
 User macros execute code. The standalone compiler has a separate VM with pure
 libraries and AST APIs, a fixed in-memory macro searcher (with one extra module
@@ -239,7 +267,8 @@ only in the opt-in boundary probe), and no filesystem,
 process, network, agent or runtime host capability. The vendor's private preload
 loader resolves embedded modules only. Compiler loading and the read-only
 `debug.traceback` bridge remain host-private; neither is supplied in `compilerEnv`.
-The runtime has no package library, require/load/loadfile/dofile, OS, IO or debug.
+The standalone runtime has no package library, require/load/loadfile/dofile, OS,
+IO or debug. The integrated runtime adds only its explicit configured loader.
 Tests verify these boundaries and sticky Lua-loop instruction exhaustion,
 including caught and nested caught loops and aliases of the compiler's `pcall`.
 Every compiler `pcall`/`xpcall` is wrapped before vendor loading; Rust checks the
@@ -264,3 +293,6 @@ The unmodified compiler is included from
 `c3d45602041e7d8ef8a212563573df040c48a85c648a29fb4597ebed4bc38ec2`.
 See that directory's README and LICENSE for upstream commit/provenance. This
 implementation verifies the byte hash, not a new upstream signature check.
+
+See [caller live and concurrency evidence](docs/live-evidence.md) for the real
+review/revise cycle, verified effects, review follow-ups and remaining limits.

@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "required": ["schema_version", "provider", "status", "text", "structured_output_present", "structured_output", "answer_schema_validation", "error", "duration_ms"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provider": {"enum": ["claude", "codex", null]},
+    "status": {"enum": ["succeeded", "failed", "cancelled", "timed_out"]},
+    "text": {"type": "string"},
+    "structured_output_present": {"type": "boolean"},
+    "answer_schema_validation": {"enum": ["not_resolved", "not_requested", "not_performed"]},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "error": {
+      "anyOf": [
+        {"type": "null"},
+        {"type": "object", "required": ["kind", "message"], "properties": {"kind": {"type": "string"}, "message": {"type": "string"}, "provider_exit_code": {"type": ["integer", "null"]}}}
+      ]
+    }
+  }
+}

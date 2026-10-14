@@ -38,7 +38,7 @@ return function(fennel, source, filename, macros, probe)
     local ok, code, map = pcall(fennel.compileString, source, {
         filename=filename, compilerEnv=env, useMetadata=false,
         correlate=false, requireAsInclude=false, ["error-pinpoint"]=false,
-        allowedGlobals={"contract", "data", "assert", "error", "pcall", "select",
+        allowedGlobals={"contract", "data", "host", "assert", "error", "pcall", "select",
             "type", "tostring", "tonumber", "pairs", "ipairs", "next", "rawget",
             "rawset", "rawequal", "getmetatable", "setmetatable", "math", "string", "table",
             "require", "_VERSION", "_G"},

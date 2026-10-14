@@ -2,6 +2,8 @@
 pub mod compiler;
 pub mod data;
 pub mod semantic;
+#[cfg(unix)]
+pub mod workflow;
 
 use mlua::{Lua, LuaOptions, StdLib, Value};
 
