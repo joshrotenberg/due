@@ -27,6 +27,14 @@ pub struct Compilation {
     pub pinned_line_map: Vec<(usize, String, usize)>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BoundaryProbe {
+    pub version: usize,
+    pub compilation: Compilation,
+    pub events: Vec<serde_json::Value>,
+    pub diagnostics: Vec<serde_json::Value>,
+}
+
 pub struct Compiler {
     pub(crate) lua: Lua,
     pub(crate) fennel: Table,
@@ -119,6 +127,31 @@ impl Compiler {
         }
         let driver: Function = self.lua.load(include_str!("../lua/compile.lua")).eval()?;
         let value = driver.call((self.fennel.clone(), source, filename, MACROS));
+        check_budget(&self.exhausted)?;
+        self.lua.from_value(value?)
+    }
+
+    /// Opt-in v0 experiment; does not extend the ordinary compiler or semantic API.
+    /// Identity links describe observed AST objects, never a runtime expansion stack.
+    pub fn boundary_probe(&self, source: &str, filename: &str) -> mlua::Result<BoundaryProbe> {
+        check_budget(&self.exhausted)?;
+        if source.len() > 128 * 1024 {
+            return Err(mlua::Error::runtime("source exceeds 128 KiB"));
+        }
+        let driver: Function = self.lua.load(include_str!("../lua/compile.lua")).eval()?;
+        let probe: Function = self
+            .lua
+            .load(include_str!("../lua/compiler-boundary.lua"))
+            .eval()?;
+        let value = probe.call((
+            self.fennel.clone(),
+            driver,
+            source,
+            filename,
+            MACROS,
+            include_str!("../lua/boundary-macros.fnl"),
+            self.lua.array_metatable(),
+        ));
         check_budget(&self.exhausted)?;
         self.lua.from_value(value?)
     }

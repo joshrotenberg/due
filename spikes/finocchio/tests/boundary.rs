@@ -44,9 +44,13 @@ fn compiler_lua_loop_exhaustion_is_sticky() {
     ];
     if let Ok(case) = std::env::var("FINOCCHIO_BUDGET_CASE") {
         let compiler = compiler::Compiler::new().unwrap();
-        let error = compiler
-            .compile(CASES[case.parse::<usize>().unwrap()], "loop.fnl")
-            .unwrap_err();
+        let source = CASES[case.parse::<usize>().unwrap() % CASES.len()];
+        let result = if case.parse::<usize>().unwrap() < CASES.len() {
+            compiler.compile(source, "loop.fnl").map(|_| ())
+        } else {
+            compiler.boundary_probe(source, "loop.fnl").map(|_| ())
+        };
+        let error = result.unwrap_err();
         assert!(error.to_string().contains("budget exhausted"), "{error}");
         let error = compiler.compile("42", "after.fnl").unwrap_err();
         assert!(error.to_string().contains("budget exhausted"), "{error}");
@@ -62,7 +66,9 @@ fn compiler_lua_loop_exhaustion_is_sticky() {
             }
         }
     }
-    for case in 0..CASES.len() {
+    // Retain every original case; run the identical cases through the opt-in
+    // driver too, with the same containment guard and sticky-exhaustion check.
+    for case in 0..2 * CASES.len() {
         let mut child = OwnedChild(Some(
             Command::new(std::env::current_exe().unwrap())
                 .args([

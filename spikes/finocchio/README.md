@@ -5,7 +5,18 @@ macros, immutable data and Rust-owned async composition without a compiler fork.
 Semantic tooling needs its own analyzed representation; precise nested macro
 source mapping remains a partial outcome. This is an experiment, not a release.
 
-Run all five probes and the compiler-boundary regression, from the checkout:
+The next bounded experiment adds a [v0 language contract](docs/language-contract.md)
+and a [compiler-boundary evidence matrix](docs/compiler-boundary.md). The opt-in
+`Compiler::boundary_probe` tests an explicit builder convention (`defn-with`) and
+public AST identity evidence for descendants and compile errors. It does not
+change existing `defn`, integrate the semantic/async probes, or supply exact
+runtime provenance. Small examples: `examples/boundary-bindings.fnl` and
+`examples/boundary-provenance.fnl`; execution is covered by `tests/compiler_boundary.rs`.
+Fennel's plugin API is explicitly unstable; the observation hooks are tested only
+against this pin. The [decision plan](docs/decision-plan.md) sets three further
+chunks and a product-choice gate before any unfreeze.
+
+Run all probes and the compiler-boundary regressions, from the checkout:
 
 ```sh
 sh spikes/finocchio/test.sh
@@ -14,15 +25,16 @@ sh spikes/finocchio/test.sh
 Use Rust 1.90 or newer on `PATH` (or set `FINOCCHIO_TOOLCHAIN_BIN` to its bin
 directory). The script runs Cargo offline/locked,
 checks the vendor SHA256, and keeps targets and temporary files under `target/`.
-It runs 19 standalone tests, three Due ownership tests (both signals in one),
+It runs 32 standalone tests, three Due ownership tests (both signals in one),
 and the existing no-user-macros regression. No model/provider invocation occurs.
 The native protocol fixture is a local shell program, not an agent.
 The ownership checks require a Unix target and a working native toolchain. The
 script fails on missing/ignored filtered tests rather than accepting a zero-test
 pass. SHA256 verification uses `shasum` or, if absent, `sha256sum`.
 
-This crate has its own `[workspace]` and lockfile. The only existing source file
-changed is `tests/workflow_composition.rs`, adding a gated `finocchio` module.
+This crate has its own `[workspace]` and lockfile. The initial spike added a gated
+`finocchio` module to `tests/workflow_composition.rs`; this next experiment leaves
+that integration unchanged and changes files only under `spikes/finocchio/`.
 Due's runtime, root Cargo manifest/lock, feature defaults, installed CLI and
 restricted compiler are unchanged. The async probe uses the existing Due host
 directly; there is no standalone fake-job scheduler whose cleanup is substituted
@@ -126,8 +138,10 @@ the outer user call. The second-return map layout is implementation-dependent
 even though `compileString` itself is public. Using it does not recover an exact
 nested source map. Richer tooling would need retained provenance/source IR or
 deeper version-specific instrumentation; this spike does not establish that a
-compiler fork is necessary. Only direct output-to-next-input identity edges are
-tracked, not every descendant generated AST or repeated runtime invocation.
+compiler fork is necessary. The baseline API tracks only direct output-to-next-input
+identity edges. The opt-in boundary probe also observes descendants, retained
+input objects and compile assertions, with explicit related/unknown attribution;
+it still cannot identify repeated runtime invocations. See its evidence matrix.
 
 ## Semantic interface
 
@@ -220,7 +234,8 @@ the original owner's active work and prevents post-error admission. Dropping a
 future alone is not counted as cleanup evidence.
 
 User macros execute code. The standalone compiler has a separate VM with pure
-libraries and AST APIs, a fixed in-memory macro searcher, and no filesystem,
+libraries and AST APIs, a fixed in-memory macro searcher (with one extra module
+only in the opt-in boundary probe), and no filesystem,
 process, network, agent or runtime host capability. The vendor's private preload
 loader resolves embedded modules only. Compiler loading and the read-only
 `debug.traceback` bridge remain host-private; neither is supplied in `compilerEnv`.
@@ -231,7 +246,7 @@ Every compiler `pcall`/`xpcall` is wrapped before vendor loading; Rust checks th
 exhaustion flag before and after each protected call, including vendor-internal
 ones. Ordinary Lua hook errors are catchable. These wrappers re-raise exhaustion
 while letting ordinary errors and multiple return values retain their behavior.
-The loop tests run in subprocesses with a five-second failure guard that kills
+Both compiler entry points run all loop cases in subprocesses with a five-second failure guard that kills
 and reaps only the test's compiler child. This is test containment, not a new Due
 runtime subprocess mechanism.
 

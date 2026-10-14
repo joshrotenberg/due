@@ -1,4 +1,4 @@
-return function(fennel, source, filename, macros)
+return function(fennel, source, filename, macros, probe)
     -- Public compilerEnv option: user macros get pure computation and AST APIs,
     -- not runtime host capabilities. The VM itself has no IO/process/network.
     local env = {assert=assert, error=error, ipairs=ipairs, pairs=pairs,
@@ -7,14 +7,20 @@ return function(fennel, source, filename, macros)
         getmetatable=getmetatable, setmetatable=setmetatable}
     fennel.path = ""
     fennel["macro-path"] = ""
-    -- One explicit, in-memory macro module; no fallback loading.
+    -- Public cache lookup precedes searchers. A prior probe must not enable its
+    -- experimental module during a later ordinary compile on the same VM.
+    fennel["macro-loaded"]["finocchio-boundary"] = nil
+    -- Fixed in-memory modules only; the second exists only in the opt-in probe.
     local searchers = fennel["macro-searchers"]
     for k in pairs(searchers) do searchers[k] = nil end
     searchers[1] = function(name)
-        if name ~= "finocchio" then return nil end
+        local text, path = macros, "finocchio/macros.fnl"
+        if probe and name == "finocchio-boundary" then
+            text, path = probe.macros, "finocchio/boundary-macros.fnl"
+        elseif name ~= "finocchio" then return nil end
         return function()
-            return fennel.eval(macros, {env="_COMPILER", compilerEnv=env,
-                filename="finocchio/macros.fnl"})
+            return fennel.eval(text, {env="_COMPILER", compilerEnv=env,
+                filename=path})
         end
     end
     local events = {}
@@ -27,6 +33,8 @@ return function(fennel, source, filename, macros)
             input=fennel.view(ast), output=fennel.view(result)}
         if type(result)=="table" then produced[result]=id end
     end
+    local plugins = {{name="finocchio-provenance", versions={"1.6.1"}, macroexpand=expanded}}
+    if probe then plugins[#plugins+1] = probe.plugin end
     local ok, code, map = pcall(fennel.compileString, source, {
         filename=filename, compilerEnv=env, useMetadata=false,
         correlate=false, requireAsInclude=false, ["error-pinpoint"]=false,
@@ -34,7 +42,7 @@ return function(fennel, source, filename, macros)
             "type", "tostring", "tonumber", "pairs", "ipairs", "next", "rawget",
             "rawset", "rawequal", "getmetatable", "setmetatable", "math", "string", "table",
             "require", "_VERSION", "_G"},
-        plugins={{name="finocchio-provenance", versions={"1.6.1"}, macroexpand=expanded}}
+        plugins=plugins
     })
     local lines = {}
     if ok then
