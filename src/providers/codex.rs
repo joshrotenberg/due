@@ -378,20 +378,34 @@ fn normalize_usage(usage: TokenUsage) -> Usage {
 
 fn parse(stdout: &str, output_path: &Path) -> RunResult {
     let mut events = Vec::new();
+    let mut protocol_error = None;
     for (index, line) in stdout.lines().enumerate() {
-        if line.trim().is_empty() {
+        // Match the wrapper's streaming admission policy. Non-object lines are
+        // diagnostics, not events, and are outside trace completeness accounting.
+        if !line.trim_start().starts_with('{') {
             continue;
         }
         match serde_json::from_str::<JsonLineEvent>(line) {
             Ok(event) => events.push(event),
             Err(error) => {
-                return RunResult::new(Provider::Codex).fail(RunError::protocol(format!(
+                protocol_error = Some(RunError::protocol(format!(
                     "invalid Codex JSONL on line {}: {error}",
                     index + 1
                 )));
+                break;
             }
         }
     }
+    let mut result = parse_events(events, output_path);
+    if let Some(error) = protocol_error {
+        // A prior terminal success cannot hide a rejected record. Only the
+        // accepted prefix contributes response data.
+        result = result.fail(error);
+    }
+    result
+}
+
+fn parse_events(events: Vec<JsonLineEvent>, output_path: &Path) -> RunResult {
     let query = QueryResult::from_events(events);
     let mut result = RunResult {
         // Retain the last received assistant message even if the turn stops

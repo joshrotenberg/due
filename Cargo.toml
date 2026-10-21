@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
-codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "1c0bbfa2a66024d094a8117ec83bca0d6b41232c" }
+codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "e91e6279bc60bdb54ef85940a5bc7a9b03e944dc" }
 clap = { version = "4.5", features = ["derive"] }
 humantime = "2"
 serde = { version = "1", features = ["derive"] }

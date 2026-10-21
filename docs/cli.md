@@ -362,6 +362,22 @@ diagnostics remain enabled, except successful Codex stderr is unavailable throug
 the current wrapper streaming API. Dry runs log planning only and never spawn a
 provider.
 
+Codex buffered and traced execution parse only trim-start object-prefixed JSONL
+lines as events. Other lines are ignored and are outside event/trace completeness
+accounting. Both paths use UTF-8 replacement decoding for captured stdout/stderr;
+malformed object-prefixed JSON still fails, including after a terminal success.
+Accepted prefix text, session and usage are retained when available. Streaming
+parser cleanup can stop the child before its natural exit, so that exit code may
+be unknown even when buffered execution observes one.
+
+If a Claude stream ends without a terminal result, JSON failure output retains
+the latest complete text-bearing top-level assistant message, concatenating its
+text blocks. Later tool-only messages do not erase it. Thinking, tool payloads,
+nested messages and token deltas are excluded. Valid terminal results remain
+authoritative, including empty failures and structured-only success. Missing
+terminal output remains a failure; retained text is not native structured output
+and is never printed as an answer in text-mode failures.
+
 ### Summarizing a saved trace
 
 Inspect a saved trace without starting a provider:
@@ -525,10 +541,14 @@ permission decisions.
 
 Text mode prints only the successful final answer, with a terminal newline.
 Diagnostics go to stderr. Failed runs do not print partial answers in text mode.
-Codex text comes from its `--output-last-message` file, excluding intermediate
-commentary. Claude text comes from the terminal result, including when verbose
-mode wraps records in an array. An empty result with `structured_output` returns
-the serialized structured response.
+On success, Codex text comes from its `--output-last-message` file, excluding
+intermediate commentary. Claude text comes from the terminal result, including
+when verbose mode wraps records in an array. An empty result with
+`structured_output` returns the serialized structured response. Failed JSON
+results may retain partial output: Codex preserves a readable final-message file
+or observed assistant text; a traced Claude run missing its terminal result
+preserves the latest complete text-bearing assistant message. Retained text does
+not change the failure status. See [live progress](#live-progress) for parsing details.
 
 JSON mode prints one document for a successful run or any error after argument
 parsing. Clap syntax/help/version output follows ordinary CLI conventions;
