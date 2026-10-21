@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "provider": "codex",
+  "ephemeral": false,
+  "native_args": [
+    "-c",
+    "sandbox_mode=\"workspace-write\"",
+    "-c",
+    "approval_policy=\"never\"",
+    "-c",
+    "agents.enabled=false",
+    "-c",
+    "features.multi_agent_v2=false",
+    "-c",
+    "sandbox_workspace_write.network_access=false",
+    "-c",
+    "sandbox_workspace_write.writable_roots=[]",
+    "-c",
+    "sandbox_workspace_write.exclude_slash_tmp=true",
+    "-c",
+    "sandbox_workspace_write.exclude_tmpdir_env_var=true"
+  ]
+}

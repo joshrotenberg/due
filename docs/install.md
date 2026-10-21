@@ -5,6 +5,11 @@ skills-only plugin on each machine. The plugin does not install a binary, provid
 or credentials. Features are frozen while we collect reliability and usability
 issues.
 
+For an existing broken setup, start with [troubleshooting](troubleshooting.md).
+It includes a [frozen-build repair](troubleshooting.md#repair-a-frozen-checkout-build-through-its-existing-symlink)
+that preserves an existing checkout symlink and distinguishes host, login and
+task-permission failures.
+
 ## Prerequisites
 
 - Access to [joshrotenberg/due](https://github.com/joshrotenberg/due) from that machine.

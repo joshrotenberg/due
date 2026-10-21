@@ -157,6 +157,12 @@ may have left before any follow-up.
 Resume IDs stay provider-specific. `session_id` in Due's result is Claude's native
 session ID or Codex's native thread ID. Ephemeral runs may report an ID that cannot
 be resumed. There is no local session database or implicit "latest" selection.
+`--resume ID` requires a new prompt and conflicts with `--ephemeral`. Allow
+persistence from the first turn; `--no-ephemeral` cannot restore history that an
+earlier ephemeral run did not save. Codex can restore a session's native
+workspace on resume. Verify the intended session and workspace before follow-up;
+Due's `--cwd` sets the child process directory and does not promise to relocate
+historical native sessions. See the [persistent profile recipe](#reusable-codex-workspace-profile).
 
 ## JSON requests and profiles
 
@@ -173,7 +179,8 @@ due run --request examples/profile.json --stdin --output json < task.txt
 due run --request examples/profile.json --provider claude -p "Review the diff" \
   --dry-run --output json
 due run --request task.json --timeout 30m --output json   # explicit time budget
-due run --request task.json --no-ephemeral --resume native-session-id --output json
+due run --request task.json --no-ephemeral --resume native-session-id \
+  --stdin --output json < follow-up.txt
 cat task.json | due run --request - -p "Use this replacement prompt" --output json
 ```
 
@@ -207,8 +214,10 @@ with a schema regex.
 `--ephemeral` and `--no-ephemeral` explicitly override the profile's boolean.
 Native arguments after `--` replace the **entire** `native_args` list; they do not
 append. `--clear-native-args` provides an empty replacement. A bare `--` inherits
-the list. Switching providers keeps other inherited values, which must remain
-valid for the selected provider; Due does not silently discard options.
+the list. Replacement removes permission grants and restrictions too; supply the
+complete intended list if replacing it. Switching providers keeps inherited
+policy and other values, which must remain valid for the selected provider;
+Due does not silently discard options.
 
 `--prompt` or `--stdin` replaces the profile prompt. `--request -` reads all stdin
 as JSON, so it cannot be combined with `--stdin`; use a file or `--prompt` instead.
@@ -246,6 +255,10 @@ proves the changes are correct. A reviewer is a separate explicit Due invocation
 with its own prompt, result, and trace. The caller owns any follow-up or repair.
 
 ## Structured answers
+
+Optional caller examples cover [offline answer validation](../examples/offline-validation/README.md)
+and [native schema smoke probes](../examples/native-schema-smoke/README.md).
+They keep validation and compatibility evidence outside Due's execution status.
 
 `--output json` serializes Due's result envelope. `--schema FILE` additionally
 asks the model for an answer with a particular structure:
@@ -391,7 +404,7 @@ native positionals. Due never evaluates a shell command string.
 
 ```sh
 due run --provider claude --stdin -- --permission-mode acceptEdits --max-turns 5
-due run --provider codex --stdin -- -c 'approval_policy="never"' --sandbox workspace-write
+due run --provider codex --stdin -- -c 'approval_policy="never"' -c 'sandbox_mode="workspace-write"'
 
 # Provider-only effort values are allowed when the common --effort is absent.
 due run --provider claude -p "Review this" -- --effort xhigh
@@ -431,39 +444,189 @@ for additional approval. It is a workspace boundary, not Claude's exact-command
 or individual-file allowlist. The prompt still defines the task's narrower scope;
 independently verify which files changed.
 
-```sh
-due run --provider codex --cwd /path/to/repo --stdin --output json \
-  -- --sandbox workspace-write \
-  -c 'approval_policy="never"' \
-  -c 'sandbox_workspace_write.network_access=false' \
-  -c 'sandbox_workspace_write.writable_roots=[]' \
-  -c 'sandbox_workspace_write.exclude_slash_tmp=true' \
-  -c 'sandbox_workspace_write.exclude_tmpdir_env_var=true' < task.txt > result.json
-```
+The reusable [Codex workspace profile](../examples/codex-workspace-profile.json)
+sets `sandbox_mode="workspace-write"`, `approval_policy="never"`,
+`agents.enabled=false`, `features.multi_agent_v2=false`, and these
+`sandbox_workspace_write` values:
+`network_access=false`, `writable_roots=[]`, `exclude_slash_tmp=true`, and
+`exclude_tmpdir_env_var=true`. All eight settings are native `-c` overrides. The explicit v2 disable closes
+the precedence exception in the [versioned native control audit](native-control-audit.md).
+`ephemeral: false` allows persistence; the profile contains no task-specific
+cwd, prompt, session, answer schema, model, effort, deadline, or credentials.
 
-This stricter recipe removes additional writable roots and the usual `/tmp` and
-`$TMPDIR` write grants. Choose the actual repository as `--cwd`. Tests needing
-other writable locations require explicit authorization for those locations.
+This requests no additional writable roots or usual `/tmp` and `$TMPDIR` write
+grants. Choose a trusted, authorized Git checkout as `--cwd`. If the task's tests
+need temporary files, instruct those test commands to use a workspace-local
+directory, for example `TMPDIR="$PWD/test-tmp" python3 -m unittest` from the task
+cwd. Do not export workspace-local `TMPDIR` to Due itself: its temporary schema
+snapshot and final-message file must stay outside every worker writable root.
+Other writable locations require explicit authorization.
 Workspace-write does not restrict all reads to that directory. Network restrictions
 here apply to sandboxed commands; the provider's model connection and connected
-tools have separate controls. Native requirements and execution rules still apply.
+tools have separate controls. Inherited native execution rules and managed policy
+still apply. Disabling built-in agents does not prevent every subprocess launch.
 Do not add bypass flags or enable network access just to make a denied check pass.
 See the [native sandbox guide](https://learn.chatgpt.com/docs/sandboxing) and
 [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-The same native argument tokens can be stored in a partial request profile's
-`native_args`. A dry run checks the invocation, not the host's effective policy.
+Due forwards these settings; it does not independently enforce or validate the
+sandbox. A dry run checks the merged request and Due's reserved-option conflicts,
+not native CLI capability or the host's effective policy. In particular, a dry
+run can succeed with `--sandbox workspace-write` even though native
+`codex exec resume` rejects that option. Due does not strip incompatible flags
+or weaken permissions to make a run pass.
 Verify each machine with a disposable task and harmless negative controls:
 observe an actual denied write outside the writable roots, then independently
 check the target is unchanged. A worker declining to attempt the write does not
 by itself demonstrate sandbox enforcement. Record denied checks separately from
 execution status: the agent can finish successfully after an expected denial.
 
-In a macOS smoke test with Codex CLI 0.162.0, two sandbox-denied commands were
-absent from the native `exec --json` event stream despite executing and recording
-`EPERM` in an independent probe ledger. Due cannot trace command events that the
-provider omits. Zero failed activities or zero dropped trace records does not
-prove that no permissions were denied.
+In the profile acceptance below, Due's trace omitted the denied write as a failed
+activity (known issue #6). The caller matched the actual `PermissionError` in
+native session tool output and checked unchanged canaries. This batch did not
+inspect raw native `exec --json` before parsing, so it does not establish where
+the event was lost. Zero failed activities or zero dropped trace records does
+not prove that no permissions were denied. A later [correlated capture](native-trace-evidence.md)
+reproduced one inline-command omission in native stdout before Due parsing,
+while separate script controls emitted failures correctly.
+
+### Reusable Codex workspace profile
+
+Use the same [version 1 profile](../examples/codex-workspace-profile.json) for
+both commands below. Codex CLI **0.162.0** exposes `-c/--config` on `exec` and
+`exec resume`, but `--sandbox` only on `exec`.
+
+Caller live acceptance with installed Due **0.1.0**, Codex **0.162.0**, and
+**macOS 27 arm64** used the earlier seven-setting profile for two same-workspace turns
+with new prompts and separate results/traces, supplying the answer schema per turn. The native session ID stayed
+the same, and the follow-up recalled a token absent from its prompt. Receipt edits
+and unit tests passed in both turns. One outside write per turn raised a native
+`PermissionError`; both canaries remained unchanged. The 18/19-record traces were
+contiguous and complete with no reported drops, subject to the denial gap above.
+Native contexts recorded workspace-write, approval `never`, networking disabled,
+and both excluded temporary-directory grants true. All seven original requested settings
+were forwarded, but the native record did not expose `agents.enabled` or explicit
+`writable_roots`: their effective values were not independently confirmed.
+No delegation was observed; that does not confirm effective agent disabling.
+The profile now additionally disables `features.multi_agent_v2`, which takes
+precedence over `agents.enabled` in published Codex 0.162.0 source. The revised
+eight-setting profile was accepted in fresh/resumed 0.162.0 trace probes with
+workspace writes and denied outside controls; this does not establish a runtime
+tool inventory. See [the control audit](native-control-audit.md) and
+[the correlated trace evidence](native-trace-evidence.md).
+
+This establishes CLI acceptance and observed effects on that version and host,
+not a security guarantee for every system. Confirm settings in native effective
+context where available and report unsupported or unexposed settings rather than
+silently removing them. Automated fake-provider tests establish only Due's routing
+and result/trace contracts; actual history continuity was checked separately above.
+
+The following shell recipe uses `jq`. Replace the paths with an existing
+authorized Git checkout and protected caller-owned copies of this profile and
+answer schema, outside every worker writable root. Prepare `first-task.txt` and
+`follow-up.txt` with separate bounded assignments in the caller-owned
+`input_root`, outside every worker writable root.
+Keep both turns in that same workspace; cross-workspace resume has not been
+established. Paths in a request profile resolve from the caller's directory,
+not the profile directory. Absolute paths here avoid that ambiguity. Codex's
+normal Git-repository/trust check remains enabled; initialize an authorized
+disposable Git repository first when using a new smoke workspace. The Git
+preflight below does not override native trust rules. Do not add
+`--skip-git-repo-check` automatically. Any authorized new native option belongs
+in a copy of the profile's **complete** `native_args` list: passing it alone
+after `--` replaces all eight settings.
+
+Use a canonical workspace path (`pwd -P`) for native grants. An outer host that
+rejects symlinked writable roots before process creation needs a supported host
+workspace/permission correction; changing this profile cannot fix that launch
+failure. See [troubleshooting](troubleshooting.md).
+
+Choose an existing, caller-writable `artifact_root` outside every worker writable
+root. Each Due invocation below sets its own `TMPDIR` to the protected artifact
+directory, keeping schema snapshots and final-message files outside those roots.
+This per-command environment value does not widen worker grants: the profile
+excludes the `TMPDIR` write grant. Keep caller-owned profiles, schemas and prompts
+outside worker writable roots too. Set test-command temporary paths inside the
+workspace separately; do not export that path to Due. Worker commands inherit
+the protected `TMPDIR` and cannot write there, so set a workspace-local `TMPDIR`
+on any command that needs temporary files, including tests.
+
+```sh
+input_root=/absolute/path/to/caller-owned-inputs
+profile="$input_root/codex-workspace-profile.json"
+answer_schema="$input_root/answer.schema.json"
+workspace=/absolute/path/to/authorized-git-checkout
+artifact_root=/absolute/path/to/caller-owned-artifacts-outside-workspace
+workspace=$(cd "$workspace" && pwd -P) || exit 1
+git -C "$workspace" rev-parse --git-dir > /dev/null || exit 1
+artifacts=$(mktemp -d "$artifact_root/due-run.XXXXXX") || exit 1
+mkdir -p "$workspace/test-tmp" || exit 1
+
+fresh_status=0
+TMPDIR="$artifacts" due run --request "$profile" --cwd "$workspace" --stdin --output json \
+  --schema "$answer_schema" --trace --trace-file "$artifacts/fresh.jsonl" \
+  < "$input_root/first-task.txt" > "$artifacts/fresh.result.json" || fresh_status=$?
+printf '%s\n' "$fresh_status" > "$artifacts/fresh.exit"
+[ "$fresh_status" -eq 0 ] || exit "$fresh_status"
+```
+
+Before continuing, the calling agent independently validates `structured_output`
+against `answer_schema` and checks the intended task, actual cwd, permissions,
+and effects. Use observed checks and artifacts; a native session record is
+optional extra evidence when accessible. Report missing evidence or denied
+checks without claiming they passed. These are caller-owned checks, which can
+be automated within existing authorization; no human approval or manual ID paste
+is required. Due does not independently validate the answer or effective policy.
+
+After those checks, the next block selects the ID from this fresh result only,
+checks its run ID against every trace record, and matches all emitted session
+IDs. This trace-enabled recipe requires a `session_started` marker and completed
+trace; if either is missing, investigate before follow-up. It then sets
+`verified_session_id` programmatically. Due neither selects the last session
+nor manages a separate session database.
+
+```sh
+session_id=$(jq -er '
+  select(.provider == "codex" and .status == "succeeded" and
+         .structured_output_present == true) |
+  .session_id | select(type == "string" and length > 0)
+' "$artifacts/fresh.result.json") || exit 1
+run_id=$(jq -er '.run_id | select(type == "string" and length > 0)' \
+  "$artifacts/fresh.result.json") || exit 1
+jq -es --arg run "$run_id" --arg id "$session_id" '
+  length > 0 and .[0].event == "run_started" and
+  .[-1].event == "run_finished" and .[-1].status == "succeeded" and
+  .[-1].exit_code == 0 and
+  all(.[]; .run_id == $run and .provider == "codex") and
+  any(.[]; .event == "session_started") and
+  all(.[] | select(.event == "session_started" or has("session_id"));
+      .session_id == $id)
+' "$artifacts/fresh.jsonl" > /dev/null || exit 1
+verified_session_id=$session_id
+printf '%s\n' "$verified_session_id" > "$artifacts/native-session-id.txt"
+resume_status=0
+TMPDIR="$artifacts" due run --request "$profile" --cwd "$workspace" --resume "$verified_session_id" \
+  --stdin --output json --schema "$answer_schema" \
+  --trace --trace-file "$artifacts/resumed.jsonl" \
+  < "$input_root/follow-up.txt" > "$artifacts/resumed.result.json" || resume_status=$?
+printf '%s\n' "$resume_status" > "$artifacts/resumed.exit"
+[ "$resume_status" -eq 0 ] || exit "$resume_status"
+jq -e --arg id "$verified_session_id" '
+  .provider == "codex" and .status == "succeeded" and
+  .structured_output_present == true and .session_id == $id
+' "$artifacts/resumed.result.json" > /dev/null || exit 1
+```
+
+The profile stays unchanged and no arguments after `--` replace its grants.
+Each invocation supplies its own prompt, schema, cwd, result, and fresh trace
+path; the second adds only an explicit native resume ID. Save each execution
+status before running `due trace summarize` or an independent answer validator,
+which have their own exit codes. Require `structured_output_present`, validate
+`structured_output` against the supplied schema, and inspect effects separately:
+`answer_schema_validation: "not_performed"` is not a validation pass. Inspect
+resumed native cwd/permissions as well; successful execution does not prove a
+denied check ran or passed. Report blocked checks as blocked and preserve the
+policy, including inherited denials.
 
 ### Unattended Claude permissions
 
@@ -525,10 +688,14 @@ permission decisions.
 
 Text mode prints only the successful final answer, with a terminal newline.
 Diagnostics go to stderr. Failed runs do not print partial answers in text mode.
-Codex text comes from its `--output-last-message` file, excluding intermediate
-commentary. Claude text comes from the terminal result, including when verbose
-mode wraps records in an array. An empty result with `structured_output` returns
-the serialized structured response.
+For successful Codex turns, text comes from the `--output-last-message` file,
+excluding intermediate commentary. Failure JSON can contain retained assistant
+text, including intermediate commentary; with `--schema`, retained JSON may also
+be decoded as `structured_output`. Availability depends on the failure path,
+provider and wrapper. Neither partial text nor a locally valid partial answer
+is a final answer or successful execution. Claude text comes from the terminal
+result, including when verbose mode wraps records in an array. An empty result
+with `structured_output` returns the serialized structured response.
 
 JSON mode prints one document for a successful run or any error after argument
 parsing. Clap syntax/help/version output follows ordinary CLI conventions;
@@ -588,6 +755,10 @@ is always null. `duration_ms` is Due's elapsed time, including input/setup/clean
 | `130` | Cancelled by Ctrl-C or Unix SIGTERM/SIGHUP |
 
 ## Scope and tests
+
+For blocked launches, missing binaries, native login/state access, task denials,
+Git/resume mismatches or schema rejection, use [troubleshooting](troubleshooting.md).
+Preserve failed results, traces and partial edits before a deliberate follow-up.
 
 The CI checks are:
 

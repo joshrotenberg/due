@@ -14,8 +14,14 @@ scheduling, and any retry.
 ```sh
 due run --provider claude -p "Explain this repository" --effort high
 cat task.txt | due run --provider codex --stdin --output json
-due run --provider codex -p "Fix the tests" -- --sandbox workspace-write
+due run --request /caller-owned/codex-workspace-profile.json \
+  --cwd /canonical/path/to/authorized-checkout -p "Fix the tests"
 ```
+
+For the last example, save the [workspace profile](examples/codex-workspace-profile.json)
+in a protected caller-owned location outside worker writable roots; follow the
+[fresh/resume recipe](docs/cli.md#reusable-codex-workspace-profile) for artifacts
+and schema transport.
 
 ## Install from source
 
@@ -108,13 +114,26 @@ due run --request examples/profile.json --provider claude -p "Review the diff"
 `--dry-run` validates the merged request, native-option conflicts, working
 directory, and answer-schema JSON, then reports the executable, argv, cwd, and
 stdin size without launching a provider. It does not check authentication, model
-support, or provider schema support. Prompt text is omitted, but native option
-values and an inline Claude schema are shown unredacted.
+support, native CLI option/config compatibility, effective sandbox policy, or
+provider schema support. Prompt text is omitted, but native option values and an
+inline Claude schema are shown unredacted.
 
-Native arguments after `--` replace the profile's entire `native_args` list.
+Native arguments after `--` replace the profile's entire `native_args` list,
+including permission grants. Changing provider retains inherited policy options;
+review them for the selected provider.
 Paths in a profile resolve from the caller's directory, not the profile's. There
 is no profile search path, inheritance, or config store. Examples are in
 [`examples/`](examples).
+
+For persistent Codex work, use
+[`examples/codex-workspace-profile.json`](examples/codex-workspace-profile.json).
+It uses `-c 'sandbox_mode="workspace-write"'` for both fresh and explicit resumed
+runs; Codex CLI 0.162.0 rejects `--sandbox` on `exec resume`. Follow the
+[fresh/resume recipe](docs/cli.md#reusable-codex-workspace-profile) to supply each
+prompt, cwd, schema, and fresh trace path, then verify the native session ID and
+workspace before follow-up. `--ephemeral` conflicts with resume; a later override
+cannot recover history that was never persisted. Due adds no session store or
+independent sandbox enforcement.
 
 ## Contracts, structured answers, and tracing
 
@@ -180,6 +199,14 @@ due trace summarize run.jsonl --output json
   positive and negative reports, and bounded A/B comparisons.
 - [Node caller example](examples/node-caller/README.md): capture one run safely
   and validate a task-specific review answer using Node built-ins.
+- [Offline validation example](examples/offline-validation/README.md): optional
+  Python caller validation of saved answers, separate from execution and verdict.
+- [Native schema smoke example](examples/native-schema-smoke/README.md): explicit
+  caller-owned probes with private evidence and provider-free offline tests.
+- [Native control audit](docs/native-control-audit.md) and
+  [trace evidence](docs/native-trace-evidence.md): versioned observations and limits.
+- [Troubleshooting](docs/troubleshooting.md): diagnose installation, host,
+  authentication, permissions, and schema failures; repair a frozen source build.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development workflow and checks.
 - `due run --help` and `due skills show NAME`: the authoritative reference for
   the installed version.
