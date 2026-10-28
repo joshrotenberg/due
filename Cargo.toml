@@ -15,12 +15,12 @@ humantime = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "process", "io-util"] }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 which = "8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 uuid = { version = "1", features = ["v4"] }
 
-[target.'cfg(unix)'.dev-dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"

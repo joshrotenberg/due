@@ -1,5 +1,6 @@
 mod cli;
 mod contracts;
+mod init;
 mod providers;
 mod request;
 mod result;
@@ -24,6 +25,7 @@ use result::{RunError, RunResult};
 async fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Run(run) => run_command(*run).await,
+        Command::Init(args) => init::execute(args).await,
         Command::Skills(args) => skills::execute(&args),
         Command::Schema(args) => contracts::execute(&args),
         Command::Trace(args) => trace_summary::execute(&args),
