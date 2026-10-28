@@ -53,12 +53,30 @@ fi
 
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"trace-session"}'
 case "$mode" in
-    empty|no_text) ;;
+    empty|no_text|child_only) ;;
     string) printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":"PARTIAL ANSWER"}}' ;;
     json_partial) printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":"{\"answer\":42}"}}' ;;
     *)
         printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"older message"}]}}'
         printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"PARTIAL "},{"type":"thinking","thinking":"SECRET_THINKING"},{"type":"text","text":"ANSWER"}]}}'
+        ;;
+esac
+# Native subagent messages use a parent marker on the JSONL envelope. A null
+# marker denotes the root; malformed non-null markers must not become answers.
+case "$mode" in
+    child_after_root|child_only|root_after_child)
+        printf '%s\n' '{"type":"assistant","parent_tool_use_id":"tool-subagent","message":{"role":"assistant","content":[{"type":"text","text":"SECRET_SUBAGENT"}]}}'
+        ;;
+    invalid_parent)
+        printf '%s\n' '{"type":"assistant","parent_tool_use_id":false,"message":{"role":"assistant","content":"SECRET_SUBAGENT"}}'
+        ;;
+    empty_parent)
+        printf '%s\n' '{"type":"assistant","parent_tool_use_id":"","message":{"role":"assistant","content":"SECRET_SUBAGENT"}}'
+        ;;
+esac
+case "$mode" in
+    root_null|root_after_child)
+        printf '%s\n' '{"type":"assistant","parent_tool_use_id":null,"message":{"role":"assistant","content":"ROOT NULL ANSWER"}}'
         ;;
 esac
 # Later tool-only, empty text, user tool output, nested messages and deltas
@@ -79,6 +97,7 @@ case "$mode" in
         wait "$descendant"
         ;;
     bad) printf '{broken}\n' ;;
+    invalid_terminal) printf '%s\n' '{"type":"result","is_error":"invalid","result":"invalid terminal"}' ;;
     eof9) exit 9 ;;
     success|success9)
         printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"TERMINAL ANSWER","session_id":"trace-session"}'

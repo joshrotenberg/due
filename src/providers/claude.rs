@@ -176,7 +176,14 @@ impl StreamState {
                     }
                 }
                 progress.assistant(text.len(), detail);
-                if !text.is_empty() {
+                // Native subagent messages are also top-level JSONL envelopes.
+                // Only root-session text may become the caller's partial answer.
+                if !text.is_empty()
+                    && event
+                        .data
+                        .get("parent_tool_use_id")
+                        .is_none_or(Value::is_null)
+                {
                     self.last_assistant = text;
                 }
             }

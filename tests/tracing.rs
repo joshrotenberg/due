@@ -361,6 +361,13 @@ fn claude_complete_message_fallback_is_latest_text_only_and_terminal_is_authorit
         ("eof9", "PARTIAL ANSWER", "provider", 1),
         ("string", "PARTIAL ANSWER", "protocol", 1),
         ("bad", "PARTIAL ANSWER", "protocol", 1),
+        ("child_after_root", "PARTIAL ANSWER", "protocol", 1),
+        ("child_only", "", "protocol", 1),
+        ("root_null", "ROOT NULL ANSWER", "protocol", 1),
+        ("root_after_child", "ROOT NULL ANSWER", "protocol", 1),
+        ("invalid_parent", "PARTIAL ANSWER", "protocol", 1),
+        ("empty_parent", "PARTIAL ANSWER", "protocol", 1),
+        ("invalid_terminal", "", "protocol", 1),
         ("empty", "", "protocol", 1),
         ("no_text", "", "protocol", 1),
         ("success", "TERMINAL ANSWER", "", 0),
@@ -381,6 +388,7 @@ fn claude_complete_message_fallback_is_latest_text_only_and_terminal_is_authorit
         let status = if exit == 0 { "succeeded" } else { "failed" };
         let value = result(&output, exit, status);
         assert_eq!(value["text"], text, "{mode}: {value}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SECRET_SUBAGENT"));
         assert_eq!(value["session_id"], "trace-session");
         assert_eq!(value["structured_output_present"], mode == "structured");
         if !kind.is_empty() {
@@ -401,6 +409,7 @@ fn claude_complete_message_fallback_is_latest_text_only_and_terminal_is_authorit
         check_trace(&records(&bytes), "claude", &value["run_id"], status, exit);
         assert_eq!(value["trace"]["incomplete"], false);
         no_secrets(&bytes);
+        assert!(!String::from_utf8_lossy(&bytes).contains("SECRET_SUBAGENT"));
         assert!(!String::from_utf8_lossy(&bytes).contains("TERMINAL"));
         assert_stopped(&fixture.pids());
     }

@@ -373,10 +373,15 @@ be unknown even when buffered execution observes one.
 If a Claude stream ends without a terminal result, JSON failure output retains
 the latest complete text-bearing top-level assistant message, concatenating its
 text blocks. Later tool-only messages do not erase it. Thinking, tool payloads,
-nested messages and token deltas are excluded. Valid terminal results remain
-authoritative, including empty failures and structured-only success. Missing
+nested messages and token deltas are excluded. Native subagent messages with a
+non-null `parent_tool_use_id` are excluded from answer recovery, even though they
+are top-level JSONL records. An absent or null marker identifies root-session
+text; malformed non-null markers are excluded as well. Valid terminal results
+remain authoritative, including empty failures and structured-only success. Missing
 terminal output remains a failure; retained text is not native structured output
 and is never printed as an answer in text-mode failures.
+Fallback applies only when no result event was received. An invalid result
+object still fails without substituting assistant text.
 
 ### Summarizing a saved trace
 
