@@ -91,6 +91,8 @@ struct Step {
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
     error: Option<String>,
 }
 
@@ -432,13 +434,22 @@ fn materialize(plan: &Plan, written: &mut Vec<PathBuf>) -> Result<InstallLock> {
     Ok(lock)
 }
 
-async fn bounded_output(reader: impl tokio::io::AsyncRead + Unpin) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader.take(MAX_OUTPUT + 1).read_to_end(&mut bytes).await?;
-    if bytes.len() as u64 > MAX_OUTPUT {
-        return Err(io::Error::other("host output exceeded 64 KiB"));
+async fn bounded_output(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    bytes: &mut Vec<u8>,
+) -> io::Result<()> {
+    let mut chunk = [0; 8192];
+    loop {
+        let capacity = (MAX_OUTPUT as usize + 1 - bytes.len()).min(chunk.len());
+        let count = reader.read(&mut chunk[..capacity]).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.len() as u64 > MAX_OUTPUT {
+            return Err(io::Error::other("host output exceeded 64 KiB"));
+        }
     }
-    Ok(bytes)
 }
 
 async fn run_host(
@@ -453,6 +464,8 @@ async fn run_host(
         exit_code: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
         error: None,
     };
     let mut process = tokio::process::Command::new(&command.executable);
@@ -473,21 +486,28 @@ async fn run_host(
     };
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
     let attempt = tokio::select! {
         biased;
         _ = cancel => None,
         attempt = tokio::time::timeout(limit, async {
-            let (stdout, stderr) = tokio::try_join!(bounded_output(stdout), bounded_output(stderr))?;
-            let status = child.wait().await?;
-            Ok::<_, io::Error>((status, stdout, stderr))
+            tokio::try_join!(bounded_output(stdout, &mut stdout_bytes), bounded_output(stderr, &mut stderr_bytes))?;
+            child.wait().await
         }) => Some(attempt),
     };
+    result.stdout_truncated = stdout_bytes.len() as u64 > MAX_OUTPUT;
+    result.stderr_truncated = stderr_bytes.len() as u64 > MAX_OUTPUT;
+    result.stdout =
+        String::from_utf8_lossy(&stdout_bytes[..stdout_bytes.len().min(MAX_OUTPUT as usize)])
+            .into_owned();
+    result.stderr =
+        String::from_utf8_lossy(&stderr_bytes[..stderr_bytes.len().min(MAX_OUTPUT as usize)])
+            .into_owned();
     match attempt {
-        Some(Ok(Ok((status, stdout, stderr)))) => {
+        Some(Ok(Ok(status))) => {
             result.success = status.success();
             result.exit_code = status.code();
-            result.stdout = String::from_utf8_lossy(&stdout).into_owned();
-            result.stderr = String::from_utf8_lossy(&stderr).into_owned();
             if !result.success {
                 result.error = Some("native plugin registration failed".into());
             }
@@ -750,6 +770,9 @@ mod tests {
         .await;
         assert!(!step.success);
         assert!(step.error.unwrap().contains("64 KiB"));
+        assert!(step.stdout_truncated);
+        assert!(!step.stdout.is_empty());
+        assert!(step.stdout.len() <= MAX_OUTPUT as usize);
     }
 
     #[tokio::test]
@@ -757,11 +780,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let pids = temp.path().join("pids");
         let step = run_host(&shell(
-            "printf '%s\\n' \"$$\" > \"$1\"; /bin/sleep 30 & printf '%s\\n' \"$!\" >> \"$1\"; wait",
+            "printf 'setup started'; printf 'awaiting native setup' >&2; printf '%s\\n' \"$$\" > \"$1\"; /bin/sleep 30 & printf '%s\\n' \"$!\" >> \"$1\"; wait",
             &[pids.to_str().unwrap()],
         ), Duration::from_millis(250), std::future::pending()).await;
         assert!(!step.success);
         assert!(step.error.unwrap().contains("exceeded"));
+        assert_eq!(step.stdout, "setup started");
+        assert_eq!(step.stderr, "awaiting native setup");
         for pid in fs::read_to_string(pids).unwrap().lines() {
             let mut stopped = false;
             for _ in 0..100 {
@@ -769,6 +794,12 @@ mod tests {
                     .args(["-o", "stat=", "-p", pid])
                     .output()
                     .unwrap();
+                assert!(
+                    output.stderr.is_empty()
+                        && (output.status.success() || output.status.code() == Some(1)),
+                    "process inspection failed: {:?}",
+                    output
+                );
                 let state = String::from_utf8_lossy(&output.stdout);
                 if state.trim().is_empty() || state.trim().starts_with('Z') {
                     stopped = true;

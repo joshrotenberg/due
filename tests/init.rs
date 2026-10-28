@@ -39,6 +39,8 @@ printf '%s\n' "$@" >> "$DUE_INIT_CALLS"
 printf -- '--step--\n' >> "$DUE_INIT_CALLS"
 if [ -n "${DUE_INIT_FAIL:-}" ] && [ "$2" = "$DUE_INIT_FAIL" ]; then printf 'synthetic setup failure\n' >&2; exit 7; fi
 if [ -n "${DUE_INIT_BLOCK:-}" ]; then
+    printf 'native setup started'
+    printf 'native setup awaiting completion' >&2
     printf '%s\n' "$$" > "$DUE_INIT_PIDS"
     /bin/sleep 30 &
     printf '%s\n' "$!" >> "$DUE_INIT_PIDS"
@@ -503,6 +505,11 @@ fn cancellation_reports_partial_setup_and_settles_its_native_processes() {
     }
     let value = report(&child.wait_with_output().unwrap(), 130, "cancelled");
     assert_eq!(value["failed_step"]["cancelled"], true);
+    assert_eq!(value["failed_step"]["stdout"], "native setup started");
+    assert_eq!(
+        value["failed_step"]["stderr"],
+        "native setup awaiting completion"
+    );
     assert_eq!(value["files_written"].as_array().unwrap().len(), 8);
     assert!(!f.install.join(".due-init.lock").exists());
     for pid in fs::read_to_string(pids).unwrap().lines() {
@@ -510,6 +517,12 @@ fn cancellation_reports_partial_setup_and_settles_its_native_processes() {
             .args(["-o", "stat=", "-p", pid])
             .output()
             .unwrap();
+        assert!(
+            output.stderr.is_empty()
+                && (output.status.success() || output.status.code() == Some(1)),
+            "process inspection failed: {:?}",
+            output
+        );
         let state = String::from_utf8_lossy(&output.stdout);
         assert!(
             state.trim().is_empty() || state.trim().starts_with('Z'),

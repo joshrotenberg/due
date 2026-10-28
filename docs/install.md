@@ -123,7 +123,9 @@ Conflicting marketplace roots are reported instead of overwritten.
 No provider turn, MCP server, background service, permission change or caller
 trial is started. Native registration commands have a 30-second deadline and a
 64-KiB limit per output stream. Argument vectors are passed directly, without a
-shell. Host output can include local paths; inspect it before sharing.
+shell. Native output received before cancellation or timeout is retained in the failed
+step; output-limit failures retain a capped prefix and mark its stream as
+truncated. Host output can include local paths; inspect it before sharing.
 
 Start a new host session or reload plugins after installation or an update. The
 entry point is `due:delegate`; it routes into the installed binary's three guides.
