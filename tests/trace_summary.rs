@@ -164,12 +164,12 @@ fn completion_kinds_and_terminal_conflicts_remain_explicit() {
     let mut older = record("a", 3, "run_finished");
     older["status"] = json!("failed");
     older["exit_code"] = json!(1);
-    let v = parsed(
-        &summarize(&lines(&[unknown, cancelled, newer, older]), "json"),
-        0,
-    );
+    // Deliberately damaged synthetic log, not native duplicate-terminal evidence.
+    let bytes = lines(&[unknown, cancelled, newer, older]);
+    let v = parsed(&summarize(&bytes, "json"), 0);
     let run = &v["runs"][0];
     assert_eq!(run["terminal_conflict"], true);
+    assert_eq!(run["terminal_records"], 2);
     assert_eq!(run["status"], Value::Null);
     assert_eq!(run["exit_code"], Value::Null);
     assert_eq!(
@@ -180,4 +180,23 @@ fn completion_kinds_and_terminal_conflicts_remain_explicit() {
         run["activities"]["by_kind"]["unknown"]["completion_status_counts"]["unknown"],
         1
     );
+    let human = summarize(&bytes, "text");
+    assert!(human.status.success());
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains("unknown: conflicting terminal records (2 terminal records"));
+    assert!(!text.contains("terminal record absent"));
+}
+
+#[test]
+fn text_summaries_keep_success_and_failure_statuses() {
+    for (status, code) in [("succeeded", 0), ("failed", 1)] {
+        let mut terminal = record("a", 1, "run_finished");
+        terminal["status"] = json!(status);
+        terminal["exit_code"] = json!(code);
+        let human = summarize(&lines(&[terminal]), "text");
+        assert!(human.status.success());
+        let text = String::from_utf8(human.stdout).unwrap();
+        assert!(text.contains(&format!("codex a: {status} (1 terminal records")));
+        assert!(!text.contains("unknown"));
+    }
 }

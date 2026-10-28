@@ -674,6 +674,137 @@ fn native_model_and_extended_effort_work_without_common_overrides() {
 }
 
 #[test]
+fn claude_short_value_aliases_preserve_values_containing_reserved_letters() {
+    for native in [
+        vec!["-nreview"],
+        vec!["-n", "review"],
+        vec!["--name", "review"],
+        vec!["-nprchv"],
+        vec!["-n", "prchv"],
+        vec!["--name", "prchv"],
+        vec!["-dfoo"],
+        vec!["-d", "foo"],
+        vec!["-wfoo"],
+        vec!["-w", "foo"],
+        vec!["-dprchv"],
+        vec!["-d", "prchv"],
+        vec!["-wprchv"],
+        vec!["-w", "prchv"],
+    ] {
+        for dry_run in [false, true] {
+            let fixture = Fixture::new("claude");
+            let mut command = fixture.command("success");
+            command.args(["--prompt", "x", "--output", "json"]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            command.arg("--").args(&native);
+            let value = json(
+                &run(&mut command),
+                0,
+                if dry_run { "planned" } else { "succeeded" },
+            );
+            let args: Vec<String> = if dry_run {
+                assert!(!fixture.root.path().join("argv").exists());
+                serde_json::from_value(value["invocation"]["args"].clone()).unwrap()
+            } else {
+                fixture.argv()
+            };
+            assert!(
+                args.windows(native.len())
+                    .any(|part| { part.iter().map(String::as_str).eq(native.iter().copied()) })
+            );
+        }
+    }
+}
+
+#[test]
+fn claude_short_value_aliases_do_not_consume_extra_positionals() {
+    for native in [
+        vec!["-nreview", "replacement"],
+        vec!["-n", "review", "replacement"],
+        vec!["-dfoo", "replacement"],
+        vec!["-d", "foo", "replacement"],
+        vec!["-wfoo", "replacement"],
+        vec!["-w", "foo", "replacement"],
+    ] {
+        for dry_run in [false, true] {
+            let fixture = Fixture::new("claude");
+            let mut command = fixture.command("success");
+            command.args(["--prompt", "intended prompt", "--output", "json"]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            command.arg("--").args(&native);
+            let value = json(&run(&mut command), 2, "failed");
+            assert_eq!(value["error"]["kind"], "invalid_input");
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unexpected native positional \"replacement\"")
+            );
+            assert!(!fixture.root.path().join("argv").exists());
+        }
+    }
+}
+
+#[test]
+fn claude_short_value_aliases_do_not_hide_reserved_options_or_common_conflicts() {
+    for reserved in ["p", "r", "c", "h", "v"] {
+        for native in [
+            vec![format!("-{reserved}")],
+            vec![format!("-{reserved}nreview")],
+            vec!["-nreview".into(), format!("-{reserved}")],
+            vec![format!("-{reserved}dfoo")],
+            vec!["-dfoo".into(), format!("-{reserved}")],
+            vec![format!("-{reserved}wfoo")],
+            vec!["-wfoo".into(), format!("-{reserved}")],
+        ] {
+            let fixture = Fixture::new("claude");
+            let value = json(
+                &run(fixture
+                    .command("success")
+                    .args(["--prompt", "x", "--output", "json", "--"])
+                    .args(&native)),
+                2,
+                "failed",
+            );
+            assert_eq!(value["error"]["kind"], "invalid_input");
+            assert!(!fixture.root.path().join("argv").exists());
+        }
+    }
+    for alias in ["-nreview", "-dfoo", "-wfoo"] {
+        for conflict in ["--model=other", "--effort=high", "--json-schema={}"] {
+            let fixture = Fixture::new("claude");
+            let schema = fixture.root.path().join("schema.json");
+            fs::write(&schema, "{}").unwrap();
+            let value = json(
+                &run(fixture
+                    .command("success")
+                    .args([
+                        "--prompt",
+                        "x",
+                        "--output",
+                        "json",
+                        "--model",
+                        "common-model",
+                        "--effort",
+                        "low",
+                        "--schema",
+                    ])
+                    .arg(schema)
+                    .args(["--", alias, conflict])),
+                2,
+                "failed",
+            );
+            assert_eq!(value["error"]["kind"], "invalid_input");
+            assert!(!fixture.root.path().join("argv").exists());
+        }
+    }
+}
+
+#[test]
 fn native_initial_positionals_subcommands_and_stdin_markers_are_rejected() {
     for provider in ["claude", "codex"] {
         let fixture = Fixture::new(provider);
@@ -1003,12 +1134,235 @@ fn nonzero_terminal_output_preserves_partial_answer_and_session() {
 
 #[test]
 fn missing_codex_final_message_is_a_protocol_error() {
-    let fixture = Fixture::new("codex");
-    let output = run(fixture
-        .command("missing_final")
-        .args(["--prompt", "x", "--output", "json"]));
-    let value = json(&output, 1, "failed");
-    assert_eq!(value["error"]["kind"], "protocol");
+    for traced in [false, true] {
+        let fixture = Fixture::new("codex");
+        let mut command = fixture.command("missing_final");
+        command.args(["--prompt", "x", "--output", "json"]);
+        if traced {
+            command.arg("--trace=json");
+        }
+        let value = json(&run(&mut command), 1, "failed");
+        assert_eq!(value["error"]["kind"], "protocol");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("final-message file")
+        );
+        assert!(value["error"]["provider_exit_code"].is_null());
+        assert_eq!(value["text"], "FINAL ANSWER");
+        assert_eq!(value["session_id"], "codex-test-thread");
+        assert_eq!(
+            value["usage"],
+            serde_json::json!({
+                "input_tokens": 120,
+                "cached_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "output_tokens": 45,
+                "reasoning_output_tokens": 0,
+                "total_tokens": null,
+            })
+        );
+    }
+}
+
+#[test]
+fn codex_failed_turn_text_output_does_not_print_received_assistant_text() {
+    for traced in [false, true] {
+        for mode in ["missing_final", "codex_partial_exit", "codex_partial_eof"] {
+            let fixture = Fixture::new("codex");
+            let mut command = fixture.command(mode);
+            command.args(["--prompt", "x", "--output", "text"]);
+            if traced {
+                command.arg("--trace=json");
+            }
+            let output = run(&mut command);
+            assert_eq!(output.status.code(), Some(1), "{}", describe(&output));
+            assert!(output.stdout.is_empty(), "{}", describe(&output));
+        }
+    }
+}
+
+#[test]
+fn codex_incomplete_turn_preserves_received_text_and_failure() {
+    for traced in [false, true] {
+        for (mode, text, kind, native_exit) in [
+            (
+                "codex_partial_exit",
+                "SYNTHETIC PARTIAL ANSWER",
+                "provider",
+                Some(9),
+            ),
+            ("codex_no_message_exit", "", "provider", Some(9)),
+            (
+                "codex_partial_eof",
+                "SYNTHETIC PARTIAL ANSWER",
+                "protocol",
+                None,
+            ),
+            ("codex_no_message_eof", "", "protocol", None),
+            ("nonzero_terminal", "PARTIAL ANSWER", "provider", Some(9)),
+        ] {
+            let fixture = Fixture::new("codex");
+            let mut command = fixture.command(mode);
+            command.args(["--prompt", "x", "--output", "json"]);
+            if traced {
+                command.arg("--trace=json");
+            }
+            let value = json(&run(&mut command), 1, "failed");
+            assert_eq!(value["provider"], "codex");
+            assert_eq!(value["text"], text, "{mode}, traced={traced}");
+            assert_eq!(value["session_id"], "codex-test-thread");
+            assert_eq!(value["error"]["kind"], kind);
+            assert_eq!(
+                value["error"]["provider_exit_code"],
+                serde_json::json!(native_exit)
+            );
+            assert!(value["usage"].is_null());
+            assert!(value["cost_usd"].is_null());
+            assert_eq!(value["structured_output_present"], false);
+            assert_eq!(value["answer_schema_validation"], "not_requested");
+            if mode == "nonzero_terminal" {
+                assert_eq!(value["error"]["message"], "fixture terminal failure");
+            }
+        }
+    }
+}
+
+#[test]
+fn codex_partial_schema_answers_keep_failure_and_validation_intent() {
+    for traced in [false, true] {
+        for text in ["SYNTHETIC PARTIAL ANSWER", r#"{"answer":42}"#] {
+            let fixture = Fixture::new("codex");
+            let schema = fixture.root.path().join("schema.json");
+            // Even JSON that cannot satisfy this schema is only decoded, not validated.
+            fs::write(&schema, "false").unwrap();
+            let mut command = fixture.command("codex_partial_exit");
+            command
+                .args(["--prompt", "x", "--output", "json", "--schema"])
+                .arg(schema)
+                .env(
+                    "DUE_TEST_PARTIAL_TEXT",
+                    serde_json::to_string(text).unwrap(),
+                );
+            if traced {
+                command.arg("--trace=json");
+            }
+            let value = json(&run(&mut command), 1, "failed");
+            assert_eq!(value["text"], text);
+            assert_eq!(value["session_id"], "codex-test-thread");
+            assert_eq!(value["error"]["kind"], "provider");
+            assert_eq!(value["error"]["provider_exit_code"], 9);
+            let decoded = serde_json::from_str::<Value>(text).ok();
+            assert_eq!(value["structured_output_present"], decoded.is_some());
+            assert_eq!(value["structured_output"], decoded.unwrap_or(Value::Null));
+            assert_eq!(value["answer_schema_validation"], "not_performed");
+        }
+    }
+}
+
+#[test]
+fn codex_stopped_turn_keeps_only_available_partial_data_and_reaps_processes() {
+    let partial = r#"{"answer":42}"#;
+    for traced in [false, true] {
+        for with_message in [false, true] {
+            for cancel in [false, true] {
+                let fixture = Fixture::new("codex");
+                let mut command = fixture.command(if with_message {
+                    "codex_partial_stop"
+                } else {
+                    "codex_no_message_stop"
+                });
+                let schema = fixture.root.path().join("schema.json");
+                fs::write(&schema, "false").unwrap();
+                command
+                    .args([
+                        "--prompt",
+                        "x",
+                        "--output",
+                        "json",
+                        "--timeout",
+                        if cancel { "30s" } else { "2s" },
+                        "--schema",
+                    ])
+                    .arg(schema)
+                    .env(
+                        "DUE_TEST_PARTIAL_TEXT",
+                        serde_json::to_string(partial).unwrap(),
+                    );
+                let trace = fixture.root.path().join("trace.jsonl");
+                if traced {
+                    command.arg("--trace-file").arg(&trace);
+                }
+                let mut child = command.spawn().unwrap();
+                wait_for(&fixture.root.path().join("pids"), &mut child);
+                let pids = fixture.pids();
+                if cancel {
+                    if traced {
+                        // Wait for Due to observe the event after the last message,
+                        // not just for the fixture to have written it to a pipe.
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while !fs::read_to_string(&trace)
+                            .unwrap_or_default()
+                            .contains("\"activity_id\":\"partial-ready\"")
+                        {
+                            assert!(child.try_wait().unwrap().is_none());
+                            assert!(
+                                Instant::now() < deadline,
+                                "partial events were not observed"
+                            );
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+                }
+                let output = finish(child);
+                assert_reaped(&pids);
+                assert_eq!(
+                    fs::read_to_string(fixture.root.path().join("interrupt")).unwrap(),
+                    "SIGINT\n"
+                );
+                let (code, status, kind) = if cancel {
+                    (130, "cancelled", "cancelled")
+                } else {
+                    (124, "timed_out", "timeout")
+                };
+                let value = json(&output, code, status);
+                assert_eq!(value["error"]["kind"], kind);
+                assert!(value["error"]["provider_exit_code"].is_null());
+                if traced {
+                    assert!(
+                        fs::read_to_string(&trace)
+                            .unwrap()
+                            .contains("\"activity_id\":\"partial-ready\""),
+                        "partial events were not observed: with_message={with_message}, cancel={cancel}"
+                    );
+                }
+                let has_partial = traced && with_message;
+                assert_eq!(value["text"], if has_partial { partial } else { "" });
+                assert_eq!(
+                    value["session_id"],
+                    if traced {
+                        serde_json::json!("codex-test-thread")
+                    } else {
+                        Value::Null
+                    }
+                );
+                assert!(value["usage"].is_null());
+                assert!(value["cost_usd"].is_null());
+                assert_eq!(value["structured_output_present"], has_partial);
+                assert_eq!(
+                    value["structured_output"],
+                    if has_partial {
+                        serde_json::json!({"answer":42})
+                    } else {
+                        Value::Null
+                    }
+                );
+                assert_eq!(value["answer_schema_validation"], "not_performed");
+            }
+        }
+    }
 }
 
 #[test]

@@ -28,6 +28,18 @@ pub fn native_args(run: &RunArgs) -> Result<(), RunError> {
             return Err(RunError::invalid(format!("native option {name} {reason}")));
         }
 
+        // An attached value already satisfies these recognized Claude aliases.
+        if run.provider == Provider::Claude
+            && !token.starts_with("--")
+            && token
+                .char_indices()
+                .skip(1)
+                .find(|(_, letter)| matches!(letter, 'd' | 'w' | 'n'))
+                .is_some_and(|(offset, letter)| offset + letter.len_utf8() < token.len())
+        {
+            index += 1;
+            continue;
+        }
         if run.provider == Provider::Codex
             && !token.starts_with("--")
             && let Some((letter, offset)) =
@@ -115,7 +127,7 @@ fn claude_conflict(run: &RunArgs, name: &str, token: &str) -> Option<&'static st
             if !token.starts_with("--") {
                 for letter in token[1..].chars() {
                     match letter {
-                        'd' | 'w' => break, // The rest can be an attached option value.
+                        'd' | 'w' | 'n' => break, // The rest can be an attached option value.
                         'p' | 'r' | 'c' | 'h' | 'v' => {
                             return Some(
                                 "contains a reserved prompt, session, help, or version option",

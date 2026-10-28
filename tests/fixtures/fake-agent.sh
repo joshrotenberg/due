@@ -24,6 +24,27 @@ while [ "$#" -gt 0 ]; do
 done
 if [ -n "$schema" ]; then /bin/cat "$schema" > "$DUE_TEST_DIR/schema"; fi
 
+# Incomplete Codex turns: received messages are evidence, not a final answer.
+case "$DUE_TEST_MODE" in
+    codex_partial_*|codex_no_message_*)
+        printf '%s\n' '{"type":"thread.started","thread_id":"codex-test-thread"}'
+        printf '%s\n' '{"type":"turn.started"}'
+        case "$DUE_TEST_MODE" in
+            codex_partial_*)
+                printf '%s\n' '{"type":"item.completed","item":{"id":"earlier","type":"agent_message","text":"EARLIER MESSAGE"}}'
+                partial_text='"SYNTHETIC PARTIAL ANSWER"'
+                printf '{"type":"item.completed","item":{"id":"partial","type":"agent_message","text":%s}}\n' "${DUE_TEST_PARTIAL_TEXT:-$partial_text}"
+                ;;
+        esac
+        # This later tool text must never be substituted for assistant text.
+        printf '%s\n' '{"type":"item.completed","item":{"id":"partial-ready","type":"command_execution","command":"SYNTHETIC COMMAND","aggregated_output":"SYNTHETIC TOOL OUTPUT","status":"completed","exit_code":0}}'
+        case "$DUE_TEST_MODE" in
+            *_exit) exit 9 ;;
+            *_eof) exit 0 ;;
+        esac
+        ;;
+esac
+
 case "$DUE_TEST_MODE" in
     success_stderr) printf 'fixture progress diagnostic\n' >&2 ;;
     auth)
@@ -52,7 +73,7 @@ case "$DUE_TEST_MODE" in
         printf '%s\n' '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.01)"],"num_turns":1,"total_cost_usd":0.1273986,"session_id":"cap-session"}'
         exit 1
         ;;
-    interruptible)
+    interruptible|codex_partial_stop|codex_no_message_stop)
         # Native CLIs use SIGINT to clean up tool sessions. A successful exit
         # during that cleanup must not erase Due's latched stop reason.
         trap 'printf "SIGINT\n" > "$DUE_TEST_DIR/interrupt"; /bin/kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; exit 0' INT
