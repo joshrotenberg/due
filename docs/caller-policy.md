@@ -71,6 +71,19 @@ provider comparisons involve different model families, and equal effort labels
 do not guarantee equal compute. Honor explicit user model/provider choices and
 verify availability with the installed provider.
 
+The same prompt or path list does not prove both workers can read the same
+material. Supply a frozen inline snapshot, an exact readable file manifest, or a
+prepared diff that the granted tools can consume. Check both arms' coverage
+before interpreting the comparison; record unequal access as inconclusive. Do
+not widen permissions to force parity. When summarizing issue history, include
+material later comments so earlier statements are not presented as current.
+Evidence: [#21](https://github.com/joshrotenberg/due/issues/21),
+[#33](https://github.com/joshrotenberg/due/issues/33),
+[#39](https://github.com/joshrotenberg/due/issues/39),
+[#43](https://github.com/joshrotenberg/due/issues/43),
+[#44](https://github.com/joshrotenberg/due/issues/44) and
+[#73](https://github.com/joshrotenberg/due/issues/73).
+
 Prefer read-only diagnosis, planning or review. Mutation trials require isolated
 checkouts from the same base; never run both arms against shared mutable files
 or duplicate external actions. Use fresh artifacts and identical context, and

@@ -101,6 +101,19 @@ committed for reproducible application builds.
 Prompts always travel to the child through stdin. A prompt supplied on Due's own
 command line is still visible in Due's argv; use `--stdin` when that matters.
 
+When a comparison needs exact native CLI identity, pass `--binary` a verified
+versioned executable and record its resolved path, version and SHA-256 at launch.
+A mutable PATH alias can change mid-batch
+([#54](https://github.com/joshrotenberg/due/issues/54),
+[#75](https://github.com/joshrotenberg/due/issues/75)). Do not update provider
+installations automatically.
+
+Keep provider executable identity separate from Due build identity and from
+requested, configured and provider-reported model or effort; unreported values
+stay unknown. See the [reporting guide](dogfooding.md#keep-enough-evidence).
+Enhancement tracking remains [#1](https://github.com/joshrotenberg/due/issues/1)
+and [#2](https://github.com/joshrotenberg/due/issues/2).
+
 ### Dry runs
 
 Dry runs validate input shape, the merged task, native-option conflicts, working
