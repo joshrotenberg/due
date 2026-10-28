@@ -19,15 +19,16 @@ without that text were both emitted. This is consistent with an output-keyword
 heuristic in the published 0.163.0 source (see [Source note](#source-note)), but
 it is a bounded discrimination, not a confirmed internal root cause.
 
-## Dependency on #87
+## Relation to #87
 
-The Codex profile and the prior evidence exist only in unmerged
-[#87](https://github.com/joshrotenberg/due/pull/87). The profile was used
-unchanged from its exact head
+The Codex profile and the prior evidence come from
+[#87](https://github.com/joshrotenberg/due/pull/87). These runs used them
+unchanged from #87's head before it merged
 [`437aea5`](https://github.com/joshrotenberg/due/blob/437aea507f4f3ae3a24e4e0071558a2e2e4a845f/examples/codex-workspace-profile.json),
 SHA-256 `e68d1cf569519177243ba43eefb08e14a7e2022bcd2695bdd5ced0d1c836e903`.
 The 0.162.0 comparison below refers to
-[its evidence page](https://github.com/joshrotenberg/due/blob/437aea507f4f3ae3a24e4e0071558a2e2e4a845f/docs/native-trace-evidence.md).
+[its evidence page](../native-trace-evidence.md). #87 merged as `818e620`;
+the profile and that page are identical between `437aea5` and `818e620`.
 
 ## Environment
 
