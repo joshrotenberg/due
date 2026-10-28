@@ -17,9 +17,9 @@ describes the commit above, not the merged files.
 | --- | --- |
 | `examples/native-schema-smoke/smoke.py` | `65e676e787a0b3bbb25c47fe3cc152482dd3d30dda302be57390f631ac64cd03` |
 | `examples/node-caller/run-due.mjs` | `d431f8a2842aac301f78d04cf62bc42ca8709741ff66d680c55e7c326795d228` |
-| `schemas/minimal.schema.json` | `bee2fc28dc3135fa71dee92b4b6b0cd58632f4aa15d6b7ccaa6969c042f0910a` |
-| `schemas/dialect.schema.json` | `31cc33b6b6e1fd6b0e395d92b3d31c17d528556dc8b55f1f72a2bc0110ff3187` |
-| `schemas/keyword.schema.json` | `771324f38d2745d0dd516a0aa109b11582d0146b3b681e4003dd32eae26a14c7` |
+| `examples/native-schema-smoke/schemas/minimal.schema.json` | `bee2fc28dc3135fa71dee92b4b6b0cd58632f4aa15d6b7ccaa6969c042f0910a` |
+| `examples/native-schema-smoke/schemas/dialect.schema.json` | `31cc33b6b6e1fd6b0e395d92b3d31c17d528556dc8b55f1f72a2bc0110ff3187` |
+| `examples/native-schema-smoke/schemas/keyword.schema.json` | `771324f38d2745d0dd516a0aa109b11582d0146b3b681e4003dd32eae26a14c7` |
 | `examples/codex-workspace-profile.json` (Codex profile, unchanged) | `e68d1cf569519177243ba43eefb08e14a7e2022bcd2695bdd5ced0d1c836e903` |
 | Caller-owned Claude profile, exact option set from the harness README | `cee13599a688f37a2284598f15b84a80876e2e7ef7f1f353ea405b98734b648d` |
 
@@ -32,26 +32,32 @@ the harness README, written verbatim.
 | --- | --- |
 | Due | `due 0.1.0`, installed `~/.cargo/bin/due`, a symlink to the main checkout's `target/release/due` |
 | Due executable SHA-256 | `e345866de1ddebb40e51b147982778a275d367ba8ccd2088e63e5ca4864763d2` |
-| Due source | Main `3a5ad50`; binary built in that clean checkout 75 s after the commit, embeds rustc `b940084d7` (1.99.0). A rebuild of the same source in another directory was not byte-identical, so the source match is inferred, not reproduced. |
+| Due source | Inferred as main `3a5ad50`, not demonstrated: the binary's mtime is 75 s after that commit's timestamp, the checkout it lives in is clean at `3a5ad50`, and it embeds rustc `b940084d7` (1.99.0). A local rebuild of the same Rust source in another directory produced a different hash. Build log, hashes and timestamps are retained locally. |
 | Claude Code | `2.1.312 (Claude Code)`, PATH `~/.local/bin/claude` |
 | Codex CLI | `codex-cli 0.163.0`, PATH `~/.local/bin/codex` |
 | Host | macOS 27.0.1 (26A434), arm64 |
 | Caller tooling | Python 3.13.0, `jsonschema` 4.26.0, Node.js 26.12.0 |
 | Model / effort | Not requested; observed identity unknown |
 
-Both providers used existing authentication and settings. No credential,
-configuration or permission file was edited. The workspace was a fresh
+Both providers used existing authentication and settings. The caller made no
+manual change to credential, configuration or permission files; that is a caller
+report, not an audited before/after comparison. The filesystem check below
+covers only the disposable workspace. The workspace was a fresh
 disposable Git repository with one committed file; the artifact parent was a
 separate mode-0700 directory outside it.
 
 ## Procedure
 
 1. Offline harness checks at `437aea5`: 11 smoke tests, 7 offline-validator
-   tests and the fixture `node --check` passed.
-2. For each provider and case: one `--dry-run` plan with a fresh artifact path,
-   then one `--live` turn with another fresh path. Six plans and six live turns
-   in total, run sequentially by the caller. No retries.
-3. Independent verification with a separate caller script, outside the harness:
+   tests and the fixture `node --check` passed (caller-run; a rerun's output
+   is retained locally).
+2. For each provider and case: one `--dry-run` invocation with a fresh artifact
+   path, then one `--live` invocation with another fresh path. The harness plans
+   again before each live launch, so there were twelve plans in total (six
+   standalone, six pre-live) and six live turns, run sequentially by the caller.
+   Neither the caller nor the harness retried any probe.
+3. Independent verification with a separate caller script, outside the harness
+   (script and output retained locally):
    - saved `schema.original.json` and the request's schema file hash-match the
      `437aea5` schema;
    - saved request `native_args` equal the profile's `native_args`;
@@ -68,7 +74,7 @@ separate mode-0700 directory outside it.
 
 ## Results
 
-All six plans exited 0 without launching a provider. Live outcomes:
+All twelve plans exited 0 without launching a provider. Live outcomes:
 
 | Case | Claude Code 2.1.312 | Codex CLI 0.163.0 |
 | --- | --- | --- |
@@ -84,7 +90,13 @@ rejection. The harness's own `answer-validation.json` agreed with the
 independent check in every case; `native_compatibility` stayed
 `not_established_by_harness`.
 
-Codex turns reported no activities. Each successful Claude turn reported one
+Codex turns reported no activities. Every Codex trace has one `provider_error`
+record at sequence 5: the native `error` item carrying an under-development
+feature warning, which Due reports as a diagnostic while keeping the turn
+outcome. The Codex keyword turn has a second `provider_error` record for the
+schema rejection, and its stderr contains repeated MCP HTTP transport connection
+failures from Codex's inherited MCP configuration; the profile does not disable
+inherited MCP servers. Each successful Claude turn reported one
 completed `StructuredOutput` tool call, which is the native mechanism behind
 `--json-schema`; no other tool activity was observed. Trace observations are
 not a complete tool or permission audit.
@@ -100,8 +112,10 @@ under strict structured output.
 ## Limitations
 
 - One turn per cell on one machine. No frequency, model or effort claim.
-- A valid answer shows the schema was accepted and the observed answer satisfies
-  it. It does not show that the provider enforced `not` or any other keyword.
+- Acceptance evidence is the successful live invocation with the supplied
+  schema. Independent validation shows only that the observed answer conforms.
+  The prompt asks for the valid object directly, so neither shows that the
+  provider enforced `not` or any other keyword.
 - The rejections are attributed by their native diagnostics, which name the
   dialect URI and the `not` keyword. They are not evidence about other keywords
   or dialect URIs.
