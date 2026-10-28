@@ -1,0 +1,3 @@
+# Optional caller examples only; not a Due runtime dependency.
+jsonschema==4.26.0
+referencing==0.37.0
