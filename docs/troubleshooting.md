@@ -93,6 +93,23 @@ selected by `cli_auth_credentials_store`. Treat either storage form as secret.
 That documentation describes storage and commands; it does not establish which
 commands can execute in a particular host sandbox. Due does not manage credentials.
 
+An explicit weekly/usage-limit response indicates native account quota. Distinguish
+it from expired authentication, the restricted-host credential access above and
+[task sandbox denials](#did-native-preparation-or-task-permissions-fail). Preserve
+the failure and absent-answer evidence and leave the requested review pending.
+Do not automatically reauthenticate, retry, switch providers or change permissions
+([#21](https://github.com/joshrotenberg/due/issues/21),
+[#86](https://github.com/joshrotenberg/due/issues/86)).
+[#73](https://github.com/joshrotenberg/due/issues/73) remains an inconclusive
+host-startup comparison, not proof of expired credentials.
+
+An expired Claude OAuth session currently reports `error.kind: "provider"` rather
+than `"authentication"` ([#98](https://github.com/joshrotenberg/due/issues/98)).
+Until that is fixed, callers must read `error.message` to identify this failure;
+keep the review pending and follow the same restrictions on automatic actions.
+Use the existing [result checks](cli.md#results-and-errors) and
+[progress and trace checks](cli.md#live-progress) when interpreting the evidence.
+
 ## Did native preparation or task permissions fail?
 
 Keep `due run --help` and the installed provider's `exec --help` /
