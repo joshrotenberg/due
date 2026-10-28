@@ -9,6 +9,8 @@ schedulers and MCP servers remain outside the freeze.
 Use [installation](docs/install.md) for local setup and
 [dogfooding](docs/dogfooding.md) for issue reports. Keep changes small and include
 a reproduction or explanation of the behavior they protect.
+Use [troubleshooting](docs/troubleshooting.md) for layer-specific recovery and
+repairing an existing frozen checkout build without updating the installation.
 
 ```sh
 cargo fmt --all -- --check
@@ -33,6 +35,27 @@ node --test examples/node-caller/caller.test.mjs
 
 These tests launch a fake Due executable and make no provider calls. Node is not
 a dependency of the Due binary or its plugin.
+
+The optional [offline validator](examples/offline-validation/README.md) and
+[native schema smoke](examples/native-schema-smoke/README.md) have provider-free
+Python suites. In a caller-chosen environment with the pinned optional
+[requirements](examples/offline-validation/requirements.txt) already available:
+
+```sh
+python3 -B -m unittest discover -s examples/offline-validation -p 'test_*.py' -v
+python3 -B -m unittest discover -s examples/native-schema-smoke -p 'test_*.py' -v
+node --check examples/native-schema-smoke/fake-due.fixture.mjs
+```
+
+The smoke suite uses the existing Node launcher and a fake Due executable; it
+does not run native models. CI installs the optional Python dependencies in its
+own job, retaining the default Rust/MSRV and Node matrices. These examples add
+no runtime dependency, command, feature or workflow engine.
+
+The [native control audit](docs/native-control-audit.md) and
+[trace evidence](docs/native-trace-evidence.md) retain historical, versioned
+caller observations. Extracting them onto this stable branch does not revalidate
+them on current provider versions or authorize updating an installed frozen build.
 
 Keep Cargo.lock committed and preserve the exact wrapper Git revisions. Review
 dependency updates separately. The crate has `publish = false`; source readiness

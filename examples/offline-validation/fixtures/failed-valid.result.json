@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "provider": "codex",
+  "status": "failed",
+  "text": "",
+  "structured_output": {
+    "summary": "Synthetic review.",
+    "verdict": "approve"
+  },
+  "structured_output_present": true,
+  "answer_schema_validation": "not_performed",
+  "session_id": null,
+  "usage": null,
+  "cost_usd": null,
+  "duration_ms": 1,
+  "error": {
+    "kind": "provider",
+    "message": "Synthetic execution failure after an answer.",
+    "provider_exit_code": 7
+  }
+}
