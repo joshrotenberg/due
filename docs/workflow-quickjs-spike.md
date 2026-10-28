@@ -194,6 +194,10 @@ GitHub Actions has run successfully. Main and the installed CLI were unchanged.
 
 ## Reference points
 
+An [optional Squint authoring proof](workflow-squint-spike.md) compiles `.cljs`
+into modules for this unchanged runtime, including bidirectional JavaScript
+composition. It remains an external build step and does not add a CLI language.
+
 - [rquickjs async integration](https://docs.rs/rquickjs/0.14.0/rquickjs/)
 - [AsyncRuntime controls](https://docs.rs/rquickjs/0.14.0/rquickjs/struct.AsyncRuntime.html)
 - [Lua composition and ownership](workflow-lua-composition.md)
