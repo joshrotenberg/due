@@ -107,6 +107,11 @@ Both hosts use the same local `due-local` marketplace. Its default root is
 `$XDG_DATA_HOME/due`, or `~/.local/share/due` when XDG_DATA_HOME is unset. Override
 it with `--install-dir /absolute/path/to/due`. Use `--claude-bin` or `--codex-bin`
 for a nonstandard host executable. Use identical options for preview and apply.
+`--install-dir` selects package files, not a separate host profile: apply still
+registers the plugin in the selected hosts' user configuration. For isolated
+acceptance, launch Due with a temporary child-process home and separate native
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME` directories, and inspect those hosts' inventories.
+
 Keep the managed directory in place; it replaces the checkout as the plugin's
 source. `init` neither copies nor replaces the Due binary, which must remain on
 PATH in the host's process environment.
