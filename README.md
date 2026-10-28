@@ -180,6 +180,8 @@ due trace summarize run.jsonl --output json
   positive and negative reports, and bounded A/B comparisons.
 - [Node caller example](examples/node-caller/README.md): capture one run safely
   and validate a task-specific review answer using Node built-ins.
+- [JavaScript workflow spike](docs/workflow-quickjs-spike.md): opt-in rquickjs
+  experiment on this branch, its acceptance results, and comparison limits.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development workflow and checks.
 - `due run --help` and `due skills show NAME`: the authoritative reference for
   the installed version.

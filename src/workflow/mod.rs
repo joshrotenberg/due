@@ -7,6 +7,8 @@ mod host;
 #[cfg(feature = "workflow-lua-spike")]
 mod lua;
 mod process;
+#[cfg(feature = "workflow-quickjs-spike")]
+mod quickjs;
 #[cfg(feature = "workflow-spike")]
 mod script;
 use bundle::Bundle;
@@ -28,6 +30,8 @@ pub(crate) const fn trace_limit() -> usize {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Language {
+    #[cfg(feature = "workflow-quickjs-spike")]
+    JavaScript,
     #[cfg(feature = "workflow-spike")]
     Rhai,
     #[cfg(feature = "workflow-lua-spike")]
@@ -36,6 +40,10 @@ pub enum Language {
 impl Language {
     fn from_path(path: &Path) -> Result<Self, String> {
         match path.extension().and_then(|e| e.to_str()) {
+            #[cfg(feature = "workflow-quickjs-spike")]
+            Some("js") => Ok(Self::JavaScript),
+            #[cfg(not(feature = "workflow-quickjs-spike"))]
+            Some("js") => Err("JavaScript language unavailable in this build".into()),
             #[cfg(feature = "workflow-spike")]
             Some("rhai") => Ok(Self::Rhai),
             #[cfg(feature = "workflow-lua-spike")]
@@ -48,11 +56,13 @@ impl Language {
             Some("rhai") => Err("entry/module language unavailable in this build".into()),
             #[cfg(not(feature = "workflow-lua-spike"))]
             Some("lua") => Err("entry/module language unavailable in this build".into()),
-            _ => Err("entry/module must have .rhai, .lua or .fnl extension".into()),
+            _ => Err("entry/module must have .rhai, .lua, .fnl or .js extension".into()),
         }
     }
     fn patterns(self) -> &'static str {
         match self {
+            #[cfg(feature = "workflow-quickjs-spike")]
+            Self::JavaScript => include_str!("../../assets/workflow/patterns-v1.js"),
             #[cfg(feature = "workflow-spike")]
             Self::Rhai => include_str!("../../assets/workflow/patterns-v1.rhai"),
             #[cfg(feature = "workflow-lua-spike")]
@@ -61,6 +71,8 @@ impl Language {
     }
     fn check(self, bundle: &Bundle) -> Result<(), String> {
         match self {
+            #[cfg(feature = "workflow-quickjs-spike")]
+            Self::JavaScript => quickjs::check(bundle),
             #[cfg(feature = "workflow-spike")]
             Self::Rhai => script::compile(
                 &script::engine(None, Arc::new(AtomicBool::new(false))),
@@ -73,6 +85,8 @@ impl Language {
     }
     async fn run(self, host: SharedHost) -> Result<Value, String> {
         match self {
+            #[cfg(feature = "workflow-quickjs-spike")]
+            Self::JavaScript => quickjs::run(host).await,
             #[cfg(feature = "workflow-spike")]
             Self::Rhai => {
                 let runtime = tokio::runtime::Handle::current();

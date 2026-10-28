@@ -19,6 +19,12 @@ struct Skill {
 }
 
 const SKILLS: &[Skill] = &[
+    #[cfg(feature = "workflow-quickjs-spike")]
+    Skill {
+        name: "workflow-quickjs",
+        description: "Author an experimental JavaScript workflow using scoped Due capabilities and strict JSON.",
+        content: include_str!("../embedded-skills/workflow-quickjs/SKILL.md"),
+    },
     #[cfg(feature = "workflow-fennel-spike")]
     Skill {
         name: "workflow-fennel",

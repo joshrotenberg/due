@@ -1,0 +1,91 @@
+{
+  "schema_version": 2,
+  "entry": "main.js",
+  "input_schema": "input.schema.json",
+  "output_schema": "output.schema.json",
+  "max_runs": 7,
+  "max_concurrency": 2,
+  "profiles": {
+    "workspace_a": {
+      "request": {
+        "schema_version": 1,
+        "provider": "codex",
+        "cwd": "workspace-a",
+        "schema": "answer.schema.json",
+        "native_args": [
+          "-c",
+          "sandbox_mode=\"workspace-write\"",
+          "-c",
+          "approval_policy=\"never\"",
+          "-c",
+          "agents.enabled=false",
+          "-c",
+          "features.multi_agent_v2=false",
+          "-c",
+          "sandbox_workspace_write.network_access=false",
+          "-c",
+          "sandbox_workspace_write.writable_roots=[]",
+          "-c",
+          "sandbox_workspace_write.exclude_slash_tmp=true",
+          "-c",
+          "sandbox_workspace_write.exclude_tmpdir_env_var=true"
+        ]
+      }
+    },
+    "workspace_b": {
+      "request": {
+        "schema_version": 1,
+        "provider": "codex",
+        "cwd": "workspace-b",
+        "schema": "answer.schema.json",
+        "native_args": [
+          "-c",
+          "sandbox_mode=\"workspace-write\"",
+          "-c",
+          "approval_policy=\"never\"",
+          "-c",
+          "agents.enabled=false",
+          "-c",
+          "features.multi_agent_v2=false",
+          "-c",
+          "sandbox_workspace_write.network_access=false",
+          "-c",
+          "sandbox_workspace_write.writable_roots=[]",
+          "-c",
+          "sandbox_workspace_write.exclude_slash_tmp=true",
+          "-c",
+          "sandbox_workspace_write.exclude_tmpdir_env_var=true"
+        ]
+      }
+    },
+    "synthesizer": {
+      "request": {
+        "schema_version": 1,
+        "provider": "codex",
+        "cwd": ".",
+        "schema": "answer.schema.json",
+        "native_args": [
+          "-c",
+          "sandbox_mode=\"read-only\"",
+          "-c",
+          "approval_policy=\"never\"",
+          "-c",
+          "agents.enabled=false",
+          "-c",
+          "features.multi_agent_v2=false",
+          "-c",
+          "sandbox_workspace_write.network_access=false",
+          "-c",
+          "sandbox_workspace_write.writable_roots=[]",
+          "-c",
+          "sandbox_workspace_write.exclude_slash_tmp=true",
+          "-c",
+          "sandbox_workspace_write.exclude_tmpdir_env_var=true"
+        ]
+      }
+    }
+  },
+  "modules": {
+    "local/pipeline": "pipeline.js"
+  }
+}

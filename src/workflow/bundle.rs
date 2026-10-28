@@ -38,9 +38,9 @@ pub struct Bundle {
     pub language: Language,
     pub entry: String,
     pub modules: BTreeMap<String, String>,
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     pub entry_name: String,
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     pub module_names: BTreeMap<String, String>,
     #[cfg(feature = "workflow-fennel-spike")]
     pub source_maps: BTreeMap<String, Vec<Option<(String, usize)>>>,
@@ -120,10 +120,17 @@ impl Bundle {
         };
         let language = Language::from_path(&manifest.entry)?;
         if manifest.schema_version == 2 && manifest.entry.extension().is_none_or(|e| e == "rhai") {
-            return Err("manifest v2 returned-function entries require Lua or Fennel".into());
+            return Err(
+                "manifest v2 returned-function entries require Lua, Fennel or JavaScript".into(),
+            );
         }
-        if manifest.schema_version != 2 && manifest.entry.extension().is_some_and(|e| e == "fnl") {
-            return Err("Fennel entries require manifest schema_version 2".into());
+        if manifest.schema_version != 2
+            && manifest
+                .entry
+                .extension()
+                .is_some_and(|e| e == "fnl" || e == "js")
+        {
+            return Err("Fennel and JavaScript entries require manifest schema_version 2".into());
         }
         let entry_name = manifest.entry.to_string_lossy().into_owned();
         let entry = snapshot_file(&manifest.entry)?;
@@ -216,9 +223,9 @@ impl Bundle {
             language,
             entry,
             modules,
-            #[cfg(feature = "workflow-lua-spike")]
+            #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
             entry_name,
-            #[cfg(feature = "workflow-lua-spike")]
+            #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
             module_names,
             #[cfg(feature = "workflow-fennel-spike")]
             source_maps: BTreeMap::new(),

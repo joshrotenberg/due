@@ -8,7 +8,11 @@ mod skills;
 mod telemetry;
 mod trace_summary;
 mod validate;
-#[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
+#[cfg(any(
+    feature = "workflow-spike",
+    feature = "workflow-lua-spike",
+    feature = "workflow-quickjs-spike"
+))]
 mod workflow;
 
 use std::{
@@ -35,7 +39,11 @@ async fn main() -> ExitCode {
         Command::Skills(args) => skills::execute(&args),
         Command::Schema(args) => contracts::execute(&args),
         Command::Trace(args) => trace_summary::execute(&args),
-        #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
+        #[cfg(any(
+            feature = "workflow-spike",
+            feature = "workflow-lua-spike",
+            feature = "workflow-quickjs-spike"
+        ))]
         Command::Workflow(args) => workflow::execute(args).await,
     }
 }

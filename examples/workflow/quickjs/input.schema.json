@@ -1,0 +1,1 @@
+{"type":"object","required":["task"],"properties":{"task":{"type":"string"}},"additionalProperties":false}

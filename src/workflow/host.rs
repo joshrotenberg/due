@@ -42,12 +42,12 @@ struct Scope {
     parent: Option<usize>,
     group: String,
     component: usize,
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     depth: usize,
     phase: String,
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     closed: bool,
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     location: Option<String>,
 }
 struct Run {
@@ -60,7 +60,7 @@ struct Run {
 }
 pub struct Host {
     pub bundle: Bundle,
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     pub script_location: Option<String>,
     pub artifacts: PathBuf,
     events: File,
@@ -95,7 +95,7 @@ impl SharedHost {
             scope: 0,
             state: Arc::new(Mutex::new(Host {
                 bundle,
-                #[cfg(feature = "workflow-lua-spike")]
+                #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
                 script_location: None,
                 artifacts,
                 events,
@@ -106,12 +106,21 @@ impl SharedHost {
                     parent: None,
                     group: "root".into(),
                     component: 0,
-                    #[cfg(feature = "workflow-lua-spike")]
+                    #[cfg(any(
+                        feature = "workflow-lua-spike",
+                        feature = "workflow-quickjs-spike"
+                    ))]
                     depth: 0,
                     phase: String::new(),
-                    #[cfg(feature = "workflow-lua-spike")]
+                    #[cfg(any(
+                        feature = "workflow-lua-spike",
+                        feature = "workflow-quickjs-spike"
+                    ))]
                     closed: false,
-                    #[cfg(feature = "workflow-lua-spike")]
+                    #[cfg(any(
+                        feature = "workflow-lua-spike",
+                        feature = "workflow-quickjs-spike"
+                    ))]
                     location: None,
                 }],
                 used: HashSet::new(),
@@ -126,18 +135,21 @@ impl SharedHost {
             changed: Arc::new(Notify::new()),
         }
     }
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     pub fn in_scope(&self, scope: usize) -> Self {
         Self {
             scope,
             ..self.clone()
         }
     }
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     pub fn scope_id(&self) -> usize {
         self.scope
     }
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(
+        feature = "workflow-lua-spike",
+        all(test, feature = "workflow-quickjs-spike")
+    ))]
     pub fn location(&self, location: String, fallback: bool) {
         let mut h = self.lock();
         let site = &mut h.scopes[self.scope].location;
@@ -150,7 +162,10 @@ impl SharedHost {
         let mut h = self.lock();
         h.fail_at(self.scope, error)
     }
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(
+        feature = "workflow-lua-spike",
+        all(test, feature = "workflow-quickjs-spike")
+    ))]
     pub fn abandon_group(&self) {
         let mut h = self.lock();
         // A dropped future during signal/collector shutdown is cleanup, not a
@@ -163,7 +178,7 @@ impl SharedHost {
         }
         self.changed.notify_waiters();
     }
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     pub fn open_scopes(&self, group: &str, count: usize) -> Result<Vec<Self>, String> {
         self.effect(|h| {
             bundle::name(group)?;
@@ -198,7 +213,7 @@ impl SharedHost {
             Ok(result)
         })
     }
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     pub async fn finish_scope(&self) -> Result<(), String> {
         {
             let mut h = self.lock();
@@ -247,6 +262,10 @@ impl SharedHost {
     ) -> Result<T, String> {
         let mut h = self.lock();
         h.running()?;
+        #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
+        if h.scopes[self.scope].closed {
+            return Err(h.fail_at(self.scope, "function scope is closed".into()));
+        }
         action(&mut h).map_err(|e| h.fail_at(self.scope, e))
     }
     pub fn phase(&self, phase: &str) -> Result<(), String> {
@@ -269,6 +288,10 @@ impl SharedHost {
     pub fn start(&self, group: &str, values: Vec<Value>) -> Result<Vec<RunHandle>, String> {
         let mut h = self.lock();
         h.running()?;
+        #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
+        if h.scopes[self.scope].closed {
+            return Err(h.fail_at(self.scope, "function scope is closed".into()));
+        }
         let validated = (|| {
             bundle::name(group)?;
             if values.is_empty() || h.used.len() + values.len() > h.bundle.manifest.max_runs {
@@ -448,6 +471,7 @@ impl SharedHost {
         self.lock().runs[index].cancel.store(true, Ordering::SeqCst);
         self.wait(handle).await
     }
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-spike"))]
     pub async fn parallel(&self, group: &str, jobs: Vec<Value>) -> Result<Value, String> {
         let handles = self.start(group, jobs)?;
         let mut outcomes = Vec::new();
@@ -466,7 +490,7 @@ impl SharedHost {
                 if let Err(e) = &evaluated {
                     h.fail_at(self.scope, e.clone());
                 }
-                #[cfg(feature = "workflow-lua-spike")]
+                #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
                 if h.scopes.iter().skip(1).any(|s| !s.closed) {
                     h.fail_at(
                         self.scope,
@@ -483,7 +507,7 @@ impl SharedHost {
         }
         self.join_scope(None).await;
         let mut h = self.lock();
-        #[cfg(feature = "workflow-lua-spike")]
+        #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
         for scope in (1..h.scopes.len()).rev() {
             if !h.scopes[scope].closed {
                 h.close_scope(scope);
@@ -547,7 +571,7 @@ fn synthetic(error: String) -> process::Collected {
     }
 }
 impl Host {
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     fn has_open_descendants(&self, scope: usize) -> bool {
         self.scopes.iter().any(|s| {
             if s.closed {
@@ -563,7 +587,7 @@ impl Host {
             false
         })
     }
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     fn close_scope(&mut self, scope: usize) {
         self.scopes[scope].closed = true;
         if let Err(e) = self.scope_event(scope, "scope_finished", json!({})) {
@@ -583,7 +607,7 @@ impl Host {
         Ok(())
     }
     fn fail_at(&mut self, scope: usize, error: String) -> String {
-        #[cfg(feature = "workflow-lua-spike")]
+        #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
         if self.stop.cause().is_none() {
             self.script_location = self.scopes[scope].location.clone();
         }
@@ -632,7 +656,7 @@ impl Host {
     }
     fn record(&mut self, index: usize, collected: process::Collected) {
         if let Some(cause) = &collected.stop_cause {
-            #[cfg(feature = "workflow-lua-spike")]
+            #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
             if self.script_location.is_none() {
                 self.script_location = self.scopes[self.runs[index].scope].location.clone();
             }
@@ -684,7 +708,7 @@ impl Host {
 pub(super) mod tests {
     use super::*;
 
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     pub(crate) fn fixture() -> (SharedHost, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let bundle = Bundle {
@@ -693,7 +717,10 @@ pub(super) mod tests {
                 "output_schema":"schema.json","max_runs":1,"max_concurrency":1,"profiles":{}
             }))
             .unwrap(),
+            #[cfg(feature = "workflow-lua-spike")]
             language: super::super::Language::Lua,
+            #[cfg(not(feature = "workflow-lua-spike"))]
+            language: super::super::Language::JavaScript,
             entry: String::new(),
             entry_name: "main.lua".into(),
             modules: Default::default(),
@@ -715,7 +742,7 @@ pub(super) mod tests {
         (host, dir)
     }
 
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     #[tokio::test]
     async fn unclosed_descendants_fail_before_parent_closure_and_outer_finish_rejects_orphans() {
         for finish_parent in [false, true] {
@@ -752,7 +779,7 @@ pub(super) mod tests {
         }
     }
 
-    #[cfg(feature = "workflow-lua-spike")]
+    #[cfg(any(feature = "workflow-lua-spike", feature = "workflow-quickjs-spike"))]
     #[tokio::test]
     async fn dropped_scope_join_returns_task_until_outer_cleanup_before_closure() {
         let (host, dir) = fixture();

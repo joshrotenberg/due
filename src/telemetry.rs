@@ -129,11 +129,19 @@ pub fn start(run: &RunArgs) -> Result<(Progress, Option<TraceGuard>), RunError> 
     let dropped = Arc::new(AtomicU64::new(0));
     let worker_failed = Arc::clone(&failed);
     let stderr_format = run.trace;
-    #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
+    #[cfg(any(
+        feature = "workflow-spike",
+        feature = "workflow-lua-spike",
+        feature = "workflow-quickjs-spike"
+    ))]
     let trace_limit = run
         .workflow_trace_limit
         .then_some(crate::workflow::trace_limit());
-    #[cfg(not(any(feature = "workflow-spike", feature = "workflow-lua-spike")))]
+    #[cfg(not(any(
+        feature = "workflow-spike",
+        feature = "workflow-lua-spike",
+        feature = "workflow-quickjs-spike"
+    )))]
     let trace_limit = None;
     thread::Builder::new()
         .name("due-trace".into())

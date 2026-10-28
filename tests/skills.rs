@@ -5,15 +5,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
-#[cfg(not(any(feature = "workflow-spike", feature = "workflow-lua-spike")))]
-const SKILLS: [&str; 3] = ["run", "contracts", "observe"];
-#[cfg(all(
-    any(feature = "workflow-spike", feature = "workflow-lua-spike"),
-    not(feature = "workflow-fennel-spike")
-))]
-const SKILLS: [&str; 4] = ["run", "contracts", "observe", "workflow"];
-#[cfg(feature = "workflow-fennel-spike")]
-const SKILLS: [&str; 5] = ["run", "contracts", "observe", "workflow", "workflow-fennel"];
+const SKILLS: &[&str] = &[
+    "run",
+    "contracts",
+    "observe",
+    #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
+    "workflow",
+    #[cfg(feature = "workflow-fennel-spike")]
+    "workflow-fennel",
+    #[cfg(feature = "workflow-quickjs-spike")]
+    "workflow-quickjs",
+];
 
 struct Standalone {
     root: TempDir,
@@ -115,7 +117,7 @@ fn relocated_binary_lists_embedded_skills_without_provider_or_assets() {
             })
             .collect();
         assert_eq!(skills.len(), SKILLS.len());
-        assert_eq!(names, BTreeSet::from(SKILLS));
+        assert_eq!(names, SKILLS.iter().copied().collect());
         catalogs.push(catalog);
     }
     assert!(catalogs.windows(2).all(|pair| pair[0] == pair[1]));
@@ -142,7 +144,7 @@ fn text_catalog_lists_names_and_descriptions_and_defaults_to_list() {
 #[test]
 fn show_returns_complete_canonical_documents_in_text_and_json() {
     let standalone = Standalone::new();
-    for name in SKILLS {
+    for &name in SKILLS {
         let expected = canonical(name);
         let frontmatter = expected
             .strip_prefix("---\n")

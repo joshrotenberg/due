@@ -69,7 +69,11 @@ pub fn resolve(input: RunCommand) -> Result<RunArgs, RunError> {
     resolve_loaded(input, request)
 }
 
-#[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
+#[cfg(any(
+    feature = "workflow-spike",
+    feature = "workflow-lua-spike",
+    feature = "workflow-quickjs-spike"
+))]
 pub(crate) fn workflow_profile(value: &serde_json::Value) -> Result<RunArgs, String> {
     use clap::Parser;
     let request: Request = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
@@ -171,7 +175,11 @@ fn resolve_loaded(input: RunCommand, request: Request) -> Result<RunArgs, RunErr
         trace_file: input.trace_file,
         trace_interval: input.trace_interval,
         trace_detail: input.trace_detail,
-        #[cfg(any(feature = "workflow-spike", feature = "workflow-lua-spike"))]
+        #[cfg(any(
+            feature = "workflow-spike",
+            feature = "workflow-lua-spike",
+            feature = "workflow-quickjs-spike"
+        ))]
         workflow_trace_limit: input.workflow_trace_limit,
         native_args,
     })

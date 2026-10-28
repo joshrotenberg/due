@@ -8,11 +8,13 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [features]
+workflow-quickjs-spike = ["dep:rquickjs", "dep:jsonschema", "dep:libc"]
 workflow-spike = ["dep:rhai", "dep:jsonschema", "dep:libc"]
 workflow-lua-spike = ["dep:mlua", "dep:jsonschema", "dep:libc"]
 workflow-fennel-spike = ["workflow-lua-spike"]
 
 [dependencies]
+rquickjs = { version = "=0.14.0", optional = true, default-features = false, features = ["std", "futures", "loader"] }
 mlua = { version = "=0.12.2", optional = true, default-features = false, features = ["lua54", "vendored", "async", "serde"] }
 rhai = { version = "=1.26.1", optional = true, default-features = false, features = ["std", "internals"] }
 jsonschema = { version = "=0.56.0", optional = true, default-features = false }
