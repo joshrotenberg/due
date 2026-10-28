@@ -91,9 +91,11 @@ independent check in every case; `native_compatibility` stayed
 `not_established_by_harness`.
 
 Codex turns reported no activities. Every Codex trace has one `provider_error`
-record at sequence 5: the native `error` item carrying an under-development
-feature warning, which Due reports as a diagnostic while keeping the turn
-outcome. The Codex keyword turn has a second `provider_error` record for the
+record at sequence 5 that did not fail the turn. These turns did not capture
+native stdout, so its source is not verified here. In the same-day
+denied-command captures ([#96](https://github.com/joshrotenberg/due/pull/96)) on the same Codex
+version, every stream carried a native `error` item with an under-development
+feature warning at that position, which suggests the same source. The Codex keyword turn has a second `provider_error` record for the
 schema rejection, and its stderr contains repeated MCP HTTP transport connection
 failures from Codex's inherited MCP configuration; the profile does not disable
 inherited MCP servers. Each successful Claude turn reported one
