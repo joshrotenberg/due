@@ -4,14 +4,17 @@ Snapshot: 2026-10-28. Tracks [#7](https://github.com/joshrotenberg/due/issues/7)
 Evidence and testing of the existing optional caller example; no Due runtime,
 wrapper pin, installed CLI, schema or permission change.
 
-## Dependency on #87
+## Relation to #87
 
-The harness, schemas and Codex profile exist only in unmerged
+The harness, schemas and Codex profile come from
 [#87](https://github.com/joshrotenberg/due/pull/87). They were used unchanged
-from a detached worktree at its exact head
+from a detached worktree at #87's head before it merged
 [`437aea5`](https://github.com/joshrotenberg/due/tree/437aea507f4f3ae3a24e4e0071558a2e2e4a845f/examples/native-schema-smoke).
-If #87 changes the harness, schemas or profile after that commit, this page
-describes the commit above, not the merged files.
+#87 merged as `818e620`. `examples/native-schema-smoke/`,
+`examples/codex-workspace-profile.json`, `examples/node-caller/run-due.mjs`,
+`examples/offline-validation/` and `schemas/` are identical between `437aea5`
+and `818e620`, so this page describes the merged
+[harness](../../examples/native-schema-smoke/README.md).
 
 | Input | SHA-256 |
 | --- | --- |
