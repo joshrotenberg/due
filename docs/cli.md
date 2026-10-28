@@ -6,7 +6,7 @@ for the overview and quickstart. The installed binary is the authority for its
 own version: `due run --help`, `due skills show NAME`, and `due schema NAME`
 describe exactly what that build accepts.
 
-Each CLI invocation owns one foreground provider run; the caller and operating
+Each `due run` invocation owns one foreground provider run; the caller and operating
 system own concurrency, scheduling, and any later retry.
 
 ## Embedded guidance and contracts
@@ -43,6 +43,15 @@ The current contract concerns execution and returned data. Artifact and external
 side effects still require the caller's independent verification.
 
 ### Agent plugin
+
+`due init --dry-run` previews the bundled plugin's installation; `due init` applies
+it for both hosts, or use `--host claude` / `--host codex` for one. The selected
+host CLI must be installed. Setup writes a managed local marketplace and uses
+native plugin commands; it starts no model work and does not change the binary,
+permissions, authentication or caller policy. `--output json` returns a separate
+versioned setup report. See [installation and recovery](install.md#install-the-bundled-plugin)
+for paths, partial failures, update and migration rules.
+
 
 The skills-only plugin in [`plugin/due`](../plugin/due) provides one short
 [`delegate` skill](../plugin/due/skills/delegate/SKILL.md). It starts an agent with

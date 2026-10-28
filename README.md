@@ -45,11 +45,18 @@ installing it. The wrapper crates are pinned to Git commits, so the first build
 needs access to GitHub and crates.io. `Cargo.lock` is committed and `--locked`
 uses it as is.
 
-A skills-only agent plugin lives in [`plugin/due`](plugin/due). It adds one
-`delegate` skill that points a calling agent at the installed binary's guidance.
-It does not install the `due` binary or any provider CLI; both must already be
-on PATH. See [docs/install.md](docs/install.md) for the full installation steps,
-including the Codex plugin.
+The binary also carries the skills-only agent plugin. Install it for Claude Code,
+Codex, or both without retaining a plugin checkout:
+
+```sh
+due init --dry-run
+due init                   # Both hosts; use --host claude or --host codex for one
+```
+
+Its short `delegate` skill points agents at the installed binary's help and
+embedded guides. Due and the selected host CLI must be on PATH. Setup starts no
+model work and does not configure authentication or enable the caller trial.
+See [installation](docs/install.md) for update, migration and recovery details.
 
 ## Quickstart
 
