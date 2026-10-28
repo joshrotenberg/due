@@ -1,9 +1,10 @@
 # Install from source
 
-Due is in a private, source-only dogfooding period. Install the CLI and then the
-skills-only plugin on each machine. The plugin does not install a binary, provider,
-or credentials. Features are frozen while we collect reliability and usability
-issues.
+Due is in a private, source-only dogfooding period. Install the CLI and use its
+embedded installer for the skills-only plugin on each machine. No plugin source
+checkout is needed after building the executable. The plugin does not install a
+binary, provider, or credentials. Features are frozen while we collect reliability
+and usability issues.
 
 ## Prerequisites
 
@@ -84,33 +85,102 @@ The symlink preserves the caller's working directory. Removing the checkout or
 running `cargo clean` makes it unusable until rebuilt. To undo this setup, remove
 the symlink and restore the saved executable or use the regular Cargo install.
 
-## Install the plugin in Codex
+## Install the bundled plugin
 
-From the checkout root:
+The binary contains the portable manifest, host compatibility manifests and
+complete delegate skill. Once `due` is on PATH, run from any directory:
 
 ```sh
-codex plugin marketplace add "$PWD"
-codex plugin marketplace list
-codex plugin add due@due-dev
-codex plugin list --marketplace due-dev
+due init --dry-run
+due init
 ```
 
-If your CLI lacks `plugin add`, register the marketplace, restart the desktop app,
-choose **Due (source)** in Plugins, and install **Due** there. Start a new chat to
-load its skill. The packaged entry point is `due:delegate`; it routes to help and
-the three skills embedded in the installed binary. This setup follows the
-[OpenAI local-plugin workflow](https://developers.openai.com/plugins/build/plugins).
+The default is both Claude Code and Codex. Select one if only one host is present:
 
-Keep this checkout in place: the local marketplace points to it. Hosts can cache
-an installed plugin; edits in the checkout alone do not prove the cached skill
-was refreshed. The package follows [Agent Plugins](https://agent-plugins.org/plugin-authors/build-an-agent-plugin);
-other clients need their own supported installation flow.
+```sh
+due init --host codex --dry-run --output json
+due init --host codex
+# Or: due init --host claude
+```
 
-If moving an existing `due-dev` marketplace, inspect `marketplace list`, register
-the new checkout with `codex plugin marketplace add`, and verify its resulting
-path before reinstalling the plugin. Use the remove/add flow below if required
-by the host. A binary update needs no plugin reinstall when its entry skill is
-unchanged.
+Both hosts use the same local `due-local` marketplace. Its default root is
+`$XDG_DATA_HOME/due`, or `~/.local/share/due` when XDG_DATA_HOME is unset. Override
+it with `--install-dir /absolute/path/to/due`. Use `--claude-bin` or `--codex-bin`
+for a nonstandard host executable. Use identical options for preview and apply.
+`--install-dir` selects package files, not a separate host profile: apply still
+registers the plugin in the selected hosts' user configuration. For isolated
+acceptance, launch Due with a temporary child-process home and separate native
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME` directories, and inspect those hosts' inventories.
+
+Keep the managed directory in place; it replaces the checkout as the plugin's
+source. `init` neither copies nor replaces the Due binary, which must remain on
+PATH in the host's process environment.
+
+Dry-run reads local filesystem metadata and resolves executables, but writes no
+files and starts no host process. It reports missing selected hosts as not ready
+with exit 1. It does not prove authentication, native plugin-command support or
+host policy. Apply inspects native marketplace/plugin listings, registers the
+local marketplace when absent, and installs the delegate skill through the host
+CLI. Existing matching marketplace registrations are retained. An existing
+Claude user installation is updated; Codex uses its native `plugin add` command.
+Conflicting marketplace roots are reported instead of overwritten.
+
+No provider turn, MCP server, background service, permission change or caller
+trial is started. Native registration commands have a 30-second deadline and a
+64-KiB limit per output stream. Argument vectors are passed directly, without a
+shell. Native output received before cancellation or timeout is retained in the failed
+step; output-limit failures retain a capped prefix and mark its stream as
+truncated. Host output can include local paths; inspect it before sharing.
+
+Start a new host session or reload plugins after installation or an update. The
+entry point is `due:delegate`; it routes into the installed binary's three guides.
+Native host registration succeeding is distinct from verifying skill discovery in
+a fresh session. Codex uses the [official local-plugin workflow](https://developers.openai.com/plugins/build/plugins).
+
+### Updating and recovering setup
+
+Rebuild/install Due, then repeat `due init` with the same host and directory
+options. Package files come from that exact binary, with no runtime checkout reads
+or downloads by Due. Native hosts may cache the skill; verify discovery in a new
+session. If a host reports that the cache is unchanged, inspect its plugin manager
+and use its supported refresh flow. Binary-only guide changes do not require a
+plugin refresh when the small delegate skill is unchanged.
+
+The managed directory is identified by `.due-install.json`. Setup refuses a
+nonempty unmanaged directory, symlinked package entries or unexpected files,
+so choose an empty directory rather than pointing it at a repository or an
+existing host configuration directory. Managed package files are refreshed;
+customize a separate copy rather than editing them. A `.due-init.lock` prevents
+concurrent apply operations. After an interrupted operation, confirm no setup
+process is active before inspecting/removing a stale lock and re-running.
+
+JSON output includes `status`, `plan`, `files_written`, `completed_steps`,
+`skipped_steps`, `failed_step` and `error`, with `schema_version` and `cli_version`.
+It is a setup report, not a `due run` result. `planned` and `installed` exit 0;
+`not_ready` and `partial_install` exit 1. Cancellation exits 130 with status
+`cancelled`, after stopping the owned native setup processes. Argument errors
+exit 2. A partial installation retains package files and earlier successful host steps. Fix the
+reported prerequisite or host error, inspect existing effects, and explicitly
+re-run setup. Due does not roll back or automatically retry host operations.
+
+### Migrating a checkout-based installation
+
+`due-dev` remains the legacy source-checkout marketplace. The new managed
+installer uses `due-local`; it does not remove an existing `due-dev` registration.
+Avoid two active copies by explicitly migrating the old registration. Inspect the current host plugin
+list, remove the old Due plugin and marketplace when no longer needed, then run
+`due init` and verify only the intended delegate skill is enabled. For Codex:
+
+```sh
+codex plugin remove due@due-dev
+codex plugin marketplace remove due-dev
+due init --host codex
+```
+
+Use the Claude plugin manager's equivalent commands for a legacy Claude setup.
+Other plugins and host settings are left to the native host. The checked-in
+[`plugin/due`](../plugin/due) package remains the canonical skill/manifest source
+and can still be used by plugin authors; it is included at compile time.
 
 ## Enable the caller trial policy
 
@@ -227,23 +297,20 @@ For a **checkout symlink**, use the pull-and-build procedure in
 [checkout installation](#run-the-release-binary-from-the-checkout). Do not run
 `cargo install --force` in that mode.
 
-When the plugin package changes, refresh it separately:
+After updating the binary, refresh its managed plugin with `due init` using the
+same host and directory options. To remove it, use native host commands:
 
 ```sh
-codex plugin remove due@due-dev
-codex plugin add due@due-dev
+codex plugin remove due@due-local
+codex plugin marketplace remove due-local
+claude plugin uninstall due@due-local --scope user
+claude plugin marketplace remove due-local --scope user
 ```
 
-Removing and adding the plugin refreshes its cached package without changing the
-installed CLI. Alternatively, reinstall/refresh Due in the desktop Plugins UI if it shows an older
-skill, then start a new chat. A Git-backed marketplace uses
-`codex plugin marketplace upgrade due-dev` before plugin reinstall; the local
-checkout workflow above is the default for this trial. Do not edit plugin caches.
-
-```sh
-codex plugin remove due@due-dev
-codex plugin marketplace remove due-dev
-```
+Run only the commands for hosts you configured. Once neither host registration
+uses the managed directory, it can be removed. No `due init` uninstall command or
+background cleanup is installed. For a legacy `due-dev` registration, follow the
+[migration](#migrating-a-checkout-based-installation) instructions instead.
 
 To remove a Cargo-installed binary, use `cargo uninstall due`. For a checkout
 symlink, remove the verified symlink and restore the saved executable if desired;

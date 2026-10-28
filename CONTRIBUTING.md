@@ -1,8 +1,10 @@
 # Contributing during the feature freeze
 
 This is a private source-install trial. Limit changes to defects, documentation,
-packaging, and tests that protect existing behavior. New commands, configuration
-layers, automatic retries, schedulers and MCP servers are outside the freeze.
+packaging, and tests that protect existing behavior. The explicitly scoped `due init` command
+is the packaging exception: it installs the existing delegate plugin without
+starting agent work. Other new commands, configuration layers, automatic retries,
+schedulers and MCP servers remain outside the freeze.
 
 Use [installation](docs/install.md) for local setup and
 [dogfooding](docs/dogfooding.md) for issue reports. Keep changes small and include
