@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "verdict"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "approve",
+        "request_changes"
+      ]
+    }
+  },
+  "$defs": {
+    "unused": {
+      "$ref": "https://example.invalid/never-fetch.json"
+    }
+  }
+}
