@@ -449,7 +449,7 @@ fn parse(stdout: &str, output_path: &Path, requested: Option<&str>) -> RunResult
             }
         }
     }
-    let mut result = parse_events(events, output_path);
+    let mut result = parse_events(events, output_path, requested);
     if let Some(error) = protocol_error {
         // A prior terminal success cannot hide a rejected record. Only the
         // accepted prefix contributes response data.
@@ -458,7 +458,11 @@ fn parse(stdout: &str, output_path: &Path, requested: Option<&str>) -> RunResult
     result
 }
 
-fn parse_events(events: Vec<JsonLineEvent>, output_path: &Path) -> RunResult {
+fn parse_events(
+    events: Vec<JsonLineEvent>,
+    output_path: &Path,
+    requested: Option<&str>,
+) -> RunResult {
     let query = QueryResult::from_events(events);
     let mut identity = Identity::default();
     for event in &query.events {
