@@ -33,7 +33,8 @@ where
 {
     let mut command = QueryCommand::new(prompt)
         .prompt_via_stdin(true)
-        .output_format(OutputFormat::Json);
+        .output_format(OutputFormat::Json)
+        .verbose(true);
     if let Some(model) = &run.model {
         command = command.model(model);
     }
@@ -94,7 +95,7 @@ where
     match command.execute_cancellable(&client, cancel).await {
         Ok(output) => {
             let mut result = parse(&output.stdout);
-            result.diagnostics = super::output::diagnostic(&output.stderr);
+            result.diagnostics = merge_diagnostics(&result.diagnostics, &output.stderr);
             result
         }
         Err(error) => failure(error),
@@ -106,6 +107,9 @@ where
 #[derive(Default)]
 struct StreamState {
     terminal: Option<Value>,
+    invalid_terminal: Option<Value>,
+    segments: ResultSegments,
+    progress: Progress,
     // Latest complete text-bearing top-level message, for failures without a
     // terminal result. This is neither a transcript nor native structured data.
     last_assistant: String,
@@ -117,6 +121,14 @@ struct StreamState {
 
 impl StreamState {
     fn observe(&mut self, event: StreamEvent, progress: &Progress) {
+        self.progress = progress.clone();
+        let root = event
+            .data
+            .get("parent_tool_use_id")
+            .is_none_or(Value::is_null);
+        if root && opens_continuation(&event.data) {
+            self.segments.continuation = true;
+        }
         if let Some(id) = event.session_id().filter(|id| !id.is_empty()) {
             progress.session(id);
             if self.session_id.is_none() {
@@ -202,26 +214,13 @@ impl StreamState {
                     }
                 }
             }
-            Some("result") => {
-                // Native semantic failure is independent of the process exit
-                // status; run_finished remains authoritative after cleanup.
-                let subtype = event.data.get("subtype");
-                if let Some(failed) = event.data.get("is_error").and_then(Value::as_bool)
-                    && subtype.is_none_or(Value::is_string)
-                {
-                    progress.phase(
-                        if failed
-                            || subtype
-                                .and_then(Value::as_str)
-                                .is_some_and(|subtype| subtype != "success")
-                        {
-                            "turn_failed"
-                        } else {
-                            "turn_completed"
-                        },
-                    );
+            Some("result") if root => {
+                if self.segments.admit(&event.data) {
+                    self.terminal = Some(event.data);
+                    self.last_assistant.clear();
+                } else if self.segments.count == 0 {
+                    self.invalid_terminal = Some(event.data);
                 }
-                self.terminal = Some(event.data);
             }
             _ => (),
         }
@@ -293,8 +292,13 @@ impl StreamState {
     }
 
     fn finish(self, outcome: claude_wrapper::Result<claude_wrapper::CommandOutput>) -> RunResult {
-        let terminal = self.terminal.as_ref().map(parse_document);
-        let missing_terminal = terminal.is_none();
+        let terminal = self
+            .terminal
+            .as_ref()
+            .or(self.invalid_terminal.as_ref())
+            .map(parse_document);
+        let missing_terminal = self.terminal.is_none();
+        let process_failed = outcome.is_err();
         let mut result = match outcome {
             Ok(output) => {
                 let mut result = terminal.unwrap_or_else(|| {
@@ -346,11 +350,69 @@ impl StreamState {
                 }
             }
         };
-        if result.session_id.is_none() {
+        if result.session_id.is_none()
+            && (self.segments.count == 1
+                || missing_terminal
+                || result
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.kind == ErrorKind::Protocol))
+        {
             result.session_id = self.session_id;
         }
-        if missing_terminal && result.error.is_some() {
+        if missing_terminal && self.segments.error.is_none() && result.error.is_some() {
             result.text = self.last_assistant;
+        }
+        if let Some(mut error) = self.segments.final_error()
+            && !result.error.as_ref().is_some_and(|current| {
+                matches!(
+                    current.kind,
+                    ErrorKind::Cancelled
+                        | ErrorKind::Timeout
+                        | ErrorKind::Io
+                        | ErrorKind::Protocol
+                        | ErrorKind::Authentication
+                        | ErrorKind::MaxTurns
+                        | ErrorKind::MaxBudget
+                ) || (process_failed && current.kind == ErrorKind::Provider)
+            })
+        {
+            error.provider_exit_code = result
+                .error
+                .as_ref()
+                .and_then(|current| current.provider_exit_code);
+            result = result.fail(error);
+        }
+        if self.segments.count > 0 {
+            result.usage = self.segments.usage;
+        }
+        if self.terminal.is_some() && !self.segments.continuation {
+            if result.error.is_none() {
+                self.progress.phase("turn_completed");
+            } else if self.terminal.as_ref().is_some_and(|terminal| {
+                parse_result(terminal).error.as_ref().is_some_and(|error| {
+                    matches!(
+                        error.kind,
+                        ErrorKind::Provider
+                            | ErrorKind::Authentication
+                            | ErrorKind::MaxTurns
+                            | ErrorKind::MaxBudget
+                    )
+                })
+            }) && !result.error.as_ref().is_some_and(|error| {
+                matches!(
+                    error.kind,
+                    ErrorKind::Protocol | ErrorKind::Cancelled | ErrorKind::Timeout | ErrorKind::Io
+                )
+            }) {
+                self.progress.phase("turn_failed");
+            }
+        }
+        if self.segments.count > 1 {
+            result.diagnostics = merge_diagnostics(
+                &format!("Claude root result segments: {}", self.segments.count),
+                &result.diagnostics,
+            );
         }
         result
     }
@@ -399,25 +461,166 @@ fn parse(stdout: &str) -> RunResult {
     parse_document(&document)
 }
 
+fn merge_diagnostics(prefix: &str, stderr: &str) -> String {
+    if prefix.is_empty() {
+        output::diagnostic(stderr)
+    } else if stderr.is_empty() {
+        output::diagnostic(prefix)
+    } else {
+        output::diagnostic(&format!("{prefix}\n{stderr}"))
+    }
+}
+
 fn parse_document(document: &Value) -> RunResult {
-    let result = RunResult::new(Provider::Claude);
-    // Verbose CLI settings return the transcript as an array; the terminal
-    // result retains the same schema as ordinary JSON mode.
-    let value = match document {
-        Value::Array(records) => match records
-            .iter()
-            .rev()
-            .find(|record| record.get("type").and_then(Value::as_str) == Some("result"))
-        {
-            Some(value) => value,
-            None => {
-                return result.fail(RunError::protocol(
-                    "Claude transcript has no terminal result",
-                ));
-            }
-        },
-        value => value,
+    let Value::Array(records) = document else {
+        return parse_result(document);
     };
+    let mut segments = ResultSegments::default();
+    let mut terminal = None;
+    let mut invalid_terminal = None;
+    for record in records {
+        if record
+            .get("parent_tool_use_id")
+            .is_some_and(|id| !id.is_null())
+        {
+            continue;
+        }
+        if record.get("type").and_then(Value::as_str) == Some("result") {
+            if segments.admit(record) {
+                terminal = Some(record);
+            } else if segments.count == 0 {
+                invalid_terminal = Some(record);
+            }
+        } else if opens_continuation(record) {
+            segments.continuation = true;
+        }
+    }
+    let mut result = terminal
+        .or(invalid_terminal)
+        .map(parse_result)
+        .unwrap_or_else(|| {
+            RunResult::new(Provider::Claude).fail(RunError::protocol(
+                "Claude transcript has no terminal result",
+            ))
+        });
+    if let Some(error) = segments.final_error()
+        && !result.error.as_ref().is_some_and(|current| {
+            matches!(
+                current.kind,
+                ErrorKind::Authentication | ErrorKind::MaxTurns | ErrorKind::MaxBudget
+            )
+        })
+    {
+        result = result.fail(error);
+    }
+    if segments.count > 0 {
+        result.usage = segments.usage;
+    }
+    if segments.count > 1 {
+        result.diagnostics =
+            output::diagnostic(&format!("Claude root result segments: {}", segments.count));
+    }
+    result
+}
+
+fn opens_continuation(record: &Value) -> bool {
+    match record.get("type").and_then(Value::as_str) {
+        Some("assistant" | "user") => true,
+        Some("system") => record.get("subtype").and_then(Value::as_str) == Some("init"),
+        _ => false,
+    }
+}
+
+#[derive(Default)]
+struct ResultSegments {
+    count: u64,
+    continuation: bool,
+    usage: Option<Usage>,
+    error: Option<RunError>,
+}
+
+impl ResultSegments {
+    fn final_error(&self) -> Option<RunError> {
+        self.error
+            .as_ref()
+            .map(|error| RunError::protocol(error.message.clone()))
+            .or_else(|| {
+                (self.count > 0 && self.continuation)
+                    .then(|| RunError::protocol("Claude continuation has no terminal result"))
+            })
+    }
+
+    fn admit(&mut self, value: &Value) -> bool {
+        if self.count > 0 && !self.continuation {
+            self.error.get_or_insert_with(|| {
+                RunError::protocol("adjacent Claude root results without continuation")
+            });
+            return false;
+        }
+        let mut parsed = parse_result(value);
+        if parsed
+            .error
+            .as_ref()
+            .is_some_and(|error| error.kind == ErrorKind::Protocol)
+        {
+            self.error
+                .get_or_insert_with(|| parsed.error.take().expect("invalid result has an error"));
+            self.continuation = false;
+            return false;
+        }
+        self.continuation = false;
+        let count = match self.count.checked_add(1) {
+            Some(count) => count,
+            None => {
+                self.error.get_or_insert_with(|| {
+                    RunError::protocol("Claude result segment count overflow")
+                });
+                return false;
+            }
+        };
+        let next = parsed.usage;
+        if count == 1 {
+            self.usage = next;
+        } else if let (Some(usage), Some(next)) = (self.usage.take(), next) {
+            let mut folded = Usage::default();
+            let mut overflow = false;
+            macro_rules! add_bucket {
+                ($field:ident) => {
+                    folded.$field = match (usage.$field, next.$field) {
+                        (Some(a), Some(b)) => match a.checked_add(b) {
+                            Some(sum) => Some(sum),
+                            None => {
+                                overflow = true;
+                                Some(a)
+                            }
+                        },
+                        _ => None,
+                    };
+                };
+            }
+            add_bucket!(input_tokens);
+            add_bucket!(cached_input_tokens);
+            add_bucket!(cache_write_input_tokens);
+            add_bucket!(output_tokens);
+            add_bucket!(reasoning_output_tokens);
+            add_bucket!(total_tokens);
+            if overflow {
+                self.error
+                    .get_or_insert_with(|| RunError::protocol("Claude usage counter overflow"));
+                self.usage = Some(usage);
+                return false;
+            }
+            self.usage = Some(folded);
+        } else {
+            self.usage = None;
+        }
+        self.count = count;
+        true
+    }
+}
+
+fn parse_result(value: &Value) -> RunResult {
+    let result = RunResult::new(Provider::Claude);
     // Preserve the native value independently of readable text, even when the
     // terminal record reports failure or cannot otherwise be normalized.
     let result = RunResult {
@@ -520,23 +723,29 @@ fn failure(error: Error) -> RunResult {
             ..
         } => {
             let parsed = parse(&stdout);
+            let native_message = output::diagnostic(&stderr);
             if !matches!(
                 parsed.error.as_ref().map(|error| error.kind),
                 Some(ErrorKind::Protocol)
             ) {
                 result = parsed;
             } else {
+                result.text = parsed.text;
+                result.session_id = parsed.session_id;
+                result.cost_usd = parsed.cost_usd;
+                result.usage = parsed.usage;
                 result.structured_output = parsed.structured_output;
+                result.diagnostics = parsed.diagnostics;
             }
-            result.diagnostics = output::diagnostic(&stderr);
+            result.diagnostics = merge_diagnostics(&result.diagnostics, &stderr);
             result
                 .error
                 .take()
                 .unwrap_or_else(|| {
-                    let message = if result.diagnostics.trim().is_empty() {
+                    let message = if native_message.trim().is_empty() {
                         format!("Claude exited with status {exit_code}")
                     } else {
-                        result.diagnostics.trim().to_owned()
+                        native_message.trim().to_owned()
                     };
                     RunError::new(ErrorKind::Provider, message)
                 })
@@ -856,9 +1065,12 @@ mod tests {
             "type": "result", "subtype": "success", "is_error": false,
             "result": "", "structured_output": {"answer": 42}, "session_id": "session-1"
         });
-        for data in [terminal(), final_result.clone()] {
-            state.observe(StreamEvent { data }, &Progress::default());
-        }
+        state.observe(
+            StreamEvent {
+                data: final_result.clone(),
+            },
+            &Progress::default(),
+        );
         let streamed = state.finish(Ok(output()));
         assert_eq!(streamed.diagnostics, "native diagnostic");
         let buffered = parse(&final_result.to_string());
