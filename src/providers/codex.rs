@@ -149,13 +149,13 @@ where
         // The streaming API discards successful stderr. Failed processes still
         // carry diagnostics in their error; the default buffered path is unchanged.
         return match outcome {
-            Ok(()) => state.finish(&output_path),
+            Ok(()) => state.finish(&output_path, run.resume.as_deref()),
             Err(error) => state.fail(error, &output_path),
         };
     }
     match command.execute(&client, cancel).await {
         Ok(output) => {
-            let mut result = parse(&output.stdout, &output_path);
+            let mut result = parse(&output.stdout, &output_path, run.resume.as_deref());
             result.diagnostics = output.stderr;
             result
         }
@@ -165,8 +165,7 @@ where
 
 #[derive(Default)]
 struct StreamState {
-    thread_id: Option<String>,
-    session_id: Option<String>,
+    identity: Identity,
     usage: Option<TokenUsage>,
     completed: bool,
     terminal_error: Option<RunError>,
@@ -175,21 +174,69 @@ struct StreamState {
     last_assistant: String,
 }
 
+#[derive(Default)]
+struct Identity {
+    thread_id: Option<String>,
+    fallback_id: Option<String>,
+    conflict: Option<(String, String)>,
+}
+
+impl Identity {
+    fn observe<'a>(&mut self, event: &'a JsonLineEvent) -> Option<&'a str> {
+        let thread = (event.event_type == "thread.started")
+            .then(|| event.thread_id())
+            .flatten()
+            .filter(|id| !id.is_empty());
+        let fallback = event.session_id().filter(|id| !id.is_empty());
+        let mut first = self.thread_id.as_deref().or(self.fallback_id.as_deref());
+        for id in [thread, fallback].into_iter().flatten() {
+            if let Some(first) = first
+                && !first.eq_ignore_ascii_case(id)
+                && self.conflict.is_none()
+            {
+                self.conflict = Some((first.to_owned(), id.to_owned()));
+            }
+            first = first.or(Some(id));
+        }
+        if self.thread_id.is_none() {
+            self.thread_id = thread.map(str::to_owned);
+        }
+        if self.fallback_id.is_none() {
+            self.fallback_id = fallback.map(str::to_owned);
+        }
+        thread.or(fallback)
+    }
+
+    fn observed(&self) -> Option<String> {
+        self.thread_id.clone().or_else(|| self.fallback_id.clone())
+    }
+
+    fn error(&self, requested: Option<&str>) -> Option<RunError> {
+        if let Some((first, next)) = &self.conflict {
+            return Some(RunError::protocol(format!(
+                "Codex reported conflicting session IDs: {first} and {next}"
+            )));
+        }
+        let requested = requested?;
+        match self.thread_id.as_deref() {
+            Some(id) if id.eq_ignore_ascii_case(requested) => None,
+            Some(id) => Some(RunError::protocol(format!(
+                "Codex resumed thread {id} instead of requested thread {requested}"
+            ))),
+            None => Some(RunError::protocol(format!(
+                "Codex did not emit a nonempty thread.started thread_id for requested thread {requested}"
+            ))),
+        }
+    }
+}
+
 impl StreamState {
     fn observe(&mut self, event: JsonLineEvent, progress: &Progress) {
-        if self.thread_id.is_none()
-            && let Some(id) = event.thread_id().filter(|id| !id.is_empty())
+        let previous = self.identity.observed();
+        if let Some(id) = self.identity.observe(&event)
+            && previous.is_none()
         {
-            self.thread_id = Some(id.to_owned());
             progress.session(id);
-        }
-        if self.session_id.is_none()
-            && let Some(id) = event.session_id().filter(|id| !id.is_empty())
-        {
-            self.session_id = Some(id.to_owned());
-            if self.thread_id.is_none() {
-                progress.session(id);
-            }
         }
         match event.event_type.as_str() {
             "turn.started" => progress.phase("turn_started"),
@@ -225,10 +272,10 @@ impl StreamState {
         }
     }
 
-    fn finish(self, output_path: &Path) -> RunResult {
+    fn finish(self, output_path: &Path, requested: Option<&str>) -> RunResult {
         let mut result = RunResult {
             text: self.last_assistant,
-            session_id: self.thread_id.or(self.session_id),
+            session_id: self.identity.observed(),
             usage: self.usage.map(normalize_usage),
             ..RunResult::new(Provider::Codex)
         };
@@ -236,6 +283,9 @@ impl StreamState {
             result.text = std::fs::read_to_string(output_path)
                 .map(normalize_final_newline)
                 .unwrap_or(result.text);
+            if let Some(conflict) = self.identity.error(None) {
+                return result.fail(conflict);
+            }
             return result.fail(error);
         }
         if !self.completed {
@@ -249,12 +299,15 @@ impl StreamState {
                 )));
             }
         }
+        if let Some(error) = self.identity.error(requested) {
+            return result.fail(error);
+        }
         result
     }
 
     fn fail(self, error: Error, output_path: &Path) -> RunResult {
         let terminal_failed = self.terminal_error.is_some();
-        let mut result = self.finish(output_path);
+        let mut result = self.finish(output_path, None);
         let mut process = match error {
             Error::Json { source, .. } => RunResult::new(Provider::Codex)
                 .fail(RunError::protocol(format!("invalid Codex JSONL: {source}"))),
@@ -376,7 +429,7 @@ fn normalize_usage(usage: TokenUsage) -> Usage {
     }
 }
 
-fn parse(stdout: &str, output_path: &Path) -> RunResult {
+fn parse(stdout: &str, output_path: &Path, requested: Option<&str>) -> RunResult {
     let mut events = Vec::new();
     for (index, line) in stdout.lines().enumerate() {
         if line.trim().is_empty() {
@@ -393,6 +446,10 @@ fn parse(stdout: &str, output_path: &Path) -> RunResult {
         }
     }
     let query = QueryResult::from_events(events);
+    let mut identity = Identity::default();
+    for event in &query.events {
+        identity.observe(event);
+    }
     let mut result = RunResult {
         // Retain the last received assistant message even if the turn stops
         // before its terminal event. Success still requires the final file.
@@ -402,10 +459,7 @@ fn parse(stdout: &str, output_path: &Path) -> RunResult {
             .rev()
             .find_map(JsonLineEvent::agent_message_text)
             .unwrap_or_default(),
-        session_id: query
-            .thread_id
-            .or(query.session_id)
-            .filter(|id| !id.is_empty()),
+        session_id: identity.observed(),
         usage: query.usage.map(|usage| Usage {
             input_tokens: usage.input_tokens,
             cached_input_tokens: usage.cached_input_tokens,
@@ -427,6 +481,9 @@ fn parse(stdout: &str, output_path: &Path) -> RunResult {
         result.text = std::fs::read_to_string(output_path)
             .map(normalize_final_newline)
             .unwrap_or(result.text);
+        if let Some(conflict) = identity.error(None) {
+            return result.fail(conflict);
+        }
         return result.fail(terminal_error(failed));
     }
     if !query.events.iter().any(JsonLineEvent::is_turn_completed) {
@@ -439,6 +496,9 @@ fn parse(stdout: &str, output_path: &Path) -> RunResult {
                 "Codex did not produce a readable final-message file: {error}"
             )));
         }
+    }
+    if let Some(error) = identity.error(requested) {
+        return result.fail(error);
     }
     result
 }
@@ -473,6 +533,24 @@ fn terminal_error(event: &JsonLineEvent) -> RunError {
     )
 }
 
+fn has_failed_turn_identity_conflict(stdout: &str, parsed: &RunResult) -> bool {
+    let mut identity = Identity::default();
+    let mut turn_failed = false;
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(event) = serde_json::from_str::<JsonLineEvent>(line) else {
+            return false;
+        };
+        turn_failed |= event.is_turn_failed();
+        identity.observe(&event);
+    }
+    turn_failed
+        && identity.error(None).is_some_and(|conflict| {
+            parsed.error.as_ref().is_some_and(|error| {
+                error.kind == ErrorKind::Protocol && error.message == conflict.message
+            })
+        })
+}
+
 fn failure(error: Error, output_path: &Path) -> RunResult {
     let mut result = RunResult::new(Provider::Codex);
     let failure = match error {
@@ -482,11 +560,13 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
             stderr,
             ..
         } => {
-            let parsed = parse(&stdout, output_path);
-            if matches!(
-                parsed.error.as_ref().map(|error| error.kind),
-                Some(ErrorKind::Protocol)
-            ) {
+            let parsed = parse(&stdout, output_path, None);
+            if !has_failed_turn_identity_conflict(&stdout, &parsed)
+                && matches!(
+                    parsed.error.as_ref().map(|error| error.kind),
+                    Some(ErrorKind::Protocol)
+                )
+            {
                 // A failed process can stop before its terminal event or final
                 // file. Preserve observed text and metadata while reporting the
                 // actual process failure, just as the streaming path does.
@@ -628,7 +708,7 @@ mod tests {
             }
             assert!(state.last_assistant.is_empty());
             std::fs::write(&path, "final answer\n").unwrap();
-            let result = state.finish(&path);
+            let result = state.finish(&path, None);
             if failed {
                 let error = result.error.unwrap();
                 assert_eq!(error.kind, ErrorKind::Provider);
@@ -832,11 +912,37 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_conflicting_ids_keep_native_process_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = failure(
+            Error::CommandFailed {
+                command: "unused".into(),
+                exit_code: 9,
+                stdout: concat!(
+                    "{\"type\":\"thread.started\",\"thread_id\":\"first\"}\n",
+                    "{\"type\":\"thread.started\",\"thread_id\":\"second\"}\n"
+                )
+                .into(),
+                stderr: String::new(),
+                working_dir: None,
+            },
+            &directory.path().join("not-written.txt"),
+        );
+        assert_eq!(result.session_id.as_deref(), Some("first"));
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, ErrorKind::Provider);
+        assert_eq!(error.provider_exit_code, Some(9));
+    }
+
+    #[test]
     fn streamed_terminal_failure_survives_a_process_error_without_stdout() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("not-written.txt");
         let state = StreamState {
-            thread_id: Some("thread-1".into()),
+            identity: Identity {
+                thread_id: Some("thread-1".into()),
+                ..Identity::default()
+            },
             terminal_error: Some(RunError::new(
                 ErrorKind::Provider,
                 "native terminal failure",
@@ -884,14 +990,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("final-message.txt");
         std::fs::write(&path, "final answer\n").unwrap();
-        let incomplete = StreamState::default().finish(&path);
+        let incomplete = StreamState::default().finish(&path, None);
         assert_eq!(incomplete.error.unwrap().kind, ErrorKind::Protocol);
         let state = StreamState {
             completed: true,
             last_assistant: "earlier commentary".into(),
             ..StreamState::default()
         };
-        let result = state.finish(&path);
+        let result = state.finish(&path, None);
         assert!(result.error.is_none());
         assert_eq!(result.text, "final answer");
         std::fs::remove_file(&path).unwrap();
@@ -899,7 +1005,7 @@ mod tests {
             completed: true,
             ..StreamState::default()
         }
-        .finish(&path);
+        .finish(&path, None);
         assert_eq!(missing_file.error.unwrap().kind, ErrorKind::Protocol);
     }
 }
