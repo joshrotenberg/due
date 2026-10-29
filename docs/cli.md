@@ -754,9 +754,11 @@ contained only the final result. Due uses the last root result for answer,
 status, structured output, session, and cumulative cost. It adds reported usage
 counters across root result segments; a missing segment counter stays unknown.
 Traced JSONL uses the same accounting and emits one completion phase for the
-final native result when the invocation ends. Child results do not contribute.
+valid final native result when the invocation ends. Child results do not contribute.
 Only a native JSON array or a single result object is supported in buffered
 mode; concatenated JSON documents are not a supported transport.
+Verbose buffered output captures the full native transcript, including tool
+inputs and results, subject to the existing 64 MiB stdout capture limit.
 
 Failed JSON results may retain partial output: Codex preserves a readable
 final-message file or observed assistant text, including intermediate commentary;

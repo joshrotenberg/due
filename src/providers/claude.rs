@@ -125,12 +125,7 @@ impl StreamState {
             .data
             .get("parent_tool_use_id")
             .is_none_or(Value::is_null);
-        if root
-            && matches!(
-                event.event_type(),
-                Some("system" | "assistant" | "user" | "stream_event")
-            )
-        {
+        if root && opens_continuation(&event.data) {
             self.segments.continuation = true;
         }
         if let Some(id) = event.session_id().filter(|id| !id.is_empty()) {
@@ -294,6 +289,7 @@ impl StreamState {
     fn finish(self, outcome: claude_wrapper::Result<claude_wrapper::CommandOutput>) -> RunResult {
         let terminal = self.terminal.as_ref().map(parse_document);
         let missing_terminal = terminal.is_none();
+        let process_failed = outcome.is_err();
         let mut result = match outcome {
             Ok(output) => {
                 let mut result = terminal.unwrap_or_else(|| {
@@ -354,10 +350,10 @@ impl StreamState {
         {
             result.session_id = self.session_id;
         }
-        if missing_terminal && result.error.is_some() {
+        if missing_terminal && self.segments.error.is_none() && result.error.is_some() {
             result.text = self.last_assistant;
         }
-        if let Some(mut error) = self.segments.error
+        if let Some(mut error) = self.segments.final_error()
             && !result.error.as_ref().is_some_and(|current| {
                 matches!(
                     current.kind,
@@ -368,7 +364,7 @@ impl StreamState {
                         | ErrorKind::Authentication
                         | ErrorKind::MaxTurns
                         | ErrorKind::MaxBudget
-                )
+                ) || (process_failed && current.kind == ErrorKind::Provider)
             })
         {
             error.provider_exit_code = result
@@ -380,17 +376,27 @@ impl StreamState {
         if self.segments.count > 0 {
             result.usage = self.segments.usage;
         }
-        if let Some(terminal) = &self.terminal {
-            let failed = terminal.get("is_error").and_then(Value::as_bool) == Some(true)
-                || terminal
-                    .get("subtype")
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| kind != "success");
-            self.progress.phase(if failed {
-                "turn_failed"
-            } else {
-                "turn_completed"
-            });
+        if self.terminal.is_some() && !self.segments.continuation {
+            if result.error.is_none() {
+                self.progress.phase("turn_completed");
+            } else if self.terminal.as_ref().is_some_and(|terminal| {
+                parse_result(terminal).error.as_ref().is_some_and(|error| {
+                    matches!(
+                        error.kind,
+                        ErrorKind::Provider
+                            | ErrorKind::Authentication
+                            | ErrorKind::MaxTurns
+                            | ErrorKind::MaxBudget
+                    )
+                })
+            }) && !result.error.as_ref().is_some_and(|error| {
+                matches!(
+                    error.kind,
+                    ErrorKind::Protocol | ErrorKind::Cancelled | ErrorKind::Timeout | ErrorKind::Io
+                )
+            }) {
+                self.progress.phase("turn_failed");
+            }
         }
         if self.segments.count > 1 {
             result.diagnostics = merge_diagnostics(
@@ -472,10 +478,7 @@ fn parse_document(document: &Value) -> RunResult {
             if segments.admit(record) {
                 terminal = Some(record);
             }
-        } else if matches!(
-            record.get("type").and_then(Value::as_str),
-            Some("system" | "assistant" | "user" | "stream_event")
-        ) {
+        } else if opens_continuation(record) {
             segments.continuation = true;
         }
     }
@@ -484,7 +487,14 @@ fn parse_document(document: &Value) -> RunResult {
             "Claude transcript has no terminal result",
         ))
     });
-    if let Some(error) = segments.error {
+    if let Some(error) = segments.final_error()
+        && !result.error.as_ref().is_some_and(|current| {
+            matches!(
+                current.kind,
+                ErrorKind::Authentication | ErrorKind::MaxTurns | ErrorKind::MaxBudget
+            )
+        })
+    {
         result = result.fail(error);
     }
     if segments.count > 0 {
@@ -497,6 +507,14 @@ fn parse_document(document: &Value) -> RunResult {
     result
 }
 
+fn opens_continuation(record: &Value) -> bool {
+    match record.get("type").and_then(Value::as_str) {
+        Some("assistant" | "user") => true,
+        Some("system") => record.get("subtype").and_then(Value::as_str) == Some("init"),
+        _ => false,
+    }
+}
+
 #[derive(Default)]
 struct ResultSegments {
     count: u64,
@@ -506,6 +524,16 @@ struct ResultSegments {
 }
 
 impl ResultSegments {
+    fn final_error(&self) -> Option<RunError> {
+        self.error
+            .as_ref()
+            .map(|error| RunError::protocol(error.message.clone()))
+            .or_else(|| {
+                (self.count > 0 && self.continuation)
+                    .then(|| RunError::protocol("Claude continuation has no terminal result"))
+            })
+    }
+
     fn admit(&mut self, value: &Value) -> bool {
         if self.count > 0 && !self.continuation {
             self.error.get_or_insert_with(|| {
@@ -513,17 +541,19 @@ impl ResultSegments {
             });
             return false;
         }
-        self.continuation = false;
-        let parsed = parse_result(value);
+        let mut parsed = parse_result(value);
         if parsed
             .error
             .as_ref()
             .is_some_and(|error| error.kind == ErrorKind::Protocol)
         {
             self.error
-                .get_or_insert_with(|| RunError::protocol("invalid earlier Claude root result"));
+                .get_or_insert_with(|| parsed.error.take().expect("invalid result has an error"));
+            self.continuation = false;
+            return false;
         }
-        self.count = match self.count.checked_add(1) {
+        self.continuation = false;
+        let count = match self.count.checked_add(1) {
             Some(count) => count,
             None => {
                 self.error.get_or_insert_with(|| {
@@ -533,19 +563,19 @@ impl ResultSegments {
             }
         };
         let next = parsed.usage;
-        if self.count == 1 {
+        if count == 1 {
             self.usage = next;
-        } else if let (Some(usage), Some(next)) = (&mut self.usage, next) {
+        } else if let (Some(usage), Some(next)) = (self.usage.take(), next) {
+            let mut folded = Usage::default();
+            let mut overflow = false;
             macro_rules! add_bucket {
                 ($field:ident) => {
-                    usage.$field = match (usage.$field, next.$field) {
+                    folded.$field = match (usage.$field, next.$field) {
                         (Some(a), Some(b)) => match a.checked_add(b) {
                             Some(sum) => Some(sum),
                             None => {
-                                self.error.get_or_insert_with(|| {
-                                    RunError::protocol("Claude usage counter overflow")
-                                });
-                                None
+                                overflow = true;
+                                Some(a)
                             }
                         },
                         _ => None,
@@ -558,9 +588,17 @@ impl ResultSegments {
             add_bucket!(output_tokens);
             add_bucket!(reasoning_output_tokens);
             add_bucket!(total_tokens);
+            if overflow {
+                self.error
+                    .get_or_insert_with(|| RunError::protocol("Claude usage counter overflow"));
+                self.usage = Some(usage);
+                return false;
+            }
+            self.usage = Some(folded);
         } else {
             self.usage = None;
         }
+        self.count = count;
         true
     }
 }
@@ -672,11 +710,15 @@ fn failure(error: Error) -> RunResult {
             if !matches!(
                 parsed.error.as_ref().map(|error| error.kind),
                 Some(ErrorKind::Protocol)
-            ) || serde_json::from_str::<Value>(&stdout).is_ok()
-            {
+            ) {
                 result = parsed;
             } else {
+                result.text = parsed.text;
+                result.session_id = parsed.session_id;
+                result.cost_usd = parsed.cost_usd;
+                result.usage = parsed.usage;
                 result.structured_output = parsed.structured_output;
+                result.diagnostics = parsed.diagnostics;
             }
             result.diagnostics = merge_diagnostics(&result.diagnostics, &stderr);
             result
