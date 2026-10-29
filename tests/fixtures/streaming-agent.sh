@@ -16,6 +16,12 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+if [ "$DUE_TRACE_PROVIDER" = claude ] && [ "$DUE_TRACE_MODE" = oauth_expired ]; then
+    printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$DUE_TRACE_SESSION"
+    printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed","session_id":"%s"}\n' "$DUE_TRACE_SESSION"
+    exit 1
+fi
+
 if [ "$DUE_TRACE_PROVIDER" = claude ]; then
     printf '{"type":"system","subtype":"init","session_id":"%s","cwd":"SECRET_CWD","tools":["Bash"],"unknown":"SECRET_UNKNOWN"}\n' "$DUE_TRACE_SESSION"
     printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-test-1","name":"Bash","input":{"command":"SECRET_TOOL_INPUT"}}}}'

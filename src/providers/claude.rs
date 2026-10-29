@@ -307,7 +307,9 @@ impl StreamState {
                                     ErrorKind::Authentication
                                         | ErrorKind::MaxTurns
                                         | ErrorKind::MaxBudget
-                                )))
+                                ))
+                                || (error.kind == ErrorKind::Authentication
+                                    && terminal_error.kind == ErrorKind::Authentication))
                         {
                             // Buffered execution classifies explicit cap results
                             // before stderr auth heuristics. Streaming must keep
@@ -467,6 +469,12 @@ fn parse_document(document: &Value) -> RunResult {
         let kind = match value.get("subtype").and_then(Value::as_str) {
             Some("error_max_turns") => ErrorKind::MaxTurns,
             Some("error_max_budget_usd") => ErrorKind::MaxBudget,
+            _ if message.to_ascii_lowercase().contains(
+                "failed to authenticate: oauth session expired and could not be refreshed",
+            ) =>
+            {
+                ErrorKind::Authentication
+            }
             _ => ErrorKind::Provider,
         };
         return result.fail(RunError::new(kind, message));
@@ -517,7 +525,20 @@ fn failure(error: Error) -> RunResult {
         }
         Error::Auth {
             message, exit_code, ..
-        } => RunError::new(ErrorKind::Authentication, message).with_exit_code(exit_code),
+        } => {
+            // The wrapper can classify stdout and retain it only as the auth
+            // message. Recover a valid terminal result's text and metadata.
+            let parsed = parse(&message);
+            if parsed
+                .error
+                .as_ref()
+                .is_some_and(|error| error.kind == ErrorKind::Authentication)
+            {
+                result = parsed;
+            }
+            let message = result.error.take().map_or(message, |error| error.message);
+            RunError::new(ErrorKind::Authentication, message).with_exit_code(exit_code)
+        }
         Error::MaxTurnsExceeded {
             session_id,
             cost_usd,

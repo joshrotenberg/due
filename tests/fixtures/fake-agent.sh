@@ -73,6 +73,10 @@ case "$DUE_TEST_MODE" in
         printf '%s\n' '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.01)"],"num_turns":1,"total_cost_usd":0.1273986,"session_id":"cap-session"}'
         exit 1
         ;;
+    oauth_expired)
+        printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed","session_id":"expired-session"}'
+        exit 1
+        ;;
     interruptible|codex_partial_stop|codex_no_message_stop)
         # Native CLIs use SIGINT to clean up tool sessions. A successful exit
         # during that cleanup must not erase Due's latched stop reason.
