@@ -272,13 +272,13 @@ fn piped_prompt_and_plain_text_output_preserve_final_answer() {
 fn resume_and_ephemeral_map_to_provider_flags() {
     for provider in ["claude", "codex"] {
         let fixture = Fixture::new(provider);
+        let resume_id = if provider == "codex" {
+            "codex-test-thread"
+        } else {
+            "known-session"
+        };
         let output = run(fixture.command("success").args([
-            "--prompt",
-            "continue",
-            "--resume",
-            "known-session",
-            "--output",
-            "json",
+            "--prompt", "continue", "--resume", resume_id, "--output", "json",
         ]));
         json(&output, 0, "succeeded");
         let args = fixture.argv();
@@ -286,7 +286,7 @@ fn resume_and_ephemeral_map_to_provider_flags() {
             assert!(has_pair(&args, "--resume", "known-session"));
         } else {
             assert_eq!(&args[..2], ["exec", "resume"]);
-            assert!(has_pair(&args, "known-session", "-"));
+            assert!(has_pair(&args, resume_id, "-"));
         }
 
         let output = run(fixture.command("success").args([

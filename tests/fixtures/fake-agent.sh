@@ -11,8 +11,13 @@ printf '%s\0' "$@" > "$DUE_TEST_DIR/argv"
 
 last_message=''
 schema=''
+codex_thread='codex-test-thread'
+codex_resuming=false
+previous=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        resume) codex_resuming=true ;;
+        -) if [ "$codex_resuming" = true ]; then codex_thread="$previous"; fi ;;
         --output-schema) shift; schema="$1" ;;
         --output-last-message|-o)
             shift
@@ -20,6 +25,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --output-last-message=*) last_message="${1#*=}" ;;
     esac
+    previous="$1"
     shift
 done
 if [ -n "$schema" ]; then /bin/cat "$schema" > "$DUE_TEST_DIR/schema"; fi
@@ -135,7 +141,7 @@ if [ "$DUE_TEST_PROVIDER" = claude ]; then
             ;;
     esac
 else
-    printf '%s\n' '{"type":"thread.started","thread_id":"codex-test-thread"}'
+    printf '{"type":"thread.started","thread_id":"%s"}\n' "$codex_thread"
     printf '%s\n' '{"type":"turn.started"}'
     printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Interim commentary should not be the final answer."}}'
     case "$DUE_TEST_MODE" in
