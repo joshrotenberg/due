@@ -541,6 +541,24 @@ fn traced_semantic_and_process_failures_keep_metadata_but_redact_traces() {
 }
 
 #[test]
+fn expired_claude_oauth_terminal_result_is_authentication_with_trace() {
+    let fixture = Fixture::new("claude");
+    let output = run(fixture.command("oauth_expired").arg("--trace=json"));
+    let value = result(&output, 1, "failed");
+    assert_eq!(value["error"]["kind"], "authentication");
+    assert_eq!(value["error"]["provider_exit_code"], 1);
+    assert_eq!(value["session_id"], "trace-session");
+    assert_eq!(
+        value["text"],
+        "Failed to authenticate: OAuth session expired and could not be refreshed"
+    );
+    let events = records(&output.stderr);
+    check_trace(&events, "claude", &value["run_id"], "failed", 1);
+    assert!(events.iter().any(|event| event["event"] == "turn_failed"));
+    assert_eq!(events.last().unwrap()["error_kind"], "authentication");
+}
+
+#[test]
 fn codex_error_items_are_redacted_diagnostics_not_activities() {
     for (mode, exit, status) in [
         ("diagnostic", 0, "succeeded"),

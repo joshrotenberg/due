@@ -933,6 +933,22 @@ fn classified_claude_failures_preserve_native_exit_code_and_cap_metadata() {
 }
 
 #[test]
+fn expired_claude_oauth_terminal_result_is_authentication_without_trace() {
+    let fixture = Fixture::new("claude");
+    let output = run(fixture
+        .command("oauth_expired")
+        .args(["--prompt", "x", "--output", "json"]));
+    let value = json(&output, 1, "failed");
+    assert_eq!(value["error"]["kind"], "authentication");
+    assert_eq!(value["error"]["provider_exit_code"], 1);
+    assert_eq!(value["session_id"], "expired-session");
+    assert_eq!(
+        value["text"],
+        "Failed to authenticate: OAuth session expired and could not be refreshed"
+    );
+}
+
+#[test]
 fn codex_classified_failures_use_shared_error_categories() {
     for (mode, kind) in [
         ("codex_auth", "authentication"),
