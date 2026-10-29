@@ -6,16 +6,23 @@ printf '%s\0' "$@" > "$DUE_SCHEMA_DIR/argv"
 schema=''
 last_message=''
 format='json'
+codex_session=''
+codex_resume=false
+previous=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        resume) codex_resume=true ;;
         --json-schema|--output-schema) shift; schema="$1" ;;
         --json-schema=*|--output-schema=*) schema="${1#*=}" ;;
         --output-last-message|-o) shift; last_message="$1" ;;
         --output-last-message=*) last_message="${1#*=}" ;;
         --output-format) shift; format="$1" ;;
+        -) if [ "$codex_resume" = true ]; then codex_session="$previous"; fi ;;
     esac
+    previous="$1"
     shift
 done
+if [ -z "$codex_session" ]; then codex_session='schema-session'; fi
 if [ -n "${DUE_SCHEMA_ORIGINAL:-}" ]; then printf 'false\n' > "$DUE_SCHEMA_ORIGINAL"; fi
 if [ -n "$schema" ]; then
     printf '%s' "$schema" > "$DUE_SCHEMA_DIR/schema-arg"
@@ -42,7 +49,7 @@ if [ "$DUE_SCHEMA_PROVIDER" = claude ]; then
     fi
     printf '}\n'
 else
-    printf '%s\n' '{"type":"thread.started","thread_id":"schema-session"}'
+    printf '{"type":"thread.started","thread_id":"%s"}\n' "$codex_session"
     printf '%s\n' '{"type":"turn.started"}'
     if [ "$DUE_SCHEMA_MODE" = failure ] || [ "$DUE_SCHEMA_MODE" = failure_null ]; then
         if [ -n "$last_message" ]; then

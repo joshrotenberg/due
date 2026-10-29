@@ -533,6 +533,21 @@ fn terminal_error(event: &JsonLineEvent) -> RunError {
     )
 }
 
+fn has_identity_conflict(stdout: &str, parsed: &RunResult) -> bool {
+    let mut identity = Identity::default();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(event) = serde_json::from_str::<JsonLineEvent>(line) else {
+            return false;
+        };
+        identity.observe(&event);
+    }
+    identity.error(None).is_some_and(|conflict| {
+        parsed.error.as_ref().is_some_and(|error| {
+            error.kind == ErrorKind::Protocol && error.message == conflict.message
+        })
+    })
+}
+
 fn failure(error: Error, output_path: &Path) -> RunResult {
     let mut result = RunResult::new(Provider::Codex);
     let failure = match error {
@@ -543,10 +558,12 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
             ..
         } => {
             let parsed = parse(&stdout, output_path, None);
-            if matches!(
-                parsed.error.as_ref().map(|error| error.kind),
-                Some(ErrorKind::Protocol)
-            ) {
+            if !has_identity_conflict(&stdout, &parsed)
+                && matches!(
+                    parsed.error.as_ref().map(|error| error.kind),
+                    Some(ErrorKind::Protocol)
+                )
+            {
                 // A failed process can stop before its terminal event or final
                 // file. Preserve observed text and metadata while reporting the
                 // actual process failure, just as the streaming path does.
@@ -889,6 +906,29 @@ mod tests {
                 assert_eq!(error.exit_code(), 1);
             }
         }
+    }
+
+    #[test]
+    fn incomplete_conflicting_ids_keep_native_process_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = failure(
+            Error::CommandFailed {
+                command: "unused".into(),
+                exit_code: 9,
+                stdout: concat!(
+                    "{\"type\":\"thread.started\",\"thread_id\":\"first\"}\n",
+                    "{\"type\":\"thread.started\",\"thread_id\":\"second\"}\n"
+                )
+                .into(),
+                stderr: String::new(),
+                working_dir: None,
+            },
+            &directory.path().join("not-written.txt"),
+        );
+        assert_eq!(result.session_id.as_deref(), Some("first"));
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, ErrorKind::Provider);
+        assert_eq!(error.provider_exit_code, Some(9));
     }
 
     #[test]

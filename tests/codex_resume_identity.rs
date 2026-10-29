@@ -68,7 +68,11 @@ fn resume_requires_consistent_native_thread_identity_in_buffered_and_traced_runs
                 assert!(value["run_id"].is_string());
             }
         }
-        for (mode, expected) in [("auth", "authentication"), ("exit", "provider")] {
+        for (mode, expected) in [
+            ("auth", "authentication"),
+            ("exit", "provider"),
+            ("mismatch_then_exit", "provider"),
+        ] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_due"));
             command
                 .args([
@@ -93,7 +97,14 @@ fn resume_requires_consistent_native_thread_identity_in_buffered_and_traced_runs
                 value["error"]["kind"], expected,
                 "mode={mode}, traced={traced}"
             );
-            assert_eq!(value["session_id"], Value::Null);
+            assert_eq!(
+                value["session_id"],
+                if mode == "mismatch_then_exit" {
+                    Value::String("other-thread".into())
+                } else {
+                    Value::Null
+                }
+            );
             assert_eq!(
                 value["error"]["provider_exit_code"],
                 if mode == "auth" { 3 } else { 9 }
@@ -155,6 +166,7 @@ fn resume_requires_consistent_native_thread_identity_in_buffered_and_traced_runs
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(output.status.code(), Some(1));
         assert_eq!(value["error"]["kind"], "protocol");
+        assert_eq!(value["error"]["provider_exit_code"], 9);
         assert_eq!(value["session_id"], "Requested-Thread");
         assert_eq!(value["text"], "FINAL ANSWER");
     }

@@ -15,7 +15,7 @@ case "$DUE_ID_MODE" in
     exit) printf 'synthetic launch failure\n' >&2; exit 9 ;;
     matching) printf '%s\n' '{"type":"thread.started","thread_id":"Requested-Thread"}' ;;
     case_variant) printf '%s\n' '{"type":"thread.started","thread_id":"REQUESTED-THREAD"}' ;;
-    mismatch|structured_mismatch) printf '%s\n' '{"type":"thread.started","thread_id":"other-thread"}' ;;
+    mismatch|structured_mismatch|mismatch_then_exit) printf '%s\n' '{"type":"thread.started","thread_id":"other-thread"}' ;;
     empty) printf '%s\n' '{"type":"thread.started","thread_id":""}' ;;
     missing) printf '%s\n' '{"type":"thread.started"}' ;;
     fallback)
@@ -41,6 +41,9 @@ else
 fi
 if [ "$DUE_ID_MODE" = conflict_failed ]; then
     printf '%s\n' '{"type":"turn.failed","error":{"message":"synthetic terminal failure"}}'
+    exit 9
+elif [ "$DUE_ID_MODE" = mismatch_then_exit ]; then
+    exit 9
 else
     printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
 fi
