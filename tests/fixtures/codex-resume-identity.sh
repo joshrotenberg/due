@@ -26,20 +26,29 @@ case "$DUE_ID_MODE" in
         printf '%s\n' '{"type":"thread.started","thread_id":"Requested-Thread"}'
         printf '%s\n' '{"type":"future.event","session_id":"other-thread"}'
         ;;
+    long_conflict_failed)
+        first_id=$(printf '%9000s' '' | tr ' ' A)
+        second_id=$(printf '%9000s' '' | tr ' ' B)
+        printf '{"type":"thread.started","thread_id":"%s"}\n' "$first_id"
+        printf '{"type":"future.event","session_id":"%s"}\n' "$second_id"
+        ;;
     repeated_conflict)
         printf '%s\n' '{"type":"thread.started","thread_id":"Requested-Thread"}'
         printf '%s\n' '{"type":"thread.started","thread_id":"other-thread"}'
         ;;
 esac
 printf '%s\n' '{"type":"turn.started"}'
-if [ "$DUE_ID_MODE" = structured_mismatch ]; then
+if [ "$DUE_ID_MODE" = long_conflict_failed ]; then
+    printf '%s\n' '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"SHORT ANSWER"}}'
+    if [ -n "$last_message" ]; then printf 'SHORT ANSWER\n' > "$last_message"; fi
+elif [ "$DUE_ID_MODE" = structured_mismatch ]; then
     printf '%s\n' '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"{\"answer\":42}"}}'
     if [ -n "$last_message" ]; then printf '{"answer":42}\n' > "$last_message"; fi
 else
     printf '%s\n' '{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"FINAL ANSWER"}}'
     if [ -n "$last_message" ]; then printf 'FINAL ANSWER\n' > "$last_message"; fi
 fi
-if [ "$DUE_ID_MODE" = conflict_failed ]; then
+if [ "$DUE_ID_MODE" = conflict_failed ] || [ "$DUE_ID_MODE" = long_conflict_failed ]; then
     printf '%s\n' '{"type":"turn.failed","error":{"message":"synthetic terminal failure"}}'
     exit 9
 elif [ "$DUE_ID_MODE" = mismatch_then_exit ]; then

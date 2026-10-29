@@ -5,7 +5,7 @@ use codex_wrapper::{
     TerminationSignal, TokenUsage,
 };
 
-use super::Context;
+use super::{Context, output};
 use crate::{
     cli::{Provider, RunArgs},
     result::{ErrorKind, RunError, RunResult, Usage},
@@ -126,6 +126,7 @@ where
     let mut builder = Codex::builder()
         .binary(&context.binary)
         .working_dir(&context.cwd)
+        .output_limit(output::STREAM_LIMIT)
         // The CLI owns tool groups that a forced provider-group kill cannot
         // reach. Give its interrupt handler a bounded chance to clean them up.
         .termination_signal(TerminationSignal::Interrupt)
@@ -156,7 +157,7 @@ where
     match command.execute(&client, cancel).await {
         Ok(output) => {
             let mut result = parse(&output.stdout, &output_path, run.resume.as_deref());
-            result.diagnostics = output.stderr;
+            result.diagnostics = super::output::diagnostic(&output.stderr);
             result
         }
         Err(error) => failure(error, &output_path),
@@ -280,7 +281,7 @@ impl StreamState {
             ..RunResult::new(Provider::Codex)
         };
         if let Some(error) = self.terminal_error {
-            result.text = std::fs::read_to_string(output_path)
+            result.text = output::final_message(output_path)
                 .map(normalize_final_newline)
                 .unwrap_or(result.text);
             if let Some(conflict) = self.identity.error(None) {
@@ -291,7 +292,7 @@ impl StreamState {
         if !self.completed {
             return result.fail(RunError::protocol("Codex did not emit turn.completed"));
         }
-        match std::fs::read_to_string(output_path) {
+        match output::final_message(output_path) {
             Ok(text) => result.text = normalize_final_newline(text),
             Err(error) => {
                 return result.fail(RunError::protocol(format!(
@@ -313,7 +314,7 @@ impl StreamState {
                 .fail(RunError::protocol(format!("invalid Codex JSONL: {source}"))),
             other => failure(other, output_path),
         };
-        result.diagnostics = process.diagnostics;
+        result.diagnostics = output::diagnostic(&process.diagnostics);
         let error = process
             .error
             .take()
@@ -496,7 +497,7 @@ fn parse_events(
     {
         // Preserve useful partial text in JSON, but never print it as a successful
         // text-mode answer. Native failures may not write the final-message file.
-        result.text = std::fs::read_to_string(output_path)
+        result.text = output::final_message(output_path)
             .map(normalize_final_newline)
             .unwrap_or(result.text);
         if let Some(conflict) = identity.error(None) {
@@ -507,7 +508,7 @@ fn parse_events(
     if !query.events.iter().any(JsonLineEvent::is_turn_completed) {
         return result.fail(RunError::protocol("Codex did not emit turn.completed"));
     }
-    match std::fs::read_to_string(output_path) {
+    match output::final_message(output_path) {
         Ok(text) => result.text = normalize_final_newline(text),
         Err(error) => {
             return result.fail(RunError::protocol(format!(
@@ -554,7 +555,11 @@ fn terminal_error(event: &JsonLineEvent) -> RunError {
 fn has_failed_turn_identity_conflict(stdout: &str, parsed: &RunResult) -> bool {
     let mut identity = Identity::default();
     let mut turn_failed = false;
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+    for line in stdout.lines() {
+        // Match parse(): non-object lines are diagnostics, not admitted events.
+        if !line.trim_start().starts_with('{') {
+            continue;
+        }
         let Ok(event) = serde_json::from_str::<JsonLineEvent>(line) else {
             return false;
         };
@@ -562,11 +567,11 @@ fn has_failed_turn_identity_conflict(stdout: &str, parsed: &RunResult) -> bool {
         identity.observe(&event);
     }
     turn_failed
-        && identity.error(None).is_some_and(|conflict| {
-            parsed.error.as_ref().is_some_and(|error| {
-                error.kind == ErrorKind::Protocol && error.message == conflict.message
-            })
-        })
+        && identity.conflict.is_some()
+        && parsed
+            .error
+            .as_ref()
+            .is_some_and(|error| error.kind == ErrorKind::Protocol)
 }
 
 fn failure(error: Error, output_path: &Path) -> RunResult {
@@ -594,7 +599,7 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
             } else {
                 result = parsed;
             }
-            result.diagnostics = stderr;
+            result.diagnostics = output::diagnostic(&stderr);
             result
                 .error
                 .take()
@@ -626,6 +631,13 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
             format!("Codex exceeded its execution timeout ({timeout_seconds}s)"),
         ),
         Error::Cancelled { .. } => RunError::new(ErrorKind::Cancelled, "Codex run cancelled"),
+        Error::OutputLimitExceeded {
+            stream,
+            limit_bytes,
+        } => RunError::new(
+            ErrorKind::Protocol,
+            format!("Codex {stream} exceeded the {limit_bytes}-byte captured stream limit"),
+        ),
         Error::Io { source, .. } if source.kind() == IoErrorKind::NotFound => {
             RunError::new(ErrorKind::NotFound, source.to_string())
         }

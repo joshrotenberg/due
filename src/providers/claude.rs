@@ -14,7 +14,7 @@ use claude_wrapper::{
 };
 use serde_json::Value;
 
-use super::Context;
+use super::{Context, output};
 use crate::{
     cli::{Effort, Provider, RunArgs},
     result::{ErrorKind, RunError, RunResult, Usage},
@@ -65,6 +65,7 @@ where
     let mut builder = Claude::builder()
         .binary(&context.binary)
         .working_dir(&context.cwd)
+        .output_limit(output::STREAM_LIMIT)
         // Let the native CLI stop tool processes in their own groups before
         // the wrapper forces the remaining owned group to stop.
         .termination_signal(TerminationSignal::Interrupt)
@@ -93,7 +94,7 @@ where
     match command.execute_cancellable(&client, cancel).await {
         Ok(output) => {
             let mut result = parse(&output.stdout);
-            result.diagnostics = output.stderr;
+            result.diagnostics = super::output::diagnostic(&output.stderr);
             result
         }
         Err(error) => failure(error),
@@ -300,7 +301,7 @@ impl StreamState {
                     RunResult::new(Provider::Claude)
                         .fail(RunError::protocol("Claude stream has no terminal result"))
                 });
-                result.diagnostics = output.stderr;
+                result.diagnostics = super::output::diagnostic(&output.stderr);
                 result
             }
             Err(error) => {
@@ -527,7 +528,7 @@ fn failure(error: Error) -> RunResult {
             } else {
                 result.structured_output = parsed.structured_output;
             }
-            result.diagnostics = stderr;
+            result.diagnostics = output::diagnostic(&stderr);
             result
                 .error
                 .take()
@@ -605,6 +606,13 @@ fn failure(error: Error) -> RunResult {
             format!("Claude exceeded its execution timeout ({timeout_seconds}s)"),
         ),
         Error::Cancelled => RunError::new(ErrorKind::Cancelled, "Claude run cancelled"),
+        Error::OutputLimitExceeded {
+            stream,
+            limit_bytes,
+        } => RunError::new(
+            ErrorKind::Protocol,
+            format!("Claude {stream} exceeded the {limit_bytes}-byte captured stream limit"),
+        ),
         Error::Io { source, .. } if source.kind() == IoErrorKind::NotFound => {
             RunError::new(ErrorKind::NotFound, source.to_string())
         }
