@@ -35,6 +35,7 @@ case "${DUE_CONTINUATION_MODE:-success}" in
         esac
         second=$(printf '{"type":"result","subtype":"%s","result":"PHASE_TWO","is_error":true,"session_id":"last","errors":["%s"]}' "$subtype" "$message") ;;
     exit_without_terminal|exit_with_invalid_terminal) : ;;
+    single_missing_session) first='{"type":"result","subtype":"success","result":"PHASE_ONE","is_error":false,"usage":{"output_tokens":11}}' ;;
 esac
 if [ "$mode" = invalid_only_structured ]; then
     invalid='{"type":"result","subtype":"success","is_error":false,"result":42,"structured_output":{"kept":"native-json"}}'
@@ -50,6 +51,14 @@ if [ "$mode" = exit_with_invalid_terminal ]; then
     if [ "$stream" = true ]; then printf '%s\n' '{"type":"result","is_error":false,"result":42}'; else printf '%s\n' '[{"type":"result","is_error":false,"result":42}]'; fi
     printf 'native diagnostic\n' >&2
     exit 9
+fi
+if [ "$mode" = single_missing_session ]; then
+    if [ "$stream" = true ]; then
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"init-only"}' "$first"
+    else
+        printf '[%s,%s]\n' '{"type":"system","subtype":"init","session_id":"init-only"}' "$first"
+    fi
+    exit 0
 fi
 if [ "$stream" = true ]; then
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"first"}'
@@ -81,7 +90,7 @@ else
     fi
 fi
 if [ "$mode" = timeout_continuation ]; then sleep 3; fi
-if [ "${DUE_CONTINUATION_MODE:-success}" = exit9 ]; then
-    printf 'native diagnostic\n' >&2
+if [ "$mode" = exit9 ] || [ "$mode" = exit9_empty ]; then
+    if [ "$mode" = exit9 ]; then printf 'native diagnostic\n' >&2; fi
     exit 9
 fi

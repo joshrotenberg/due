@@ -351,7 +351,8 @@ impl StreamState {
             }
         };
         if result.session_id.is_none()
-            && (missing_terminal
+            && (self.segments.count == 1
+                || missing_terminal
                 || result
                     .error
                     .as_ref()
@@ -722,6 +723,7 @@ fn failure(error: Error) -> RunResult {
             ..
         } => {
             let parsed = parse(&stdout);
+            let native_message = output::diagnostic(&stderr);
             if !matches!(
                 parsed.error.as_ref().map(|error| error.kind),
                 Some(ErrorKind::Protocol)
@@ -740,10 +742,10 @@ fn failure(error: Error) -> RunResult {
                 .error
                 .take()
                 .unwrap_or_else(|| {
-                    let message = if result.diagnostics.trim().is_empty() {
+                    let message = if native_message.trim().is_empty() {
                         format!("Claude exited with status {exit_code}")
                     } else {
-                        result.diagnostics.trim().to_owned()
+                        native_message.trim().to_owned()
                     };
                     RunError::new(ErrorKind::Provider, message)
                 })

@@ -199,6 +199,30 @@ fn failure_exit_and_missing_counts_keep_native_data() {
 }
 
 #[test]
+fn native_exit_message_excludes_internal_segment_count() {
+    for trace in [false, true] {
+        for (mode, expected) in [
+            ("exit9", "native diagnostic"),
+            ("exit9_empty", "Claude exited with status 9"),
+        ] {
+            let (value, _, exit) = run(mode, trace);
+            assert_eq!(exit, 1, "{mode}: {value}");
+            assert_eq!(value["error"]["kind"], "provider", "{mode}: {value}");
+            assert_eq!(value["error"]["provider_exit_code"], 9);
+            assert_eq!(value["error"]["message"], expected, "{mode}: {value}");
+        }
+    }
+}
+
+#[test]
+fn streamed_single_result_inherits_init_session_when_result_omits_it() {
+    let (value, _, exit) = run("single_missing_session", true);
+    assert_eq!(exit, 0, "{value}");
+    assert_eq!(value["session_id"], "init-only");
+    assert_eq!(value["text"], "PHASE_ONE");
+}
+
+#[test]
 fn child_adjacent_malformed_and_overflow_are_bounded() {
     for trace in [false, true] {
         let (child, _, exit) = run("child", trace);
