@@ -22,7 +22,7 @@ case "$DUE_ID_MODE" in
         printf '%s\n' '{"type":"thread.started"}'
         printf '%s\n' '{"type":"future.event","session_id":"unrelated-session"}'
         ;;
-    conflict|conflict_failed)
+    conflict|conflict_failed|conflict_completed_exit)
         printf '%s\n' '{"type":"thread.started","thread_id":"Requested-Thread"}'
         printf '%s\n' '{"type":"future.event","session_id":"other-thread"}'
         ;;
@@ -46,4 +46,7 @@ elif [ "$DUE_ID_MODE" = mismatch_then_exit ]; then
     exit 9
 else
     printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
+fi
+if [ "$DUE_ID_MODE" = conflict_completed_exit ]; then
+    exit 9
 fi

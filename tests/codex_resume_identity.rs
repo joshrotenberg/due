@@ -169,5 +169,33 @@ fn resume_requires_consistent_native_thread_identity_in_buffered_and_traced_runs
         assert_eq!(value["error"]["provider_exit_code"], 9);
         assert_eq!(value["session_id"], "Requested-Thread");
         assert_eq!(value["text"], "FINAL ANSWER");
+
+        let mut command = Command::new(env!("CARGO_BIN_EXE_due"));
+        command
+            .args([
+                "run",
+                "--provider",
+                "codex",
+                "--prompt",
+                "synthetic",
+                "--output",
+                "json",
+                "--resume",
+                "requested-thread",
+                "--binary",
+            ])
+            .arg(&binary)
+            .env("DUE_ID_MODE", "conflict_completed_exit");
+        if traced {
+            command.arg("--trace=json");
+        }
+        let output = command.output().unwrap();
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(value["error"]["kind"], "provider", "traced={traced}");
+        assert_eq!(value["error"]["provider_exit_code"], 9);
+        assert_eq!(value["session_id"], "Requested-Thread");
+        assert_eq!(value["text"], "FINAL ANSWER");
+        assert_eq!(value["usage"]["input_tokens"], 12);
     }
 }
