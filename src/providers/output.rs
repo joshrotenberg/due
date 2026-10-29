@@ -14,6 +14,7 @@ pub(crate) fn diagnostic(text: &str) -> String {
 }
 
 fn diagnostic_with_limit(text: &str, limit: usize) -> String {
+    // Precondition: limit can hold MARKER; callers use the fixed 16 KiB budget.
     if text.len() <= limit {
         return text.to_owned();
     }

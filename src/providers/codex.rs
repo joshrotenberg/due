@@ -555,7 +555,11 @@ fn terminal_error(event: &JsonLineEvent) -> RunError {
 fn has_failed_turn_identity_conflict(stdout: &str, parsed: &RunResult) -> bool {
     let mut identity = Identity::default();
     let mut turn_failed = false;
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+    for line in stdout.lines() {
+        // Match parse(): non-object lines are diagnostics, not admitted events.
+        if !line.trim_start().starts_with('{') {
+            continue;
+        }
         let Ok(event) = serde_json::from_str::<JsonLineEvent>(line) else {
             return false;
         };
@@ -563,11 +567,11 @@ fn has_failed_turn_identity_conflict(stdout: &str, parsed: &RunResult) -> bool {
         identity.observe(&event);
     }
     turn_failed
-        && identity.error(None).is_some_and(|conflict| {
-            parsed.error.as_ref().is_some_and(|error| {
-                error.kind == ErrorKind::Protocol && error.message == conflict.message
-            })
-        })
+        && identity.conflict.is_some()
+        && parsed
+            .error
+            .as_ref()
+            .is_some_and(|error| error.kind == ErrorKind::Protocol)
 }
 
 fn failure(error: Error, output_path: &Path) -> RunResult {

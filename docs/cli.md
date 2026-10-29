@@ -379,7 +379,9 @@ return a shortened successful answer. Codex final-message files have a 4 MiB
 read ceiling and must be regular files. Diagnostic and error text is limited to
 16 KiB of UTF-8, including a visible truncation marker. These are byte limits
 on captured streams and the final file, not per-event limits or a hard process
-memory ceiling.
+memory ceiling. On Unix (including macOS and Linux), final-message reads use
+`O_NOFOLLOW` and `O_NONBLOCK`. No-follow behavior is not verified on non-Unix
+platforms.
 
 Use `--trace-detail` with `--trace` or `--trace-file` to include supported command,
 file/tool labels and user-facing assistant messages. Details are bounded and
