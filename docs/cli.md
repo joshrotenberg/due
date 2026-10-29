@@ -746,6 +746,18 @@ excluding intermediate commentary. Claude text comes from the terminal result,
 including when verbose mode wraps records in an array. An empty successful result
 with `structured_output` returns the serialized structured response.
 
+For buffered Claude invocations, Due requests native `--output-format json --verbose`
+and reads the resulting array of records. In a caller capture with
+Claude Code 2.1.312, a background `sleep 8` produced two root `result` records
+with a second `system/init` and `assistant` record between them; nonverbose JSON
+contained only the final result. Due uses the last root result for answer,
+status, structured output, session, and cumulative cost. It adds reported usage
+counters across root result segments; a missing segment counter stays unknown.
+Traced JSONL uses the same accounting and emits one completion phase for the
+final native result when the invocation ends. Child results do not contribute.
+Only a native JSON array or a single result object is supported in buffered
+mode; concatenated JSON documents are not a supported transport.
+
 Failed JSON results may retain partial output: Codex preserves a readable
 final-message file or observed assistant text, including intermediate commentary;
 with `--schema`, retained Codex JSON may also be decoded as `structured_output`.
