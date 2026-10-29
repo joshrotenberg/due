@@ -19,9 +19,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(provider: &'static str) -> Self {
+        Self::with_script(provider, include_bytes!("fixtures/streaming-agent.sh"))
+    }
+
+    fn parsing(provider: &'static str) -> Self {
+        Self::with_script(provider, include_bytes!("fixtures/parsing-agent.sh"))
+    }
+
+    fn with_script(provider: &'static str, script: &[u8]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("streaming-provider");
-        fs::write(&binary, include_bytes!("fixtures/streaming-agent.sh")).unwrap();
+        fs::write(&binary, script).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         Self {
             dir,
@@ -31,6 +39,10 @@ impl Fixture {
     }
 
     fn command(&self, mode: &str) -> Command {
+        self.command_output(mode, "json")
+    }
+
+    fn command_output(&self, mode: &str, output: &str) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_due"));
         cmd.args([
             "run",
@@ -39,7 +51,7 @@ impl Fixture {
             "--prompt",
             "SECRET_PROMPT",
             "--output",
-            "json",
+            output,
             "--binary",
         ])
         .arg(&self.binary)
@@ -70,6 +82,10 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if thread::panicking() {
+            self.dir.disable_cleanup(true);
+            eprintln!("retained failing fixture: {}", self.dir.path().display());
+        }
         // Guard against an assertion leaving a gated fake provider running.
         for pid in self.pids() {
             unsafe {
@@ -192,6 +208,302 @@ fn assert_stopped(pids: &[i32]) {
             );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+
+#[test]
+fn codex_buffered_and_file_trace_share_line_admission_and_failure_gates() {
+    for resume in [false, true] {
+        for mode in [
+            "valid",
+            "ignored",
+            "utf8",
+            "utf8_stderr",
+            "replacement",
+            "no_newline",
+            "crlf",
+            "bad_first",
+            "bad_before",
+            "truncated_before",
+            "bad_after",
+            "truncated_after",
+            "bad_before_exit9",
+            "bad_after_exit9",
+            "eof",
+            "eof9",
+            "no_message",
+            "exit9",
+            "failed",
+            "missing_file",
+        ] {
+            let success = matches!(
+                mode,
+                "valid"
+                    | "ignored"
+                    | "utf8"
+                    | "utf8_stderr"
+                    | "replacement"
+                    | "no_newline"
+                    | "crlf"
+            );
+            for traced in [false, true] {
+                let fixture = Fixture::parsing("codex");
+                let mut command = fixture.command(mode);
+                if resume {
+                    command.args(["--resume", "trace-session"]);
+                }
+                if traced {
+                    command.arg("--trace-file").arg(fixture.trace());
+                }
+                let output = run(&mut command);
+                let value = result(
+                    &output,
+                    i32::from(!success),
+                    if success { "succeeded" } else { "failed" },
+                );
+                assert_eq!(
+                    value["text"],
+                    if matches!(mode, "bad_first" | "no_message") {
+                        ""
+                    } else {
+                        "PARTIAL ANSWER"
+                    },
+                    "{mode} traced={traced} resume={resume}: {value}"
+                );
+                assert_eq!(
+                    value["session_id"],
+                    if mode == "bad_first" {
+                        Value::Null
+                    } else {
+                        Value::from("trace-session")
+                    }
+                );
+                let has_usage = matches!(
+                    mode,
+                    "valid"
+                        | "ignored"
+                        | "utf8"
+                        | "utf8_stderr"
+                        | "replacement"
+                        | "no_newline"
+                        | "crlf"
+                        | "bad_after"
+                        | "truncated_after"
+                        | "bad_after_exit9"
+                        | "exit9"
+                        | "missing_file"
+                );
+                assert_eq!(!value["usage"].is_null(), has_usage, "{mode}: {value}");
+                if has_usage {
+                    assert_eq!(value["usage"]["output_tokens"], 3);
+                }
+                if !success {
+                    let native9 = matches!(
+                        mode,
+                        "eof9" | "exit9" | "failed" | "bad_before_exit9" | "bad_after_exit9"
+                    );
+                    // Streaming cleanup after bad JSON can precede natural exit9.
+                    let parser_cleanup =
+                        traced && matches!(mode, "bad_before_exit9" | "bad_after_exit9");
+                    assert_eq!(
+                        value["error"]["kind"],
+                        if native9 && !parser_cleanup {
+                            "provider"
+                        } else {
+                            "protocol"
+                        },
+                        "{mode}: {value}"
+                    );
+                    assert_eq!(
+                        value["error"]["provider_exit_code"],
+                        if native9 && !parser_cleanup {
+                            Value::from(9)
+                        } else {
+                            Value::Null
+                        }
+                    );
+                }
+                if traced {
+                    let bytes = fs::read(fixture.trace()).unwrap();
+                    let events = records(&bytes);
+                    check_trace(
+                        &events,
+                        "codex",
+                        &value["run_id"],
+                        if success { "succeeded" } else { "failed" },
+                        i32::from(!success),
+                    );
+                    assert_eq!(value["trace"]["incomplete"], false);
+                    assert_eq!(value["trace"]["dropped_records"], 0);
+                    no_secrets(&bytes);
+                    assert!(!String::from_utf8_lossy(&bytes).contains("SECRET_IGNORED"));
+                } else {
+                    assert!(
+                        String::from_utf8_lossy(&output.stderr).contains("SECRET_PROVIDER_STDERR")
+                    );
+                    if mode == "utf8_stderr" {
+                        assert!(
+                            String::from_utf8_lossy(&output.stderr)
+                                .contains("invalid stderr: \u{fffd}")
+                        );
+                    }
+                }
+                assert_stopped(&fixture.pids());
+            }
+        }
+    }
+}
+
+#[test]
+fn claude_complete_message_fallback_is_latest_text_only_and_terminal_is_authoritative() {
+    for (mode, text, kind, exit) in [
+        ("eof", "PARTIAL ANSWER", "protocol", 1),
+        ("eof9", "PARTIAL ANSWER", "provider", 1),
+        ("string", "PARTIAL ANSWER", "protocol", 1),
+        ("bad", "PARTIAL ANSWER", "protocol", 1),
+        ("child_after_root", "PARTIAL ANSWER", "protocol", 1),
+        ("child_only", "", "protocol", 1),
+        ("root_null", "ROOT NULL ANSWER", "protocol", 1),
+        ("root_after_child", "ROOT NULL ANSWER", "protocol", 1),
+        ("invalid_parent", "PARTIAL ANSWER", "protocol", 1),
+        ("empty_parent", "PARTIAL ANSWER", "protocol", 1),
+        ("invalid_terminal", "", "protocol", 1),
+        ("empty", "", "protocol", 1),
+        ("no_text", "", "protocol", 1),
+        ("success", "TERMINAL ANSWER", "", 0),
+        ("success9", "TERMINAL ANSWER", "provider", 1),
+        ("empty_success", "", "", 0),
+        ("failed", "TERMINAL FAILURE", "provider", 1),
+        ("failed9", "TERMINAL FAILURE", "provider", 1),
+        ("empty_failed", "", "provider", 1),
+        ("max_turns", "", "max_turns", 1),
+        ("max_budget", "", "max_budget", 1),
+        ("structured", "{\"answer\":42}", "", 0),
+    ] {
+        let fixture = Fixture::parsing("claude");
+        let output = run(fixture
+            .command(mode)
+            .arg("--trace-file")
+            .arg(fixture.trace()));
+        let status = if exit == 0 { "succeeded" } else { "failed" };
+        let value = result(&output, exit, status);
+        assert_eq!(value["text"], text, "{mode}: {value}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SECRET_SUBAGENT"));
+        assert_eq!(value["session_id"], "trace-session");
+        assert_eq!(value["structured_output_present"], mode == "structured");
+        if !kind.is_empty() {
+            assert_eq!(value["error"]["kind"], kind, "{mode}: {value}");
+        }
+        assert_eq!(
+            value["error"]["provider_exit_code"],
+            if matches!(
+                mode,
+                "eof9" | "success9" | "failed9" | "max_turns" | "max_budget"
+            ) {
+                Value::from(9)
+            } else {
+                Value::Null
+            }
+        );
+        let bytes = fs::read(fixture.trace()).unwrap();
+        check_trace(&records(&bytes), "claude", &value["run_id"], status, exit);
+        assert_eq!(value["trace"]["incomplete"], false);
+        no_secrets(&bytes);
+        assert!(!String::from_utf8_lossy(&bytes).contains("SECRET_SUBAGENT"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("TERMINAL"));
+        assert_stopped(&fixture.pids());
+    }
+}
+
+#[test]
+fn partial_schema_intent_and_text_mode_failure_remain_truthful() {
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::parsing(provider);
+        let schema = fixture.dir.path().join("answer.schema.json");
+        fs::write(&schema, r#"{"type":"object"}"#).unwrap();
+        let mode = if provider == "claude" {
+            "json_partial"
+        } else {
+            "bad_after"
+        };
+        let output = run(fixture
+            .command(mode)
+            .arg("--trace-file")
+            .arg(fixture.trace())
+            .arg("--schema")
+            .arg(&schema));
+        let value = result(&output, 1, "failed");
+        assert_eq!(value["answer_schema_validation"], "not_performed");
+        assert_eq!(value["structured_output_present"], false);
+        assert_eq!(value["error"]["kind"], "protocol");
+        if provider == "claude" {
+            assert_eq!(value["text"], "{\"answer\":42}");
+        }
+        // Use the same complete partial content with the text output mode.
+        let mut command = fixture.command_output(mode, "text");
+        if provider == "claude" {
+            command.arg("--trace");
+        }
+        let output = run(&mut command);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert_stopped(&fixture.pids());
+    }
+}
+
+#[test]
+fn claude_partial_message_survives_timeout_and_cancel_after_receipt() {
+    for cancel in [false, true] {
+        let fixture = Fixture::parsing("claude");
+        let mut child = fixture
+            .command(if cancel { "cancel" } else { "timeout" })
+            .arg("--trace-file")
+            .arg(fixture.trace())
+            .args(["--timeout", if cancel { "30s" } else { "2s" }])
+            .spawn()
+            .unwrap();
+        wait_ready(&fixture, &mut child);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Provider writes alone are not a receipt barrier. Wait for Due to
+        // acknowledge the complete text-bearing message in its flushed trace.
+        loop {
+            let bytes = fs::read(fixture.trace()).unwrap_or_default();
+            let complete = bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(&b""[..], |end| &bytes[..=end]);
+            if records(complete)
+                .iter()
+                .any(|event| event["event"] == "message_completed" && event["message_bytes"] == 14)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "message receipt barrier timed out"
+            );
+            assert!(child.try_wait().unwrap().is_none());
+            thread::sleep(Duration::from_millis(20));
+        }
+        if cancel {
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        }
+        let output = finish(child);
+        let (exit, status, kind) = if cancel {
+            (130, "cancelled", "cancelled")
+        } else {
+            (124, "timed_out", "timeout")
+        };
+        let value = result(&output, exit, status);
+        assert_eq!(value["text"], "PARTIAL ANSWER");
+        assert_eq!(value["error"]["kind"], kind);
+        assert_eq!(value["session_id"], "trace-session");
+        assert_eq!(value["structured_output_present"], false);
+        let bytes = fs::read(fixture.trace()).unwrap();
+        check_trace(&records(&bytes), "claude", &value["run_id"], status, exit);
+        no_secrets(&bytes);
+        assert_eq!(fixture.pids().len(), 2);
+        assert_stopped(&fixture.pids());
     }
 }
 

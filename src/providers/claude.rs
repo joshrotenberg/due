@@ -105,6 +105,9 @@ where
 #[derive(Default)]
 struct StreamState {
     terminal: Option<Value>,
+    // Latest complete text-bearing top-level message, for failures without a
+    // terminal result. This is neither a transcript nor native structured data.
+    last_assistant: String,
     session_id: Option<String>,
     active_tools: HashMap<String, String>,
     completed_tools: VecDeque<String>,
@@ -146,7 +149,10 @@ impl StreamState {
             }
             Some("assistant") => {
                 let content = event.data.pointer("/message/content");
-                let mut bytes = content.and_then(Value::as_str).map_or(0, str::len);
+                let mut text = content
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
                 let mut detail = content.and_then(Value::as_str);
                 if let Some(blocks) = content.and_then(Value::as_array) {
                     for block in blocks {
@@ -154,12 +160,10 @@ impl StreamState {
                             Some("text") => {
                                 detail =
                                     detail.or_else(|| block.get("text").and_then(Value::as_str));
-                                bytes = bytes.saturating_add(
-                                    block
-                                        .get("text")
-                                        .and_then(Value::as_str)
-                                        .map_or(0, str::len),
-                                );
+                                if let Some(block_text) = block.get("text").and_then(Value::as_str)
+                                {
+                                    text.push_str(block_text);
+                                }
                             }
                             Some("tool_use") => self.tool_started(
                                 block.get("id").and_then(Value::as_str),
@@ -171,7 +175,17 @@ impl StreamState {
                         }
                     }
                 }
-                progress.assistant(bytes, detail);
+                progress.assistant(text.len(), detail);
+                // Native subagent messages are also top-level JSONL envelopes.
+                // Only root-session text may become the caller's partial answer.
+                if !text.is_empty()
+                    && event
+                        .data
+                        .get("parent_tool_use_id")
+                        .is_none_or(Value::is_null)
+                {
+                    self.last_assistant = text;
+                }
             }
             Some("user") => {
                 if let Some(blocks) = event
@@ -279,6 +293,7 @@ impl StreamState {
 
     fn finish(self, outcome: claude_wrapper::Result<claude_wrapper::CommandOutput>) -> RunResult {
         let terminal = self.terminal.as_ref().map(parse_document);
+        let missing_terminal = terminal.is_none();
         let mut result = match outcome {
             Ok(output) => {
                 let mut result = terminal.unwrap_or_else(|| {
@@ -332,6 +347,9 @@ impl StreamState {
         };
         if result.session_id.is_none() {
             result.session_id = self.session_id;
+        }
+        if missing_terminal && result.error.is_some() {
+            result.text = self.last_assistant;
         }
         result
     }

@@ -133,7 +133,7 @@ dependencies = [
 [[package]]
 name = "codex-wrapper"
 version = "0.4.4"
-source = "git+https://github.com/joshrotenberg/codex-wrapper?rev=1c0bbfa2a66024d094a8117ec83bca0d6b41232c#1c0bbfa2a66024d094a8117ec83bca0d6b41232c"
+source = "git+https://github.com/joshrotenberg/codex-wrapper?rev=e91e6279bc60bdb54ef85940a5bc7a9b03e944dc#e91e6279bc60bdb54ef85940a5bc7a9b03e944dc"
 dependencies = [
  "libc",
  "serde",
