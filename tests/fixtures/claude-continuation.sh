@@ -25,7 +25,7 @@ case "${DUE_CONTINUATION_MODE:-success}" in
     child) : ;;
     malformed_final)
         first='{"type":"result","subtype":"success","result":"PHASE_ONE","structured_output":{"answer":1},"is_error":false,"session_id":"first","total_cost_usd":0.01,"usage":{"input_tokens":4,"output_tokens":11}}'
-        second='{"type":"result","subtype":"success","result":42,"is_error":false,"session_id":"bad"}' ;;
+        second='{"type":"result","subtype":"success","result":42,"structured_output":{"answer":999},"is_error":false,"session_id":"bad","total_cost_usd":9,"usage":{"input_tokens":99,"output_tokens":99}}' ;;
     cap_after_malformed|budget_after_malformed|auth_after_malformed)
         first='{"type":"result","subtype":"success","result":42,"is_error":false}'
         case "$mode" in
@@ -36,6 +36,11 @@ case "${DUE_CONTINUATION_MODE:-success}" in
         second=$(printf '{"type":"result","subtype":"%s","result":"PHASE_TWO","is_error":true,"session_id":"last","errors":["%s"]}' "$subtype" "$message") ;;
     exit_without_terminal|exit_with_invalid_terminal) : ;;
 esac
+if [ "$mode" = invalid_only_structured ]; then
+    invalid='{"type":"result","subtype":"success","is_error":false,"result":42,"structured_output":{"kept":"native-json"}}'
+    if [ "$stream" = true ]; then printf '%s\n' "$invalid"; else printf '[%s]\n' "$invalid"; fi
+    exit 0
+fi
 if [ "$mode" = exit_without_terminal ]; then
     if [ "$stream" = true ]; then printf '%s\n' '{"type":"system","subtype":"init"}'; else printf '%s\n' '[{"type":"system","subtype":"init"}]'; fi
     printf 'native diagnostic\n' >&2

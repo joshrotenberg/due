@@ -79,6 +79,22 @@ fn unfinished_tail_and_invalid_final_keep_last_valid_evidence() {
 }
 
 #[test]
+fn invalid_only_result_preserves_native_structured_output() {
+    for trace in [false, true] {
+        let (value, events, exit) = run("invalid_only_structured", trace);
+        assert_eq!(exit, 1, "{value}");
+        assert_eq!(value["error"]["kind"], "protocol");
+        assert_eq!(
+            value["structured_output"],
+            serde_json::json!({"kept": "native-json"})
+        );
+        assert!(value["text"].as_str().is_some_and(str::is_empty));
+        assert!(value["usage"].is_null());
+        assert!(completion_phases(&events).is_empty());
+    }
+}
+
+#[test]
 fn invalid_final_keeps_structured_evidence_and_bookkeeping_does_not_open_tail() {
     for trace in [false, true] {
         let (value, events, _) = run("bookkeeping", trace);

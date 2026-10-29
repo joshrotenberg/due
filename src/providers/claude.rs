@@ -107,6 +107,7 @@ where
 #[derive(Default)]
 struct StreamState {
     terminal: Option<Value>,
+    invalid_terminal: Option<Value>,
     segments: ResultSegments,
     progress: Progress,
     // Latest complete text-bearing top-level message, for failures without a
@@ -213,9 +214,13 @@ impl StreamState {
                     }
                 }
             }
-            Some("result") if root && self.segments.admit(&event.data) => {
-                self.terminal = Some(event.data);
-                self.last_assistant.clear();
+            Some("result") if root => {
+                if self.segments.admit(&event.data) {
+                    self.terminal = Some(event.data);
+                    self.last_assistant.clear();
+                } else if self.segments.count == 0 {
+                    self.invalid_terminal = Some(event.data);
+                }
             }
             _ => (),
         }
@@ -287,8 +292,12 @@ impl StreamState {
     }
 
     fn finish(self, outcome: claude_wrapper::Result<claude_wrapper::CommandOutput>) -> RunResult {
-        let terminal = self.terminal.as_ref().map(parse_document);
-        let missing_terminal = terminal.is_none();
+        let terminal = self
+            .terminal
+            .as_ref()
+            .or(self.invalid_terminal.as_ref())
+            .map(parse_document);
+        let missing_terminal = self.terminal.is_none();
         let process_failed = outcome.is_err();
         let mut result = match outcome {
             Ok(output) => {
@@ -467,6 +476,7 @@ fn parse_document(document: &Value) -> RunResult {
     };
     let mut segments = ResultSegments::default();
     let mut terminal = None;
+    let mut invalid_terminal = None;
     for record in records {
         if record
             .get("parent_tool_use_id")
@@ -477,16 +487,21 @@ fn parse_document(document: &Value) -> RunResult {
         if record.get("type").and_then(Value::as_str) == Some("result") {
             if segments.admit(record) {
                 terminal = Some(record);
+            } else if segments.count == 0 {
+                invalid_terminal = Some(record);
             }
         } else if opens_continuation(record) {
             segments.continuation = true;
         }
     }
-    let mut result = terminal.map(parse_result).unwrap_or_else(|| {
-        RunResult::new(Provider::Claude).fail(RunError::protocol(
-            "Claude transcript has no terminal result",
-        ))
-    });
+    let mut result = terminal
+        .or(invalid_terminal)
+        .map(parse_result)
+        .unwrap_or_else(|| {
+            RunResult::new(Provider::Claude).fail(RunError::protocol(
+                "Claude transcript has no terminal result",
+            ))
+        });
     if let Some(error) = segments.final_error()
         && !result.error.as_ref().is_some_and(|current| {
             matches!(
