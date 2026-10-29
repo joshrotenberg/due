@@ -524,20 +524,30 @@ fn failure(error: Error) -> RunResult {
                 .with_exit_code(exit_code)
         }
         Error::Auth {
-            message, exit_code, ..
+            kind,
+            message,
+            exit_code,
+            ..
         } => {
+            // A rate limit or exhausted quota needs waiting or credit, not a
+            // new login. Only a native credential failure stays authentication.
+            let rate_limited = kind == claude_wrapper::auth::AuthErrorKind::RateLimit;
             // The wrapper can classify stdout and retain it only as the auth
             // message. Recover a valid terminal result's text and metadata.
             let parsed = parse(&message);
-            if parsed
-                .error
-                .as_ref()
-                .is_some_and(|error| error.kind == ErrorKind::Authentication)
-            {
+            if parsed.error.as_ref().is_some_and(|error| {
+                error.kind == ErrorKind::Authentication
+                    || (rate_limited && error.kind != ErrorKind::Protocol)
+            }) {
                 result = parsed;
             }
-            let message = result.error.take().map_or(message, |error| error.message);
-            RunError::new(ErrorKind::Authentication, message).with_exit_code(exit_code)
+            match result.error.take() {
+                Some(error) if rate_limited => error,
+                Some(error) => RunError::new(ErrorKind::Authentication, error.message),
+                None if rate_limited => RunError::new(ErrorKind::Provider, message),
+                None => RunError::new(ErrorKind::Authentication, message),
+            }
+            .with_exit_code(exit_code)
         }
         Error::MaxTurnsExceeded {
             session_id,
@@ -938,6 +948,165 @@ mod tests {
             let error = result.error.unwrap();
             assert_eq!(error.kind, expected);
             assert_eq!(error.provider_exit_code, Some(1));
+        }
+    }
+
+    #[test]
+    fn wrapper_rate_limit_is_a_provider_failure_and_credential_kinds_stay_authentication() {
+        use claude_wrapper::auth::AuthErrorKind;
+        for (kind, expected) in [
+            (AuthErrorKind::RateLimit, ErrorKind::Provider),
+            (AuthErrorKind::NotAuthenticated, ErrorKind::Authentication),
+            (AuthErrorKind::Expired, ErrorKind::Authentication),
+            (AuthErrorKind::InvalidCredentials, ErrorKind::Authentication),
+            (AuthErrorKind::ProviderError, ErrorKind::Authentication),
+            (AuthErrorKind::Other, ErrorKind::Authentication),
+        ] {
+            let typed = || Error::Auth {
+                kind,
+                command: "unused command".into(),
+                exit_code: 7,
+                message: "native diagnostic".into(),
+            };
+            let buffered = failure(typed());
+            let streamed = StreamState::default().finish(Err(typed()));
+            for result in [buffered, streamed] {
+                let error = result.error.unwrap();
+                assert_eq!(error.kind, expected, "{kind:?}");
+                assert_eq!(error.message, "native diagnostic", "{kind:?}");
+                assert_eq!(error.provider_exit_code, Some(7), "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_rate_limit_stderr_and_credential_stderr_map_to_their_own_kinds() {
+        use claude_wrapper::auth::AuthErrorKind;
+        for (stderr, wrapper_kind, expected) in [
+            (
+                "API Error: 429 Too Many Requests",
+                AuthErrorKind::RateLimit,
+                ErrorKind::Provider,
+            ),
+            (
+                "Usage quota exceeded",
+                AuthErrorKind::RateLimit,
+                ErrorKind::Provider,
+            ),
+            (
+                "Rate limit reached for requests",
+                AuthErrorKind::RateLimit,
+                ErrorKind::Provider,
+            ),
+            (
+                "Not logged in. Please run /login",
+                AuthErrorKind::NotAuthenticated,
+                ErrorKind::Authentication,
+            ),
+            (
+                "Invalid API key",
+                AuthErrorKind::InvalidCredentials,
+                ErrorKind::Authentication,
+            ),
+            (
+                "OAuth token expired",
+                AuthErrorKind::Expired,
+                ErrorKind::Authentication,
+            ),
+        ] {
+            let native = || {
+                Error::from_command_failure(
+                    "unused command".into(),
+                    2,
+                    String::new(),
+                    format!("{stderr}\n"),
+                    None,
+                )
+            };
+            assert!(
+                matches!(native(), Error::Auth { kind, .. } if kind == wrapper_kind),
+                "{stderr}"
+            );
+            let buffered = failure(native());
+            let streamed = StreamState::default().finish(Err(native()));
+            for result in [buffered, streamed] {
+                let error = result.error.unwrap();
+                assert_eq!(error.kind, expected, "{stderr}");
+                assert_eq!(error.message, stderr, "{stderr}");
+                assert_eq!(error.provider_exit_code, Some(2), "{stderr}");
+            }
+        }
+    }
+
+    #[test]
+    fn rate_limit_recovers_native_terminal_and_keeps_expired_oauth_authentication() {
+        let mut quota = terminal();
+        quota["errors"] = json!(["Usage quota exceeded"]);
+        let typed = |message: String| Error::Auth {
+            kind: claude_wrapper::auth::AuthErrorKind::RateLimit,
+            command: "unused command".into(),
+            exit_code: 9,
+            message,
+        };
+        let buffered = failure(typed(quota.to_string()));
+        let streamed = StreamState {
+            terminal: Some(quota),
+            ..StreamState::default()
+        }
+        .finish(Err(typed("API Error: 429".into())));
+        for result in [buffered, streamed] {
+            assert_eq!(result.session_id.as_deref(), Some("session-1"));
+            assert_eq!(result.text, "partial answer");
+            assert_eq!(result.cost_usd, Some(0.03));
+            let error = result.error.unwrap();
+            assert_eq!(error.kind, ErrorKind::Provider);
+            assert_eq!(error.message, "Usage quota exceeded");
+            assert_eq!(error.provider_exit_code, Some(9));
+        }
+
+        assert_expired_oauth_result(failure(typed(expired_oauth_terminal().to_string())));
+        assert_expired_oauth_result(
+            StreamState {
+                terminal: Some(expired_oauth_terminal()),
+                ..StreamState::default()
+            }
+            .finish(Err(typed("API Error: 429".into()))),
+        );
+    }
+
+    #[test]
+    fn streamed_cap_cancel_and_timeout_precede_rate_limit() {
+        let mut native = terminal();
+        native["subtype"] = json!("error_max_turns");
+        let error = Error::from_command_failure(
+            "unused command".into(),
+            1,
+            String::new(),
+            "API Error: 429 Too Many Requests".into(),
+            None,
+        );
+        let result = StreamState {
+            terminal: Some(native),
+            ..StreamState::default()
+        }
+        .finish(Err(error));
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, ErrorKind::MaxTurns);
+        assert_eq!(error.provider_exit_code, Some(1));
+        assert_eq!(result.session_id.as_deref(), Some("session-1"));
+
+        let mut limited = terminal();
+        limited["errors"] = json!(["API Error: 429 Too Many Requests"]);
+        for (error, expected) in [
+            (Error::Cancelled, ErrorKind::Cancelled),
+            (Error::Timeout { timeout_seconds: 5 }, ErrorKind::Timeout),
+        ] {
+            let result = StreamState {
+                terminal: Some(limited.clone()),
+                ..StreamState::default()
+            }
+            .finish(Err(error));
+            assert_eq!(result.error.unwrap().kind, expected);
         }
     }
 
