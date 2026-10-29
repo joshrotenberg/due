@@ -373,6 +373,14 @@ text are suppressed to keep that channel content-limited and JSONL parseable.
 The trace retains the error kind and exit code. Use `--output json` for detailed
 runtime errors on stdout; those errors and final responses can contain provider content.
 
+Captured provider stdout and stderr each have a cumulative 64 MiB ceiling in
+buffered and streaming runs. Exceeding either ceiling fails the run; it does not
+return a shortened successful answer. Codex final-message files have a 4 MiB
+read ceiling and must be regular files. Diagnostic and error text is limited to
+16 KiB of UTF-8, including a visible truncation marker. These are byte limits
+on captured streams and the final file, not per-event limits or a hard process
+memory ceiling.
+
 Use `--trace-detail` with `--trace` or `--trace-file` to include supported command,
 file/tool labels and user-facing assistant messages. Details are bounded and
 marked when truncated; text output escapes terminal controls. They may contain

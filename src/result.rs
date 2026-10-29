@@ -216,6 +216,8 @@ impl RunResult {
     }
 
     pub fn fail(mut self, error: RunError) -> Self {
+        let mut error = error;
+        error.message = crate::providers::output::diagnostic(&error.message);
         self.status = match error.kind {
             ErrorKind::Timeout => Status::TimedOut,
             ErrorKind::Cancelled => Status::Cancelled,
