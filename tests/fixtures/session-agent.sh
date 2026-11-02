@@ -7,8 +7,8 @@ set -eu
 
 provider=claude
 for arg in "$@"; do [ "$arg" != app-server ] || provider=codex; done
-printf '%s\n' "$$" > "$DUE_MCP_FIXTURE_DIR/pid"
-trap 'touch "$DUE_MCP_FIXTURE_DIR/exited"' EXIT
+printf '%s\n' "$$" > "$DUE_SESSION_FIXTURE_DIR/pid"
+trap 'touch "$DUE_SESSION_FIXTURE_DIR/exited"' EXIT
 count=0
 active=0
 pending=0
@@ -63,7 +63,7 @@ begin() {
         # Overflow must be rejected while the start response is still withheld.
         case "$line" in
           *'"early-release"'*)
-            while [ ! -f "$DUE_MCP_FIXTURE_DIR/release-start" ]; do sleep 0.01; done
+            while [ ! -f "$DUE_SESSION_FIXTURE_DIR/release-start" ]; do sleep 0.01; done
             ;;
           *) return ;;
         esac
@@ -73,7 +73,7 @@ begin() {
         sleep 0.2
         ;;
     esac
-    if [ "${DUE_MCP_EARLY:-0}" != 1 ]; then result "$id" "$start_response"; fi
+    if [ "${DUE_SESSION_EARLY:-0}" != 1 ]; then result "$id" "$start_response"; fi
     notify turn/started '{"threadId":"'"$native"'","turn":{"id":"'"$turn"'","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1790223474,"completedAt":null,"durationMs":null}}'
     notify item/started '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"id":"exec-fixture","type":"commandExecution","command":"fixture-only","fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}}'
   fi
@@ -100,7 +100,7 @@ begin() {
     *'"fail"'*) finish failed 'partial answer' ;;
     *) finish completed "turn $count" ;;
   esac
-  if [ "$provider" = codex ] && [ "${DUE_MCP_EARLY:-0}" = 1 ]; then result "$id" "$start_response"; fi
+  if [ "$provider" = codex ] && [ "${DUE_SESSION_EARLY:-0}" = 1 ]; then result "$id" "$start_response"; fi
 }
 
 id_re='"id":(-?[0-9]+)'
@@ -108,7 +108,7 @@ request_re='"request_id":"([^"]+)"'
 method_re='"method":"([^"]+)"'
 
 while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$DUE_MCP_FIXTURE_DIR/input.jsonl"
+  printf '%s\n' "$line" >> "$DUE_SESSION_FIXTURE_DIR/input.jsonl"
   if [ "$provider" = claude ]; then
     case "$line" in
       *'"type":"control_request"'*)

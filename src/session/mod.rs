@@ -29,8 +29,6 @@ const MAX_EVENTS: usize = 256;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(tower_mcp::schemars::JsonSchema))]
-#[cfg_attr(feature = "mcp", schemars(crate = "tower_mcp::schemars"))]
 #[serde(deny_unknown_fields)]
 pub struct OpenOptions {
     pub provider: Provider,

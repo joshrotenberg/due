@@ -193,22 +193,14 @@ replies and close, with `session.item` streaming. It needs no initialization or
 tool envelopes. See the [RPC guide](docs/rpc.md) and
 [two-turn JavaScript client](examples/session-harness/rpc-example.mjs).
 
-An opt-in `mcp` feature adds resident Claude and Codex sessions over MCP stdio:
+One session and one active turn run per process. Default builds and `due run`
+behavior are unchanged. Set `stream: true` on `session.open` for native items;
+`session.read` provides bounded recovery across turns. A
+[JavaScript harness example](examples/session-harness/README.md) compares CLI
+resume and resident RPC behind one scoped conversation API.
 
-```sh
-cargo build --locked --features mcp
-./target/debug/due mcp
-```
-
-It exposes seven JSON tools for session creation/resume, turn start/read/interrupt,
-interaction replies and close. One session and one active turn per process; no
-TOML configuration or daemon. Default builds and `due run` behavior are unchanged.
-Set `stream: true` on `session_open` for native item notifications; `session_read`
-provides bounded recovery across turns. See [the spike guide](docs/mcp.md) for
-examples, lifecycle, limits and validation.
-A [JavaScript harness example](examples/session-harness/README.md) compares CLI
-resume, resident MCP and resident RPC behind one scoped conversation API. The
-two resident adapters share the same session host; RPC-only builds omit MCP.
+The separate [MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
+is preserved on `codex/due-mcp-spike`. This branch contains only the RPC adapter.
 
 ## Limits of `due run`
 

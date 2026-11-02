@@ -5,9 +5,10 @@ packaging, and tests that protect existing behavior. The explicitly scoped `due 
 is the packaging exception: it installs the existing delegate plugin without
 starting agent work. Other new commands, configuration layers, automatic retries,
 schedulers and MCP servers remain outside the freeze. The explicitly requested
-resident-session spike is isolated behind the opt-in `mcp` and `rpc` features;
+resident-session spike is isolated behind the opt-in `rpc` feature;
 it must preserve `due run` behavior and existing wrapper revisions. See the
-[MCP guide](docs/mcp.md) and [plain RPC guide](docs/rpc.md).
+[plain RPC guide](docs/rpc.md). The MCP experiment lives separately on
+`codex/due-mcp-spike`.
 
 Use [installation](docs/install.md) for local setup and
 [dogfooding](docs/dogfooding.md) for issue reports. Keep changes small and include
@@ -29,17 +30,9 @@ authorized, bounded task in a disposable workspace and retain the result/trace.
 One Due invocation owns one foreground run. The caller owns orchestration and
 independent verification.
 
-The optional [MCP client example](examples/mcp-client/README.md) has offline
-Python tests for its stream handling and lifecycle. They use a fake peer and
-make no provider calls:
-
-```sh
-python3 -B -m unittest discover -s examples/mcp-client -p 'test_*.py' -v
-```
-
 The optional [JavaScript session comparison](examples/session-harness/README.md)
-uses one scoped API over CLI resume, resident MCP and resident RPC. Its offline tests use fake
-Due peers and do not invoke models:
+uses one scoped API over CLI resume and resident RPC. Its offline tests use
+fake Due peers and do not invoke models:
 
 ```sh
 node --test examples/session-harness/*.test.mjs

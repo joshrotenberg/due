@@ -1,4 +1,4 @@
-// Optional Node 22+ persistent backends. Both transports share lifecycle and recovery.
+// Optional Node 22+ resident RPC client with lifecycle ownership and cursor recovery.
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,9 +20,6 @@ async function bounded(promise, ms, message) {
   finally { clearTimeout(timer); }
 }
 
-export const openResident = options => openPersistent(options, 'mcp');
-export const openRpc = options => openPersistent(options, 'rpc');
-
 // Node timers overflow above this range and would turn a long wait into 1 ms.
 export function normalizeTurnWaitMs(value = 300_000) {
   if (value !== null && (!Number.isInteger(value) || value < 1 || value > 2_147_483_647)) {
@@ -37,15 +34,14 @@ const STALE_REPLY = /unknown or finished turn|unknown or resolved interaction|No
 // onItem saw (`record.data` is the complete interaction item, so the exact session_id, turn_id and
 // data.request_id come from it). `signal` aborts when the turn finishes, the session fails or is
 // cancelled, or the scope closes; a result returned after that is discarded and never sent.
-async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => {}, onInteraction, signal, turnWaitMs }, transport) {
+export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => {}, onInteraction, signal, turnWaitMs }) {
   const waitMs = normalizeTurnWaitMs(turnWaitMs);
   if (onInteraction !== undefined && typeof onInteraction !== 'function') throw new Error('onInteraction must be a function');
-  const label = transport === 'rpc' ? 'RPC' : 'MCP';
-  const notification = transport === 'rpc' ? 'session.item' : 'notifications/due/session_item';
+  const notification = 'session.item';
   if (signal?.aborted) throw new Error('Session cancelled before launch');
   const wire = openSync(join(artifactDir, 'protocol.jsonl'), 'wx', 0o600);
   const stderr = openSync(join(artifactDir, 'stderr.log'), 'wx', 0o600);
-  const child = spawn(dueBinary, [transport], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(dueBinary, ['rpc'], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
   const exited = deferred(), pending = new Map(), turnIds = new Map(), decisions = new Map(), finishedTurns = new Set(), resolvedKeys = new Set();
   let sequence = 0, cursor = 0, sessionId, nativeId, active, fatal, closePromise, spawned = false;
   let closing = false, closed = false, buffer = Buffer.alloc(0), tail = Promise.resolve();
@@ -80,30 +76,23 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
   function send(message) {
     if (fatal) throw fatal;
     const line = JSON.stringify(message) + '\n';
-    if (Buffer.byteLength(line) > 1024 * 1024) throw new Error(`${label} request exceeds 1 MiB`);
+    if (Buffer.byteLength(line) > 1024 * 1024) throw new Error('RPC request exceeds 1 MiB');
     capture('in', message);
     child.stdin.write(line, error => { if (error) fail(error); });
   }
   async function rpc(method, params, soft = false, meta = {}) {
     if (fatal) throw fatal;
-    if (closed) throw new Error(`Due ${label} is already closed`);
+    if (closed) throw new Error('Due RPC is already closed');
     const id = ++sequence, done = deferred(); pending.set(id, done);
     try {
       send({ jsonrpc: '2.0', id, method, params });
-      return await bounded(done.promise, 300_000, `${label} ${method} timed out`);
+      return await bounded(done.promise, 300_000, `RPC ${method} timed out`);
     } catch (error) {
       meta.collateral = done.collateral === true; // Rejected by an earlier failure rather than failing itself.
       if (!soft || !error.remote) fail(error);
       throw error;
     }
     finally { pending.delete(id); }
-  }
-  async function call(name, args, soft = false, meta = {}) {
-    if (transport === 'rpc') return rpc(name.replace('_', '.'), args, soft, meta);
-    const value = await rpc('tools/call', { name, arguments: args }, soft, meta);
-    if (value.isError) throw Object.assign(new Error(`${name}: ${JSON.stringify(value.content)}`), { remote: true });
-    if (!value.structuredContent) throw new Error(`${name}: missing structured result`);
-    return value.structuredContent;
   }
   function emit(wire) {
     if (!Number.isSafeInteger(wire.cursor) || wire.cursor < 1) throw new Error('Invalid session cursor');
@@ -171,7 +160,7 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
         return fail(new Error('onInteraction must return a provider-native response object'));
       }
       try {
-        await call('interaction_reply', { session_id: item.session_id, turn_id: item.turn_id, request_id: requestId, response }, true);
+        await rpc('interaction.reply', { session_id: item.session_id, turn_id: item.turn_id, request_id: requestId, response }, true);
       } catch (error) {
         // Only a recognized stale-reply rejection for this exact interaction's observed resolution, or
         // its turn's observed terminal item, is a benign race.
@@ -190,7 +179,7 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
     if (item.cursor > cursor + 1) {
       let page;
       do {
-        page = await call('session_read', { session_id: item.session_id, after: cursor, limit: 64 });
+        page = await rpc('session.read', { session_id: item.session_id, after: cursor, limit: 64 });
         if (page.items_lost) throw new Error('Session journal lost requested items');
         const before = cursor;
         for (const restored of page.items) emit(restored);
@@ -202,14 +191,14 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
   child.stdout.on('data', chunk => {
     try {
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > 16 * 1024 * 1024) throw new Error(`${label} frame exceeds 16 MiB`);
+      if (buffer.length > 16 * 1024 * 1024) throw new Error('RPC frame exceeds 16 MiB');
       let end;
       while ((end = buffer.indexOf(10)) >= 0) {
         const message = JSON.parse(buffer.subarray(0, end).toString('utf8')); buffer = buffer.subarray(end + 1);
         capture('out', message);
         if (Object.hasOwn(message, 'id')) {
           const entry = pending.get(message.id);
-          if (!entry) throw new Error(`Unexpected ${label} response ID`);
+          if (!entry) throw new Error('Unexpected RPC response ID');
           if (message.error) entry.reject(Object.assign(new Error(JSON.stringify(message.error)), { remote: true })); else entry.resolve(message.result);
         } else if (message.method === notification) {
           const item = message.params, bytes = Buffer.byteLength(JSON.stringify(item));
@@ -221,14 +210,14 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
     } catch (error) { fail(error); }
   });
   child.stdout.on('end', () => {
-    if (buffer.length) fail(new Error(`Truncated ${label} output frame`));
-    else if (!closing) fail(new Error(`Unexpected ${label} stdout EOF`));
+    if (buffer.length) fail(new Error('Truncated RPC output frame'));
+    else if (!closing) fail(new Error('Unexpected RPC stdout EOF'));
   });
   child.once('close', (code, term) => {
     closed = true; record.exit_code = spawned && Number.isInteger(code) ? code : null; record.signal = term;
-    for (const entry of pending.values()) entry.reject(new Error(`Due ${label} closed before its response`));
+    for (const entry of pending.values()) entry.reject(new Error('Due RPC closed before its response'));
     pending.clear();
-    if (!closing && !fatal) fail(new Error(`Due ${label} exited ${code ?? term}`));
+    if (!closing && !fatal) fail(new Error(`Due RPC exited ${code ?? term}`));
     exited.resolve();
   });
   const getReceipt = () => ({ processes: [{ ...record }], native_session_id: nativeId ?? null, execution_error: fatal });
@@ -242,7 +231,7 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
       let cleanupError;
       const meta = {};
       try {
-        if (!fatal && sessionId && !closed) await bounded(call('session_close', { session_id: sessionId }, false, meta), 20_000, 'session_close timed out');
+        if (!fatal && sessionId && !closed) await bounded(rpc('session.close', { session_id: sessionId }, false, meta), 20_000, 'session.close timed out');
       } catch (error) {
         // A close call rejected only because an earlier failure (kept as execution_error) cleared it is not
         // a cleanup failure. Its own errors, and exit status below, are still reported as cleanup.
@@ -250,10 +239,10 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
         stop();
       }
       child.stdin.end();
-      try { await bounded(exited.promise, 20_000, `Due ${label} did not close`); }
+      try { await bounded(exited.promise, 20_000, 'Due RPC did not close'); }
       catch (error) {
         cleanupError ??= error; record.forced_kill = true; child.kill('SIGKILL');
-        await bounded(exited.promise, 5_000, `Due ${label} could not be reaped`);
+        await bounded(exited.promise, 5_000, 'Due RPC could not be reaped');
       } finally {
         try { await bounded(tail, 5_000, 'Resident item drain timed out'); }
         catch (error) { cleanupError ??= error; fail(error); }
@@ -262,7 +251,7 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
         jsonFile(join(artifactDir, 'resident-exit.json'), { ...record, error: (cleanupError ?? fatal)?.message ?? null });
       }
       if (cleanupError) throw cleanupError;
-      if (record.exit_code !== 0 || record.signal) throw new Error(`Due ${label} exited ${record.exit_code ?? record.signal}`);
+      if (record.exit_code !== 0 || record.signal) throw new Error(`Due RPC exited ${record.exit_code ?? record.signal}`);
       return getReceipt();
     })();
     return closePromise;
@@ -278,7 +267,7 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
       jsonFile(join(dir, 'request.json'), { id, prompt });
       active = { id, dueId: null, done: deferred() };
       try {
-        const started = await call('turn_start', { session_id: sessionId, prompt });
+        const started = await rpc('turn.start', { session_id: sessionId, prompt });
         if (active.dueId && active.dueId !== started.turn_id) throw new Error('Turn identity changed');
         active.dueId = started.turn_id; turnIds.set(started.turn_id, id);
         const result = await (waitMs === null ? active.done.promise
@@ -302,13 +291,9 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
     getReceipt,
   };
   try {
-    if (transport === 'mcp') {
-      await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'due-session-harness', version: '1' } });
-      send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-    }
-    const opened = await call('session_open', { ...profile, ephemeral: false, stream: true });
-    if (transport === 'rpc' && (opened.protocol_version !== 1 || opened.stream?.enabled !== true
-      || opened.stream?.method !== notification)) throw new Error('Unsupported Due RPC session protocol');
+    const opened = await rpc('session.open', { ...profile, ephemeral: false, stream: true });
+    if (opened.protocol_version !== 1 || opened.stream?.enabled !== true
+      || opened.stream?.method !== notification) throw new Error('Unsupported Due RPC session protocol');
     sessionId = opened.session_id;
     if (opened.native_session_id) {
       if (nativeId && nativeId !== opened.native_session_id) throw new Error('Native session identity changed');

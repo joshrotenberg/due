@@ -7,9 +7,10 @@ cargo build --locked --release --features rpc
 ./target/release/due rpc
 ```
 
-This is an opt-in alternative to `due mcp`. It uses the same resident Claude
-`DuplexSession` and Codex `AppServer` host, with one session per Due process and
-one active turn at a time. The `rpc` feature does not depend on `tower-mcp`.
+This opt-in interface hosts a resident Claude `DuplexSession` or Codex
+`AppServer`, with one session per Due process and one active turn at a time.
+The separate [MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
+lives on `codex/due-mcp-spike`; this branch contains only the RPC adapter.
 Default builds and `due run` behavior remain unchanged; wrapper revisions stay
 pinned. There is no model loop, scheduler, config loader or new configuration
 format. Native authentication, settings and permissions remain inherited.
@@ -38,11 +39,20 @@ on failure; use requests for session mutations whose outcome matters.
 | `interaction.reply` | `session_id`, `turn_id`, `request_id`, `response` | Native reply accepted for delivery |
 | `session.close` | `session_id` | Awaited native shutdown and last native ID |
 
-Parameters and results otherwise match the [shared session contract](mcp.md).
-Unknown parameter fields are rejected. `schema`, `native_args`, trace settings
-and Due request-file inheritance are not exposed. `effort` is low/medium/high;
+Parameters are JSON objects, with a deliberately smaller schema than a
+`due run --request` file. Pass them directly through RPC; there is no request-file
+loader. Unknown fields are rejected. `schema`, `native_args`, trace settings and
+Due request-file inheritance are not exposed. `effort` is low/medium/high;
 `timeout` is a per-turn duration such as `2m`, with no default deadline.
-`ephemeral` defaults to false and conflicts with `resume`.
+`ephemeral` defaults to false and conflicts with `resume`. Paths resolve from
+the server's working directory; `binary` selects a local provider executable.
+Settings remain fixed for the open session.
+
+Due session handles and native provider IDs are different namespaces. Use the
+returned `session_id` for RPC calls. Save `native_session_id` from `turn.read`
+or `session.close` for a later `session.open` with `resume`. Native IDs can be
+absent until Claude's first turn. Resume requires the same provider and its
+persisted session storage; ephemeral sessions cannot be resumed.
 
 RPC failures use an `error` object with a code and message: parse error `-32700`,
 invalid request or unsupported batch `-32600`, unknown method `-32601`, invalid
@@ -68,7 +78,8 @@ Due handle in subsequent requests:
 {"jsonrpc":"2.0","id":2,"method":"turn.start","params":{"session_id":"SESSION","prompt":"Review the parser. Do not change files."}}
 ```
 
-This returns `result.turn_id`. Native items arrive independently, retaining
+This returns `result.turn_id`. A second in-flight turn is rejected. Native
+items arrive independently, retaining
 their provider IDs, nested payloads and unknown fields:
 
 ```json
@@ -76,7 +87,14 @@ their provider IDs, nested payloads and unknown fields:
 ```
 
 Wait for `kind: "turn_finished"` for that turn; its `data` is the normalized Due
-result. Then send a follow-up through the same handle:
+result. Alternatively, call `turn.read` with `session_id`, `turn_id`, `after: 0`
+and `wait_ms: 10000`, then advance `after` to its returned `cursor`. Each read
+waits at most 10 seconds and returns immediately for pending input or a terminal
+result. States are `running`, `awaiting_input` and `finished`; inspect the final
+`result.status` and `result.error` for success or failure. The normalized result
+uses Due's existing vocabulary, with `run_id` set to the Due turn ID.
+
+After the turn settles, send a follow-up through the same handle:
 
 ```json
 {"jsonrpc":"2.0","id":3,"method":"turn.start","params":{"session_id":"SESSION","prompt":"Which finding matters most?"}}
@@ -115,27 +133,70 @@ remain separate. See the [caller wait options](../examples/session-harness/READM
 
 ## Streaming, permissions and cleanup
 
-`session.item` carries the same complete available wrapper payloads as the MCP
-adapter. It is not a byte-for-byte copy of the native protocol: Claude exposes
-projected initialization metadata live and may provide the complete snapshot
-later, and its internal control responses are consumed by the wrapper. See the
-[item provenance and limits](mcp.md#pushed-session-items). Codex records every native
-request as `native_request` before correlation, including requests later exposed
-as `interaction`. Claude uses `native_request` for permission requests denied
-outside its pending-interaction flow.
+`session.item` carries the complete payload available through the pinned
+wrappers. Each item has a session-wide increasing `cursor`. `turn_id` is a Due
+turn ID only when attribution is known; startup, idle and unattributed native
+events use null. Native payloads retain their own provider IDs and unknown
+fields. Claude records use `data: {"provider":"claude","event":{...}}`; Codex
+records use `data: {"provider":"codex","method":"...","params":{...}}`.
+
+| Kind | Contents |
+| --- | --- |
+| `native` | Complete exposed native payload, including message and tool items |
+| `native_response` | Codex thread/start, thread/resume or turn/start response in `data.response`; structured RPC failures in `data.error` |
+| `native_request` | All Codex native requests, including those later exposed as `interaction`; Claude permission requests denied outside the pending-interaction flow |
+| `native_summary` | Claude's projected initialization event or wrapper subscriber-loss marker |
+| `native_snapshot` | Full Claude initialization recovered from the completed turn, delivered later |
+| `turn_started` / `turn_finished` | Due-submitted prompt / normalized Due result |
+| `interaction` / `interaction_resolved` | Pending request `{request_id,request}` / resolution `{request_id}` |
+| `omitted` | Explicit record-size omission with original kind, byte count and reason |
+
+The stream also includes Due session lifecycle and control records. It is not a
+byte-for-byte copy of the native protocol: Claude consumes control responses
+internally and projects live initialization metadata. Its permission callback
+exposes the request body rather than the whole control envelope. A delayed
+initialization snapshot is available only when retained in a turn. Native
+resume does not replay all earlier provider history through Due.
 
 Streaming is opt-in. `session.read` works without it and recovers gaps using the
 last session-wide `cursor`. Keep that cursor separate from `turn.read`'s cursor.
-The journal retains 1024 items / 8 MiB; items above 4 MiB become explicit
-`omitted` records. The independent push queue retains 256 items / 8 MiB and
-drops oldest items under backpressure. Inspect `push_dropped`, `items_lost` and
-`dropped_items`; this is bounded in-memory recovery, not durable delivery.
+For example:
+
+```json
+{"jsonrpc":"2.0","id":5,"method":"session.read","params":{"session_id":"SESSION","after":18,"limit":64}}
+```
+
+The result contains `items`, `cursor` (the last returned position),
+`latest_cursor`, `has_more`, `items_lost` and `dropped_items`. Advance `after` to
+`cursor` and continue while `has_more` is true. `limit` defaults to 64 and accepts
+1 through 256. The journal spans turns and retains 1024 items / 8 MiB; items
+above 4 MiB become explicit `omitted` records. The independent push queue retains
+256 items / 8 MiB and drops oldest items under backpressure. A cursor gap or
+increased `push_dropped` count signals that the caller should recover through
+`session.read`; `items_lost` indicates the journal also lost requested payloads.
+This is bounded in-memory recovery, not durable delivery. Read anything needed
+before closing the session or process.
+
+`turn.read` retains only the latest turn's result and event window. Its native
+event window holds 256 records / 1 MiB; `events_lost` and `dropped_events` report
+gaps. The retained terminal result and pending interactions are separate, so a
+caller can still read the current result after missing a pushed terminal item.
+Native payloads can contain model text, tool inputs, paths and other sensitive
+data, unlike Due's redacted optional run tracing.
 
 An `interaction` item contains a native `request_id` and request body. Reply
 using `interaction.reply` with that ID, the Due session and turn IDs, and a
 provider-native response. This is a normal caller-initiated RPC request with
 its own separate transport ID. Due never automatically approves requests.
-Already-allowed native actions need not ask. `turn.interrupt` requests a stop;
+Already-allowed native actions need not ask. Claude accepts
+`{"behavior":"deny","message":"This task is read-only."}` or `{"behavior":"allow"}`
+with optional `updated_input`. Codex uses the native response shape for the
+request method; command approvals commonly accept `{"decision":"decline"}` or
+`{"decision":"accept"}`, while questions have different shapes. Unknown,
+resolved and completed-turn interaction IDs are rejected. Reply success means
+delivery, not that the native operation succeeded.
+
+`turn.interrupt` requests a stop;
 continue reading until the turn settles before sending the next prompt.
 Interruption does not roll back effects or prove every native command stopped.
 
@@ -161,7 +222,12 @@ a five-second end-to-end guarantee. An already-running native open can consume
 its provider control deadlines before cleanup, and the pinned Claude transport
 can stall on a blocked native stdin write. Underlying wrapper/platform limits
 on descendant settlement remain unchanged. Native turn event retention is also
-not fully bounded by Due's outward journal limits.
+not fully bounded by Due's outward journal limits. A native deadline closes the
+session; close its failed Due handle before opening another. Codex caps native
+output at 64 MiB per resident process and final answer text at 4 MiB. The pinned
+Claude wrapper retains native turn events without a configurable byte cap.
+Pending native requests are capped at 32. Claude's native cost is a session
+total, including spend restored on resume; Codex cost remains absent.
 
 ## Checking the spike
 
@@ -178,20 +244,22 @@ continuity, full live items, cursor replay, permissions, interrupt during a
 concurrent long poll, native failures, deadlines, early results, framing and
 cleanup. No model credentials are used by those tests.
 
-To compare all three clients with a real provider and a disposable workspace:
+To compare CLI resume with RPC using a real provider and a disposable workspace:
 
 ```sh
-cargo build --locked --release --features mcp,rpc
+cargo build --locked --release --features rpc
 node examples/session-harness/compare.mjs --due ./target/release/due \
   --provider codex --model gpt-6-astra --cwd /path/to/disposable-workspace \
   --artifacts /path/to/fresh-comparison --backend all
 ```
 
-Both persistent adapters call the same session host. RPC simplifies the external
-wire exchange; it does not remove lifecycle, permission or recovery handling.
-MCP retains standard tool discovery and host integration. Embedded Lua/JavaScript
-bindings can call the shared host directly without routing through either wire
-protocol. This spike does not implement those bindings.
+RPC keeps the external wire exchange small; callers still handle lifecycle,
+permissions and recovery. Embedded Lua/JavaScript bindings could call the
+session host directly without a wire protocol. This spike does not implement
+those bindings.
+
+The observations below were recorded before the transport branches split.
+Their commit IDs, binaries and test counts refer to those historical snapshots.
 
 ## Live observation (2026-11-01)
 

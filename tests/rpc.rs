@@ -32,12 +32,12 @@ impl Client {
     fn new(early: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("provider");
-        fs::write(&binary, include_bytes!("fixtures/mcp-agent.sh")).unwrap();
+        fs::write(&binary, include_bytes!("fixtures/session-agent.sh")).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_due"))
             .arg("rpc")
-            .env("DUE_MCP_FIXTURE_DIR", dir.path())
-            .env("DUE_MCP_EARLY", if early { "1" } else { "0" })
+            .env("DUE_SESSION_FIXTURE_DIR", dir.path())
+            .env("DUE_SESSION_EARLY", if early { "1" } else { "0" })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
