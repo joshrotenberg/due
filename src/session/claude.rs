@@ -32,7 +32,10 @@ enum Command {
         prompt: String,
         reply: Reply,
     },
-    Interrupt(Reply),
+    Interrupt {
+        id: String,
+        reply: Reply,
+    },
     Respond {
         id: String,
         response: Value,
@@ -148,13 +151,15 @@ impl Backend {
         result.await.map_err(|_| "Claude session is closed")?
     }
 
-    pub async fn interrupt(&mut self) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
+    pub fn enqueue_interrupt(&self, turn_id: &str) -> Result<super::InterruptAnswer, String> {
+        let (reply, answer) = oneshot::channel();
         self.commands
-            .send(Command::Interrupt(reply))
-            .await
-            .map_err(|_| "Claude session is closed")?;
-        result.await.map_err(|_| "Claude session is closed")?
+            .try_send(Command::Interrupt {
+                id: turn_id.to_owned(),
+                reply,
+            })
+            .map_err(|error| format!("Cannot enqueue Claude interruption: {error}"))?;
+        Ok(answer)
     }
 
     pub async fn reply(&mut self, request_id: &str, response: Value) -> Result<(), String> {
@@ -216,7 +221,7 @@ async fn drive(
                         }
                     }
                 }
-                Some(Command::Interrupt(reply)) => { let _ = reply.send(Err("No active turn".into())); }
+                Some(Command::Interrupt { reply, .. }) => { let _ = reply.send(Err("No active turn".into())); }
                 Some(Command::Respond { reply, .. }) => { let _ = reply.send(Err("No pending interaction".into())); }
                 Some(Command::Close) | None => break,
             },
@@ -333,7 +338,11 @@ async fn drive_turn(
                     }
                     let _ = reply.send(result);
                 }
-                Some(Command::Interrupt(reply)) => {
+                Some(Command::Interrupt { id: requested, reply }) => {
+                    if requested != id {
+                        let _ = reply.send(Err("Unknown or finished Due turn to interrupt".into()));
+                        continue;
+                    }
                     match tokio::time::timeout(CONTROL_TIMEOUT, session.interrupt()).await {
                         Ok(Ok(())) => {
                             sink.item("interrupt_requested", json!({}), Some(&id));

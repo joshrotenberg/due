@@ -2,6 +2,8 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     time::{Duration, Instant},
 };
 
@@ -29,6 +31,87 @@ const MAX_OUTPUT: usize = 64 * 1024 * 1024;
 const MAX_ANSWER: usize = 4 * 1024 * 1024;
 
 type Reply = oneshot::Sender<Result<(), String>>;
+type InterruptOperation = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+
+// One session-wide control slot. Dispatched acknowledgement ownership survives
+// turn completion; pre-dispatch intent remains bound to its original Due turn.
+struct PendingInterrupt {
+    due_turn: String,
+    native_id: Option<String>,
+    reply: Option<Reply>,
+    deadline: tokio::time::Instant,
+    operation: Option<InterruptOperation>,
+}
+
+impl PendingInterrupt {
+    fn new(due_turn: String, reply: Reply, deadline: tokio::time::Instant) -> Self {
+        Self {
+            due_turn,
+            native_id: None,
+            reply: Some(reply),
+            deadline,
+            operation: None,
+        }
+    }
+
+    fn pending(&self) -> bool {
+        self.reply.is_some()
+    }
+
+    fn reject(&mut self, message: &str) {
+        self.operation = None;
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(Err(message.to_owned()));
+        }
+    }
+
+    fn dispatch(
+        &mut self,
+        handle: AppServerHandle,
+        thread: String,
+        native: String,
+        sink: EventSink,
+    ) {
+        if self.operation.is_some() || !self.pending() {
+            return;
+        }
+        self.native_id = Some(native.clone());
+        let due_turn = self.due_turn.clone();
+        self.operation = Some(Box::pin(async move {
+            handle
+                .turn_interrupt(&thread, &native)
+                .await
+                .map_err(|error| {
+                    let explicit_rejection = matches!(&error, codex_wrapper::Error::AppServerRpc { .. });
+                    let message = report_rpc_error(error, &sink, Some(&due_turn));
+                    if explicit_rejection { message } else {
+                        format!("Codex interruption acknowledgement unknown; request may already have been delivered: {message}")
+                    }
+                })
+        }));
+    }
+}
+
+impl Drop for PendingInterrupt {
+    fn drop(&mut self) {
+        let message = if self.native_id.is_some() {
+            "Codex control owner closed; interruption acknowledgement unknown, request may already have been delivered"
+        } else {
+            "Codex control owner closed before interruption dispatch"
+        };
+        self.reject(message);
+    }
+}
+
+async fn interrupt_accepted(interrupt: &mut Option<PendingInterrupt>) -> Result<(), String> {
+    match interrupt
+        .as_mut()
+        .and_then(|control| control.operation.as_mut())
+    {
+        Some(operation) => operation.await,
+        None => std::future::pending().await,
+    }
+}
 
 enum Command {
     Start {
@@ -40,7 +123,11 @@ enum Command {
         id: String,
         result: Result<Value, String>,
     },
-    Interrupt(Reply),
+    Interrupt {
+        id: String,
+        deadline: tokio::time::Instant,
+        reply: Reply,
+    },
     Respond {
         id: String,
         response: Value,
@@ -277,8 +364,16 @@ impl Backend {
         .await
     }
 
-    pub async fn interrupt(&mut self) -> Result<(), String> {
-        self.call(Command::Interrupt).await
+    pub fn enqueue_interrupt(&self, turn_id: &str) -> Result<super::InterruptAnswer, String> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .try_send(Command::Interrupt {
+                id: turn_id.to_owned(),
+                deadline: tokio::time::Instant::now() + CONTROL_TIMEOUT,
+                reply,
+            })
+            .map_err(|error| format!("Cannot enqueue Codex interruption: {error}"))?;
+        Ok(answer)
     }
 
     pub async fn reply(&mut self, request_id: &str, response: Value) -> Result<(), String> {
@@ -320,11 +415,55 @@ async fn own(
     mut commands: mpsc::Receiver<Command>,
 ) -> Result<(), String> {
     let mut active: Option<Active> = None;
+    let mut interrupt: Option<PendingInterrupt> = None;
     let failure = 'owner: loop {
+        // Completion retires only unsent intent. Once dispatched, the exact
+        // native/Due identities and response future live independently of Active.
+        if interrupt.as_ref().is_some_and(|control| {
+            control.native_id.is_none()
+                && !active
+                    .as_ref()
+                    .is_some_and(|turn| turn.id == control.due_turn)
+        }) {
+            interrupt
+                .take()
+                .unwrap()
+                .reject("Codex turn ended before interruption was dispatched");
+        }
         let deadline = active.as_ref().and_then(|turn| turn.deadline);
+        let control_deadline = interrupt
+            .as_ref()
+            .filter(|control| control.pending())
+            .map(|control| control.deadline);
         tokio::select! {
+            // If native acceptance and completion are both ready, consume the
+            // acknowledgement first. The owner retains the future across turn changes.
+            biased;
+            _ = deadline_elapsed(control_deadline) => {
+                if let Some(mut control) = interrupt.take() {
+                    let message = if control.native_id.is_some() {
+                        "Codex interruption timed out; acknowledgement unknown, request may already have been delivered"
+                    } else { "Codex interruption timed out before dispatch; intent removed" };
+                    control.reject(message);
+                }
+            },
             _ = deadline_elapsed(deadline) => break Some((ErrorKind::Timeout, "Codex turn deadline exceeded; session closed".to_owned())),
-            message = server.next_message() => match message {
+            result = interrupt_accepted(&mut interrupt) => {
+                let mut control = interrupt.take().expect("pending interrupt");
+                if result.is_ok() {
+                    sink.item("interrupt_requested", json!({}), Some(&control.due_turn));
+                }
+                if let Some(reply) = control.reply.take() { let _ = reply.send(result); }
+            },
+            // Fairly select native traffic and commands beneath control/deadline
+            // priority, so neither a chatty provider nor callers starve the other.
+            event = async {
+                tokio::select! {
+                    message = server.next_message() => (Some(message), None),
+                    command = commands.recv() => (None, Some(command)),
+                }
+            } => match event {
+            (Some(message), _) => match message {
                 Ok(Some(message @ (ServerMessage::Notification(_) | ServerMessage::Request(_)))) => {
                     let (kind, data, params) = match &message {
                         ServerMessage::Notification(n) => ("native", notification_item(n), &n.params),
@@ -356,7 +495,7 @@ async fn own(
                 Ok(None) => break Some((ErrorKind::Protocol, "Codex app-server exited".to_owned())),
                 Err(error) => break Some((ErrorKind::Protocol, error.to_string())),
             },
-            command = commands.recv() => match command {
+            (_, Some(command)) => match command {
                 Some(Command::Start { id, prompt, reply }) => {
                     if active.is_some() { let _ = reply.send(Err("A Codex turn is already running".into())); continue; }
                     let now = tokio::time::Instant::now();
@@ -385,6 +524,7 @@ async fn own(
                     let _ = reply.send(Ok(()));
                 }
                 Some(Command::Started { id, result }) => {
+                    if !active.as_ref().is_some_and(|turn| turn.id == id) { continue; }
                     let response = match result {
                         Ok(response) => response,
                         Err(error) => break Some((ErrorKind::Provider, error)),
@@ -408,27 +548,38 @@ async fn own(
                                 done.reject_pending(&handle);
                                 sink.finished(done.result(&thread_id, Some(native), None));
                             }
+                            // Replay terminal events before dispatch: intent belongs only to
+                            // this turn and must never interrupt a completed or subsequent turn.
+                            if let Some(turn) = active.as_mut().filter(|turn| turn.id == id)
+                                && let Some(control) = interrupt.as_mut().filter(|control| control.due_turn == id) {
+                                control.dispatch(handle.clone(), thread_id.clone(),
+                                    turn.native_id.clone().expect("authoritative turn"), sink.clone());
+                            }
                         }
                         Err(error) => break Some((ErrorKind::Protocol, format!("Codex turn/start returned no usable turn: {error}"))),
                     }
                 }
 
-                Some(Command::Interrupt(reply)) => {
-                    if let Some(turn) = active.as_ref()
-                        && let Some(id) = turn.native_id.clone() {
-                        let control = handle.clone();
-                        let thread = thread_id.clone();
-                        let due_turn_id = turn.id.clone();
-                        let control_sink = sink.clone();
-                        tokio::spawn(async move {
-                            let result = control.turn_interrupt(&thread, &id).await.map_err(|error| report_rpc_error(error, &control_sink, Some(&due_turn_id)));
-                            if result.is_ok() {
-                                control_sink.item("interrupt_requested", json!({}), Some(&due_turn_id));
-                            }
-                            let _ = reply.send(result);
-                        });
+                Some(Command::Interrupt { id, deadline, reply }) => {
+                    if deadline <= tokio::time::Instant::now() {
+                        let _ = reply.send(Err("Codex interruption expired before dispatch".into()));
+                        continue;
+                    }
+                    if let Some(turn) = active.as_mut().filter(|turn| turn.id == id) {
+                        if interrupt.is_some() {
+                            let _ = reply.send(Err("A Codex interruption is already pending".into()));
+                            continue;
+                        }
+                        interrupt = Some(PendingInterrupt::new(id, reply, deadline));
+                        if let Some(native) = &turn.native_id {
+                            interrupt.as_mut().unwrap().dispatch(handle.clone(), thread_id.clone(),
+                                native.clone(), sink.clone());
+                        } else {
+                            // Observable retention, not an acknowledgement of native acceptance.
+                            sink.item("interrupt_pending", json!({}), Some(&turn.id));
+                        }
                     } else {
-                        let _ = reply.send(Err("No native turn ID yet; retry after turn_started".into()));
+                        let _ = reply.send(Err("Unknown or finished Due turn to interrupt".into()));
                     }
                 }
                 Some(Command::Respond { id, response, reply }) => {
@@ -450,9 +601,25 @@ async fn own(
                     let _ = reply.send(result);
                 }
                 Some(Command::Close) | None => break None,
+            },
+            _ => unreachable!("one owner event"),
             }
         }
     };
+    if let Some(mut control) = interrupt.take() {
+        let reason = failure
+            .as_ref()
+            .map(|(_, message)| message.as_str())
+            .unwrap_or("Codex session closed");
+        let message = if control.native_id.is_some() {
+            format!(
+                "{reason}; interruption acknowledgement unknown, request may already have been delivered"
+            )
+        } else {
+            format!("{reason}; interruption intent removed before dispatch")
+        };
+        control.reject(&message);
+    }
     // EOF shutdown lets Codex stop commands it placed in other process groups.
     let cleanup = server.shutdown().await.map_err(|e| e.to_string());
     if let Some(turn) = active.take() {
@@ -687,6 +854,124 @@ mod tests {
             started: Instant::now(),
             deadline: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_expiry_removes_intent_and_owner_rejects_wrong_due_id() {
+        use std::os::unix::fs::PermissionsExt;
+        async fn observed(sink: &EventSink, kind: &str) {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let records = sink.items.read(0, 256).unwrap();
+                    if records["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|i| i["kind"] == kind)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("owner did not observe expected item");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("provider");
+        std::fs::write(&binary, format!("#!/usr/bin/env bash\nexport DUE_SESSION_FIXTURE_DIR=\"$PWD\"\nexport DUE_SESSION_EARLY=0\n{}",
+            include_str!("../../tests/fixtures/session-agent.sh"))).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let options: OpenOptions = serde_json::from_value(json!({"provider":"codex",
+            "binary":binary,"cwd":dir.path()}))
+        .unwrap();
+        let sink = EventSink::new(Provider::Codex, "session".into(), None);
+        let mut backend = Backend::open(&options, sink.clone()).await.unwrap();
+        let turn = sink.begin().unwrap();
+        backend
+            .start(turn.clone(), "startup-hold".into())
+            .await
+            .unwrap();
+        // Inject a short absolute deadline through the same owner command path;
+        // the native turn/start is still held by the parent's file gate.
+        let (reply, answer) = oneshot::channel();
+        backend
+            .commands
+            .try_send(Command::Interrupt {
+                id: turn.clone(),
+                reply,
+                deadline: tokio::time::Instant::now() + Duration::from_millis(100),
+            })
+            .unwrap();
+        observed(&sink, "interrupt_pending").await;
+        let error = tokio::time::timeout(Duration::from_secs(2), answer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        std::fs::write(dir.path().join("release-start"), "release").unwrap();
+        observed(&sink, "native_response").await;
+        // A queued stale command must be rejected by the owner, independently
+        // of Manager's snapshot validation, even with a different live turn.
+        let error = backend
+            .enqueue_interrupt("wrong-due-turn")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("Unknown or finished"), "{error}");
+        let input = std::fs::read_to_string(dir.path().join("input.jsonl")).unwrap();
+        assert!(
+            !input.contains("turn/interrupt"),
+            "expired or stale intent was dispatched: {input}"
+        );
+        backend
+            .enqueue_interrupt(&turn)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        observed(&sink, "turn_finished").await;
+        // Once sent, timeout means unknown acknowledgement, even if the native
+        // turn completed. It must not claim the request was never delivered.
+        let late = sink.begin().unwrap();
+        backend
+            .start(late.clone(), "late-ack".into())
+            .await
+            .unwrap();
+        let (reply, answer) = oneshot::channel();
+        backend
+            .commands
+            .try_send(Command::Interrupt {
+                id: late,
+                reply,
+                deadline: tokio::time::Instant::now() + Duration::from_millis(300),
+            })
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), answer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error.contains("acknowledgement unknown")
+                && error.contains("may already have been delivered"),
+            "{error}"
+        );
+        std::fs::write(dir.path().join("release-ack"), "release").unwrap();
+        let next = sink.begin().unwrap();
+        backend.start(next, "followup".into()).await.unwrap();
+        backend.close().await.unwrap();
+        let input = std::fs::read_to_string(dir.path().join("input.jsonl")).unwrap();
+        assert_eq!(
+            input
+                .lines()
+                .filter(|l| l.contains("turn/interrupt"))
+                .count(),
+            2
+        );
     }
 
     #[test]

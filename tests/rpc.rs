@@ -1111,3 +1111,295 @@ fn codex_nullable_optional_identity_and_unrelated_payloads_remain_usable() {
         }
     }
 }
+
+#[test]
+fn codex_startup_interrupt_waits_for_acceptance_and_does_not_leak_to_next_turn() {
+    for prompt in ["startup-hold", "startup-fail", "startup-complete"] {
+        let mut client = Client::new(false);
+        let session = client.open("codex", true, None);
+        // Due start completes while the native start response is file-gated.
+        let turn = client.start(&session, prompt);
+        if prompt == "startup-complete" {
+            // Observe completion while native identity is still withheld. A wire
+            // write alone is insufficient: the owner's two input queues race.
+            client
+                .pushed_until(|i| i["kind"] == "native" && i["data"]["method"] == "turn/completed");
+        }
+        let interrupt = client.request(
+            "turn.interrupt",
+            json!({"session_id":session,"turn_id":turn}),
+        );
+        client.pushed_until(|i| i["kind"] == "interrupt_pending" && i["turn_id"] == turn);
+        assert!(!client.responses.contains_key(&interrupt.to_string()));
+        let input = fs::read_to_string(client.dir.path().join("input.jsonl")).unwrap();
+        assert!(!input.contains("turn/interrupt"), "{input}");
+        fs::write(client.dir.path().join("release-start"), "release").unwrap();
+        let response = client.response(&interrupt, Duration::from_secs(5));
+        let outcome = client.finished(&session, &turn);
+        if prompt == "startup-hold" {
+            assert_eq!(
+                response["result"]["interrupt_requested"], true,
+                "{response}"
+            );
+            assert_eq!(outcome["status"], "cancelled", "{outcome}");
+        } else {
+            assert_eq!(response["error"]["code"], -32000, "{response}");
+            assert_eq!(
+                outcome["status"],
+                if prompt == "startup-fail" {
+                    "failed"
+                } else {
+                    "succeeded"
+                }
+            );
+        }
+        if prompt != "startup-fail" {
+            let next = client.start(&session, "followup");
+            assert_eq!(client.finished(&session, &next)["status"], "succeeded");
+        }
+        client.close(&session);
+        client.eof();
+        let input = fs::read_to_string(client.dir.path().join("input.jsonl")).unwrap();
+        let controls: Vec<Value> = input
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .filter(|v: &Value| v["method"] == "turn/interrupt")
+            .collect();
+        assert_eq!(
+            controls.len(),
+            usize::from(prompt == "startup-hold"),
+            "{input}"
+        );
+        if let Some(control) = controls.first() {
+            assert_eq!(control["params"]["turnId"], "turn-1");
+        }
+        assert!(
+            !client.responses.contains_key(&interrupt.to_string()),
+            "duplicate interrupt response"
+        );
+    }
+}
+
+#[test]
+fn codex_startup_interrupt_does_not_block_read_close_or_eof() {
+    for eof in [false, true] {
+        let mut client = Client::new(false);
+        let session = client.open("codex", true, None);
+        let turn = client.start(&session, "startup-hold");
+        let interrupt = client.request(
+            "turn.interrupt",
+            json!({"session_id":session,"turn_id":turn}),
+        );
+        client.pushed_until(|i| i["kind"] == "interrupt_pending" && i["turn_id"] == turn);
+        let read = client.request("session.read", json!({"session_id":session}));
+        assert!(
+            client
+                .response(&read, Duration::from_secs(2))
+                .get("result")
+                .is_some()
+        );
+        let duplicate = client.request(
+            "turn.interrupt",
+            json!({"session_id":session,"turn_id":turn}),
+        );
+        let rejected = client.response(&duplicate, Duration::from_secs(2));
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("already pending"),
+            "{rejected}"
+        );
+        let close = if eof {
+            client.stdin.take();
+            None
+        } else {
+            Some(client.request("session.close", json!({"session_id":session})))
+        };
+        // Closing must reach the owner and settle interruption while native
+        // turn/start is still withheld, not after the 30-second control timeout.
+        let response = client.response(&interrupt, Duration::from_secs(2));
+        assert_eq!(response["error"]["code"], -32000, "{response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("closed"),
+            "{response}"
+        );
+        fs::write(client.dir.path().join("release-start"), "release").unwrap();
+        if let Some(close) = close {
+            assert_eq!(
+                client.response(&close, Duration::from_secs(10))["result"]["closed"],
+                true
+            );
+        }
+        assert_eq!(client.finished(&session, &turn)["status"], "cancelled");
+        client.eof();
+        let input = fs::read_to_string(client.dir.path().join("input.jsonl")).unwrap();
+        assert!(!input.contains("turn/interrupt"), "{input}");
+    }
+}
+
+#[test]
+fn codex_pending_interrupt_allows_permission_reply_and_followup() {
+    let mut client = Client::new(false);
+    let session = client.open("codex", true, None);
+    let turn = client.start(&session, "startup-ask");
+    let interrupt = client.request(
+        "turn.interrupt",
+        json!({"session_id":session,"turn_id":turn}),
+    );
+    client.pushed_until(|i| i["kind"] == "interrupt_pending" && i["turn_id"] == turn);
+    fs::write(client.dir.path().join("release-start"), "release").unwrap();
+    let interaction = client.pushed_until(|i| i["kind"] == "interaction" && i["turn_id"] == turn);
+    // Fake native interrupt deliberately withholds acceptance until permission
+    // is answered. Holding the manager lock here deadlocks both operations.
+    client.pushed_until(|i| {
+        i["kind"] == "native" && i["data"]["method"] == "fixture/interrupt-waiting"
+    });
+    let read = client.request("session.read", json!({"session_id":session}));
+    assert!(
+        client
+            .response(&read, Duration::from_secs(2))
+            .get("result")
+            .is_some()
+    );
+    let reply = client.request(
+        "interaction.reply",
+        json!({"session_id":session,"turn_id":turn,
+        "request_id":interaction["data"]["request_id"],"response":{"decision":"cancel"}}),
+    );
+    assert_eq!(
+        client.response(&reply, Duration::from_secs(2))["result"]["replied"],
+        true
+    );
+    assert_eq!(
+        client.response(&interrupt, Duration::from_secs(2))["result"]["interrupt_requested"],
+        true
+    );
+    assert_eq!(client.finished(&session, &turn)["status"], "cancelled");
+    let next = client.start(&session, "followup");
+    assert_eq!(client.finished(&session, &next)["status"], "succeeded");
+    assert!(
+        client
+            .call(
+                "turn.interrupt",
+                json!({"session_id":session,"turn_id":turn})
+            )
+            .get("error")
+            .is_some()
+    );
+    client.close(&session);
+    client.eof();
+}
+
+#[test]
+fn codex_completion_before_interrupt_ack_keeps_original_response_and_identity() {
+    for mode in ["late-ack", "late-error", "close"] {
+        let mut client = Client::new(false);
+        let session = client.open("codex", true, None);
+        let first = client.start(&session, if mode == "close" { "late-ack" } else { mode });
+        let interrupt = client.request(
+            "turn.interrupt",
+            json!({"session_id":session,"turn_id":first}),
+        );
+        assert_eq!(client.finished(&session, &first)["status"], "cancelled");
+        // The completed turn must not own/cancel the native request waiter.
+        // A second live turn also tests the session-wide one-control bound.
+        let next = client.start(&session, "ask");
+        let permission =
+            client.pushed_until(|i| i["kind"] == "interaction" && i["turn_id"] == next);
+        let read = client.request("session.read", json!({"session_id":session}));
+        assert!(
+            client
+                .response(&read, Duration::from_secs(2))
+                .get("result")
+                .is_some()
+        );
+        assert!(
+            !client.responses.contains_key(&interrupt.to_string()),
+            "interrupt settled before gated acknowledgement"
+        );
+        let second = client.request(
+            "turn.interrupt",
+            json!({"session_id":session,"turn_id":next}),
+        );
+        let rejected = client.response(&second, Duration::from_secs(2));
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("already pending"),
+            "{rejected}"
+        );
+        if mode == "close" {
+            let close = client.request("session.close", json!({"session_id":session}));
+            let response = client.response(&interrupt, Duration::from_secs(2));
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("closed"),
+                "{response}"
+            );
+            assert_eq!(
+                client.response(&close, Duration::from_secs(10))["result"]["closed"],
+                true
+            );
+        } else {
+            fs::write(client.dir.path().join("release-ack"), "release").unwrap();
+            // A native permission response wakes the fixture's blocking input
+            // loop. It finishes next before releasing the original control ack.
+            client.ok(
+                "interaction.reply",
+                json!({"session_id":session,"turn_id":next,
+                "request_id":permission["data"]["request_id"],"response":{"decision":"cancel"}}),
+            );
+            assert_eq!(client.finished(&session, &next)["status"], "succeeded");
+            let response = client.response(&interrupt, Duration::from_secs(2));
+            if mode == "late-ack" {
+                assert_eq!(
+                    response["result"]["interrupt_requested"], true,
+                    "{response}"
+                );
+                assert_eq!(response["result"]["turn_id"], first);
+                client
+                    .pushed_until(|i| i["kind"] == "interrupt_requested" && i["turn_id"] == first);
+            } else {
+                assert!(
+                    response["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("fixture late interrupt rejection"),
+                    "{response}"
+                );
+                client.pushed_until(|i| {
+                    i["kind"] == "native_response"
+                        && i["turn_id"] == first
+                        && i["data"]["method"] == "turn/interrupt"
+                        && i["data"]["error"].is_object()
+                });
+            }
+            // The completed follow-up retains its successful result after late ack.
+            let state = client.ok("turn.read", json!({"session_id":session,"turn_id":next}));
+            assert_eq!(state["result"]["status"], "succeeded", "{state}");
+            let last = client.start(&session, "followup");
+            assert_eq!(client.finished(&session, &last)["status"], "succeeded");
+            client.close(&session);
+        }
+        client.eof();
+        assert!(
+            !client.responses.contains_key(&interrupt.to_string()),
+            "duplicate original reply"
+        );
+        let input = fs::read_to_string(client.dir.path().join("input.jsonl")).unwrap();
+        let controls: Vec<Value> = input
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .filter(|v: &Value| v["method"] == "turn/interrupt")
+            .collect();
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0]["params"]["turnId"], "turn-1");
+    }
+}

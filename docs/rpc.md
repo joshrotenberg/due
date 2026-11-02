@@ -196,9 +196,20 @@ request method; command approvals commonly accept `{"decision":"decline"}` or
 resolved and completed-turn interaction IDs are rejected. Reply success means
 delivery, not that the native operation succeeded.
 
-`turn.interrupt` requests a stop;
-continue reading until the turn settles before sending the next prompt.
-Interruption does not roll back effects or prove every native command stopped.
+`turn.interrupt` requests a stop; await its response and continue reading until
+the turn settles before sending the next prompt. Codex retains an interruption
+requested before its native turn ID arrives and emits `interrupt_pending`.
+That item records intent, not native acceptance. The RPC response waits for the
+native acknowledgement, even if the turn finishes first; late acknowledgements
+remain attributed to the original Due turn. Only one Codex interruption may be
+pending per session. Reads, permission replies and close remain available while
+it waits, and another turn can start after the previous turn settles.
+
+The Codex control deadline is 30 seconds from admission. Unsent intent is removed
+on expiry or when its turn ends. A timeout after dispatch means acknowledgement
+is unknown; the stop may already have been delivered. Close rejects the pending
+response before native shutdown. Interruption does not roll back effects or
+prove every native command stopped.
 
 The optional Node harness (`examples/session-harness`) rejects interactions by
 default. Its caller-supplied `onInteraction(record, signal)` may be async and

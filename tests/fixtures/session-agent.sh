@@ -12,6 +12,11 @@ trap 'touch "$DUE_SESSION_FIXTURE_DIR/exited"' EXIT
 count=0
 active=0
 pending=0
+startup_permission=0
+interrupt_id=
+held_ack=
+held_ack_error=0
+late_mode=
 native="native-$provider"
 turn=turn-0
 
@@ -44,12 +49,24 @@ begin() {
   count=$((count + 1))
   turn="turn-$count"
   active=1
+  startup_permission=0
+  late_mode=
+  case "$line" in *'"late-ack"'*) late_mode=success ;; *'"late-error"'*) late_mode=error ;; esac
+  case "$line" in *'"startup-ask"'*) startup_permission=1 ;; esac
   if [ "$provider" = claude ]; then
     emit '{"type":"system","subtype":"init","session_id":"'"$native"'","fixtureInit":{"tools":["Read"],"unknown":true}}'
     emit '{"type":"assistant","session_id":"'"$native"'","message":{"role":"assistant","content":[{"type":"text","text":"working"},{"type":"tool_use","id":"tool-fixture","name":"Read","input":{"file_path":"fixture.txt"}}]},"fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}'
   else
     start_response='{"turn":{"id":"'"$turn"'","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null},"fixtureResponse":{"unknown":[1,{"keep":true}]}}'
     case "$line" in
+      *'"startup-hold"'*|*'"startup-fail"'*|*'"startup-complete"'*|*'"startup-ask"'*)
+        case "$line" in *'"startup-complete"'*) finish completed 'completed before start response' ;; esac
+        touch "$DUE_SESSION_FIXTURE_DIR/start-waiting"
+        while [ ! -f "$DUE_SESSION_FIXTURE_DIR/release-start" ]; do sleep 0.01; done
+        case "$line" in
+          *'"startup-fail"'*) emit '{"id":'"$id"',"error":{"code":-32000,"message":"fixture start rejected"}}'; return ;;
+        esac
+        ;;
       *'"early-overflow"'*|*'"early-release"'*|*'"early-foreign-resolution"'*)
         for request in $(seq 1 33); do
           if [ "$request" = 33 ]; then
@@ -78,8 +95,8 @@ begin() {
     notify item/started '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"id":"exec-fixture","type":"commandExecution","command":"fixture-only","fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}}'
   fi
   case "$line" in
-    *'"hold"'*|*'"stale-approval"'*|*'"early-release"'*) : ;;
-    *'"ask"'*|*'"ask-resolved"'*|*'"ask-completed"'*)
+    *'"hold"'*|*'"late-ack"'*|*'"late-error"'*|*'"startup-hold"'*|*'"startup-complete"'*|*'"stale-approval"'*|*'"early-release"'*) : ;;
+    *'"ask"'*|*'"ask-resolved"'*|*'"ask-completed"'*|*'"startup-ask"'*)
       pending=1
       if [ "$provider" = claude ]; then
         emit '{"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch never-created"}}}'
@@ -178,11 +195,34 @@ while IFS= read -r line; do
           notify fixture/idle '{"threadId":"'"$native"'","future":{"nested":[null,{"keep":true}]}}'
           ;;
         turn/start) begin ;;
-        turn/interrupt) result "$id" '{}'; finish interrupted '' ;;
+        turn/interrupt)
+          if [ -n "$late_mode" ]; then
+            held_ack="$id"
+            held_ack_error=0
+            [ "$late_mode" != error ] || held_ack_error=1
+            finish interrupted ''
+          elif [ "$startup_permission" = 1 ]; then
+            interrupt_id="$id"
+            notify fixture/interrupt-waiting '{"threadId":"'"$native"'","turnId":"'"$turn"'"}'
+          else result "$id" '{}'; finish interrupted ''; fi
+          ;;
       esac
     elif [ "$pending" = 1 ]; then
       notify serverRequest/resolved '{"threadId":"'"$native"'","requestId":17}'
-      case "$line" in *'"decision":"cancel"'*) finish completed 'permission denied' ;; *) finish completed 'permission allowed' ;; esac
+      if [ -n "$interrupt_id" ]; then
+        result "$interrupt_id" '{}'
+        interrupt_id=
+        finish interrupted ''
+      else
+        case "$line" in *'"decision":"cancel"'*) finish completed 'permission denied' ;; *) finish completed 'permission allowed' ;; esac
+      fi
     fi
   fi
+  if [ -n "$held_ack" ] && [ -f "$DUE_SESSION_FIXTURE_DIR/release-ack" ]; then
+    if [ "$held_ack_error" = 1 ]; then
+      emit '{"id":'"$held_ack"',"error":{"code":-32000,"message":"fixture late interrupt rejection"}}'
+    else result "$held_ack" '{}'; fi
+    held_ack=
+  fi
+
 done

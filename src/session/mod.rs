@@ -16,7 +16,7 @@ use std::{
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
 pub(crate) use items::{PushQueue, SessionItems};
 
@@ -280,6 +280,8 @@ impl EventSink {
     }
 }
 
+type InterruptAnswer = oneshot::Receiver<Result<(), String>>;
+
 enum Backend {
     Claude(claude::Backend),
     Codex(codex::Backend),
@@ -298,10 +300,10 @@ impl Backend {
             Self::Codex(b) => b.start(id, prompt).await,
         }
     }
-    async fn interrupt(&mut self) -> Result<(), String> {
+    fn enqueue_interrupt(&self, turn_id: &str) -> Result<InterruptAnswer, String> {
         match self {
-            Self::Claude(b) => b.interrupt().await,
-            Self::Codex(b) => b.interrupt().await,
+            Self::Claude(b) => b.enqueue_interrupt(turn_id),
+            Self::Codex(b) => b.enqueue_interrupt(turn_id),
         }
     }
     async fn reply(&mut self, id: &str, value: Value) -> Result<(), String> {
@@ -425,13 +427,20 @@ impl Manager {
     }
 
     pub(crate) async fn interrupt(&self, session_id: &str, turn_id: &str) -> Result<Value, String> {
-        let mut slot = self.session.lock().await;
-        let session = Self::session(&mut slot, session_id)?;
-        let snapshot = session.sink.snapshot(turn_id, 0)?;
-        if snapshot["state"] == "finished" {
-            return Err("turn is already finished".into());
-        }
-        session.backend.interrupt().await?;
+        let answer = {
+            let mut slot = self.session.lock().await;
+            let session = Self::session(&mut slot, session_id)?;
+            let snapshot = session.sink.snapshot(turn_id, 0)?;
+            if snapshot["state"] == "finished" {
+                return Err("turn is already finished".into());
+            }
+            // Enqueue without waiting for channel capacity or native acceptance.
+            // The owner revalidates the immutable Due turn ID before dispatch.
+            session.backend.enqueue_interrupt(turn_id)?
+        };
+        answer
+            .await
+            .map_err(|_| "Session closed during interruption".to_owned())??;
         Ok(json!({"interrupt_requested":true,"turn_id":turn_id}))
     }
 
