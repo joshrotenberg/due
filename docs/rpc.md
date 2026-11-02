@@ -15,6 +15,11 @@ Default builds and `due run` behavior remain unchanged; wrapper revisions stay
 pinned. There is no model loop, scheduler, config loader or new configuration
 format. Native authentication, settings and permissions remain inherited.
 
+The optional [embedded-client comparison](../examples/rpc-languages/README.md)
+runs Lua and QuickJS over one Rust raw-frame bridge. Each language implements
+its own client above this wire contract; external callers can implement the
+same operations without embedding either runtime.
+
 ## Wire contract
 
 Send compact UTF-8 JSON objects, one per newline, through stdin. Read responses

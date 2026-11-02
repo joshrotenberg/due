@@ -8,7 +8,10 @@ schedulers and MCP servers remain outside the freeze. The explicitly requested
 resident-session spike is isolated behind the opt-in `rpc` feature;
 it must preserve `due run` behavior and existing wrapper revisions. See the
 [plain RPC guide](docs/rpc.md). The MCP experiment lives separately on
-`codex/due-mcp-spike`.
+`codex/due-mcp-spike`. The explicitly requested embedded-client comparison is
+isolated in a separate private crate under `examples/rpc-languages`; it uses the
+same RPC bridge for Lua and JavaScript and must not change default Due dependencies
+or `due run`.
 
 Use [installation](docs/install.md) for local setup and
 [dogfooding](docs/dogfooding.md) for issue reports. Keep changes small and include
@@ -82,3 +85,7 @@ commit because the version alone does not distinguish local builds.
 CI covers macOS/Linux and checks Rust 1.90. Any untested platform or native CLI
 behavior should be identified in the report rather than inferred from a green
 fake-provider test.
+
+The [embedded Lua/JavaScript clients](examples/rpc-languages/README.md) have their
+own lockfile and fixture tests. Validate their nested manifest separately; they
+are not included in root Cargo commands.
