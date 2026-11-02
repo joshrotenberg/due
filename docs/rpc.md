@@ -107,6 +107,11 @@ Use `--provider claude --model sonnet` for Claude. The shared
 [harness](../examples/session-harness/README.md) selects this transport with
 `withSession({backend: 'rpc', ...}, callback)`. Its compact example rejects
 unexpected permission requests and cleans up; it does not silently approve them.
+The harness accepts top-level `turnWaitMs` for its terminal-result wait: omit it
+for five minutes, choose a positive integer number of milliseconds up to
+2147483647, or use `null` for actively monitored work without a client turn
+deadline. Native `profile.timeout`, control-request waits and shutdown bounds
+remain separate. See the [caller wait options](../examples/session-harness/README.md#caller-turn-waits).
 
 ## Streaming, permissions and cleanup
 
@@ -255,5 +260,5 @@ initialization IDs before observer callbacks. Independent reproductions and
 132 offline Node tests passed. The live run used a caller-only permission bridge
 and the pre-fix client; the final example changes were verified offline. These
 are local macOS observations, not a performance comparison or evidence of other
-platforms' native process behavior. The checked-in example still documents its
-fixed wait limits; this trial did not change them.
+platforms' native process behavior. At that point the checked-in example still
+used a fixed terminal wait; that trial did not change it.

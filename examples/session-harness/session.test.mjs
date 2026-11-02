@@ -227,6 +227,26 @@ test('onInteraction is validated and rejected for resume before anything is crea
   await assert.rejects(stat(options.artifactDir), { code: 'ENOENT' });
 });
 
+test('turnWaitMs is validated before scope artifacts or launch and is unsupported for resume', async t => {
+  const { dir, options } = await setup(t);
+  options.dueBinary = join(dir, 'must-not-launch');
+  for (const backend of ['resident', 'rpc']) {
+    for (const turnWaitMs of [0, -1, 1.5, NaN, Infinity, 2 ** 31, Number.MAX_SAFE_INTEGER, '20', false, {}, []]) {
+      await assert.rejects(withSession({ ...options, backend, turnWaitMs }, () => {}), /turnWaitMs/);
+      await assert.rejects(stat(options.artifactDir), { code: 'ENOENT' });
+    }
+  }
+  for (const turnWaitMs of [null, 20, 2 ** 31 - 1, 0, NaN]) {
+    await assert.rejects(withSession({ ...options, turnWaitMs }, () => {}), /unsupported.*resume/);
+    await assert.rejects(stat(options.artifactDir), { code: 'ENOENT' });
+  }
+});
+test('an undefined turn wait keeps the resume backend and its receipt unchanged', async t => {
+  const { options, receipt } = await setup(t, { turnWaitMs: undefined });
+  await withSession(options, agent => agent.turn({ id: 'first', prompt: 'remember' }));
+  assert.equal(Object.hasOwn(await receipt(), 'turn_wait_ms'), false);
+});
+
 for (const backend of ['resident', 'rpc']) {
   async function interactive(t, model, extra = {}) {
     const ctx = await setup(t, { backend, ...extra });
@@ -234,6 +254,80 @@ for (const backend of ['resident', 'rpc']) {
     await copyFile(fileURLToPath(new URL('./resident.fixture.mjs', import.meta.url)), ctx.options.dueBinary);
     return ctx;
   }
+  test(`${backend}: turn wait defaults and supported integer bounds are recorded without native forwarding`, async t => {
+    for (const [extra, expected] of [[{}, 300_000], [{ turnWaitMs: undefined }, 300_000], [{ turnWaitMs: 1 }, 1], [{ turnWaitMs: 2 ** 31 - 1 }, 2 ** 31 - 1]]) {
+      const { dir, options, receipt } = await interactive(t, 'early', extra);
+      options.profile.timeout = '2m';
+      await withSession(options, agent => agent.turn({ id: 'first', prompt: 'one' }));
+      const evidence = await receipt();
+      assert.equal(evidence.turn_wait_ms, expected);
+      assert.equal(evidence.profile.timeout, '2m');
+      const input = (await readFile(join(dir, 'fixture-input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+      const opening = input.find(row => backend === 'rpc' ? row.method === 'session.open' : row.params?.name === 'session_open');
+      const nativeProfile = backend === 'rpc' ? opening.params : opening.params.arguments;
+      assert.equal(nativeProfile.timeout, '2m');
+      assert.equal(Object.hasOwn(nativeProfile, 'turnWaitMs'), false);
+      assert.equal(Object.hasOwn(nativeProfile, 'turn_wait_ms'), false);
+      assert.equal(evidence.body_error, null);
+    }
+  });
+  test(`${backend}: a short turn wait retains the caller failure and clean process receipt`, { timeout: 5000 }, async t => {
+    const controller = new AbortController();
+    const fuse = setTimeout(() => controller.abort(new Error('test failsafe')), 3000);
+    t.after(() => clearTimeout(fuse));
+    const { dir, options, receipt } = await interactive(t, 'hold', { turnWaitMs: 20, signal: controller.signal });
+    await assert.rejects(withSession(options, agent => agent.turn({ id: 'held', prompt: 'wait' })), /timed out waiting for its terminal item/);
+    const evidence = await receipt();
+    assert.equal(evidence.turn_wait_ms, 20);
+    assert.match(evidence.body_error, /timed out waiting for its terminal item/);
+    assert.equal(evidence.cleanup_error, null);
+    assert.equal(evidence.native_session_id, 'native-one');
+    assert.equal(evidence.processes.length, 1);
+    assert.equal(evidence.processes[0].exit_code, 0);
+    assert.equal(evidence.processes[0].forced_kill, false);
+    assert.equal(await readFile(join(dir, 'fixture-exited'), 'utf8'), 'closed\n');
+  });
+  test(`${backend}: a disabled turn wait completes delayed turns in the same process and session`, { timeout: 5000 }, async t => {
+    const { options, receipt } = await interactive(t, 'wait-delayed', { turnWaitMs: null });
+    const outcomes = await withSession(options, async agent => [
+      await agent.turn({ id: 'first', prompt: 'remember' }),
+      await agent.turn({ id: 'second', prompt: 'recall' }),
+    ]);
+    assert.deepEqual(outcomes.map(result => result.text), ['turn 1', 'turn 2']);
+    assert.deepEqual(outcomes.map(result => result.session_id), ['native-one', 'native-one']);
+    const evidence = await receipt();
+    assert.equal(evidence.turn_wait_ms, null);
+    assert.equal(evidence.turns.length, 2);
+    assert.ok(evidence.turns.every(turn => turn.duration_ms >= 100));
+    assert.equal(evidence.native_session_id, 'native-one');
+    assert.equal(evidence.processes.length, 1);
+    assert.ok(evidence.processes[0].pid > 0);
+    assert.equal(evidence.processes[0].exit_code, 0);
+    assert.equal(evidence.processes[0].forced_kill, false);
+    assert.equal(evidence.body_error, null);
+    assert.equal(evidence.cleanup_error, null);
+  });
+  test(`${backend}: caller cancellation still settles a turn with its wait disabled`, { timeout: 5000 }, async t => {
+    const controller = new AbortController();
+    let ready;
+    const started = new Promise(resolve => { ready = resolve; });
+    const { dir, options, receipt } = await interactive(t, 'hold', { turnWaitMs: null, signal: controller.signal,
+      onItem: record => { if (record.data.kind === 'turn_started') ready(); } });
+    await assert.rejects(withSession(options, async agent => {
+      const turn = agent.turn({ id: 'held', prompt: 'wait' });
+      await started;
+      await new Promise(resolve => setImmediate(resolve));
+      controller.abort(new Error('caller cancelled unlimited wait'));
+      return turn;
+    }), /cancelled/);
+    const evidence = await receipt();
+    assert.equal(evidence.turn_wait_ms, null);
+    assert.match(evidence.body_error, /cancelled/);
+    assert.equal(evidence.cleanup_error, null);
+    assert.equal(evidence.processes[0].exit_code, 0);
+    assert.equal(evidence.processes[0].forced_kill, false);
+    assert.equal(await readFile(join(dir, 'fixture-exited'), 'utf8'), 'closed\n');
+  });
   test(`${backend}: interactionReply capability is true only with a callback`, async t => {
     const without = await interactive(t, 'early');
     assert.equal(await withSession(without.options, async agent => agent.capabilities.interactionReply), false);

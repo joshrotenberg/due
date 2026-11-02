@@ -62,6 +62,11 @@ input.on('line', line => {
     }
     if (mode === 'malformed') { process.stdout.write('not-json\n'); return; }
     if (mode === 'hold') { tool(request.id, { turn_id: current }); return; }
+    if (mode === 'wait-delayed') {
+      tool(request.id, { turn_id: current });
+      setTimeout(finishTurn, 120);
+      return;
+    }
     if (mode.startsWith('interaction')) {
       item('interaction', { request_id: 'permission', request: { command: 'must-not-run' } }, current);
       // A later item must keep flowing while the decision is pending.

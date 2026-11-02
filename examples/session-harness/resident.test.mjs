@@ -1,20 +1,42 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openResident, openRpc } from './resident.mjs';
 const dueBinary = fileURLToPath(new URL('./resident.fixture.mjs', import.meta.url));
 for (const [transport, open] of [['mcp', openResident], ['rpc', openRpc]]) {
-async function setup(t, model = 'early', signal) {
+async function setup(t, model = 'early', signal, extra = {}) {
   const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-'));
   t.after(() => rm(artifactDir, { recursive: true, force: true }));
   const items = [];
-  const backend = await open({ dueBinary, artifactDir, profile: { provider: 'codex', cwd: artifactDir, model }, onItem: item => items.push(item), signal });
+  const backend = await open({ dueBinary, artifactDir, profile: { provider: 'codex', cwd: artifactDir, model }, onItem: item => items.push(item), signal, ...extra });
   t.after(async () => { try { await backend.close(); } catch {} });
   return { backend, items, artifactDir };
 }
+test(`${transport}: invalid turn waits fail before opening evidence files or launching`, async t => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-wait-invalid-'));
+  t.after(() => rm(artifactDir, { recursive: true, force: true }));
+  for (const turnWaitMs of [0, -1, 1.5, NaN, Infinity, 2 ** 31, Number.MAX_SAFE_INTEGER, '20', false, {}, []]) {
+    await assert.rejects(open({ dueBinary: join(artifactDir, 'must-not-launch'), artifactDir,
+      profile: { provider: 'codex', cwd: artifactDir, model: 'early' }, turnWaitMs }), /turnWaitMs/);
+    assert.deepEqual(await readdir(artifactDir), []);
+  }
+});
+test(`${transport}: a direct caller's short turn wait fails and settles its held process`, { timeout: 5000 }, async t => {
+  const control = new AbortController();
+  const fuse = setTimeout(() => control.abort(new Error('test failsafe')), 3000);
+  t.after(() => clearTimeout(fuse));
+  const { backend, artifactDir } = await setup(t, 'hold', control.signal, { turnWaitMs: 20 });
+  await assert.rejects(backend.turn({ id: 'held', prompt: 'wait' }), /timed out waiting for its terminal item/);
+  const receipt = await backend.close();
+  assert.match(receipt.execution_error.message, /timed out waiting for its terminal item/);
+  assert.equal(receipt.native_session_id, 'native-one');
+  assert.equal(receipt.processes[0].exit_code, 0);
+  assert.equal(receipt.processes[0].forced_kill, false);
+  assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
+});
 test(`${transport}: two turns share a process, early results and final output are retained`, async t => {
   const { backend, items, artifactDir } = await setup(t);
   const a = await backend.turn({ id: 'first', prompt: 'one' });

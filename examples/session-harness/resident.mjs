@@ -23,13 +23,22 @@ async function bounded(promise, ms, message) {
 export const openResident = options => openPersistent(options, 'mcp');
 export const openRpc = options => openPersistent(options, 'rpc');
 
+// Node timers overflow above this range and would turn a long wait into 1 ms.
+export function normalizeTurnWaitMs(value = 300_000) {
+  if (value !== null && (!Number.isInteger(value) || value < 1 || value > 2_147_483_647)) {
+    throw new Error('turnWaitMs must be null or an integer from 1 to 2147483647');
+  }
+  return value;
+}
+
 const STALE_REPLY = /unknown or finished turn|unknown or resolved interaction|No pending interaction/;
 
 // onInteraction(record, signal) -> provider-native response. `record` is a copy of the record
 // onItem saw (`record.data` is the complete interaction item, so the exact session_id, turn_id and
 // data.request_id come from it). `signal` aborts when the turn finishes, the session fails or is
 // cancelled, or the scope closes; a result returned after that is discarded and never sent.
-async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => {}, onInteraction, signal }, transport) {
+async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => {}, onInteraction, signal, turnWaitMs }, transport) {
+  const waitMs = normalizeTurnWaitMs(turnWaitMs);
   if (onInteraction !== undefined && typeof onInteraction !== 'function') throw new Error('onInteraction must be a function');
   const label = transport === 'rpc' ? 'RPC' : 'MCP';
   const notification = transport === 'rpc' ? 'session.item' : 'notifications/due/session_item';
@@ -272,7 +281,8 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
         const started = await call('turn_start', { session_id: sessionId, prompt });
         if (active.dueId && active.dueId !== started.turn_id) throw new Error('Turn identity changed');
         active.dueId = started.turn_id; turnIds.set(started.turn_id, id);
-        const result = await bounded(active.done.promise, 300_000, 'Resident turn timed out waiting for its terminal item');
+        const result = await (waitMs === null ? active.done.promise
+          : bounded(active.done.promise, waitMs, 'Resident turn timed out waiting for its terminal item'));
         jsonFile(join(dir, 'result.json'), result);
         if (!result || result.schema_version !== 1 || result.provider !== profile.provider
           || !['succeeded', 'failed', 'timed_out', 'cancelled'].includes(result.status)

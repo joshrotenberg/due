@@ -54,6 +54,23 @@ schema-validation or sandbox profiles into the resident backend. Authentication
 and native permission policies are inherited; no permission bypass or global
 configuration change is added. Persistence is enabled to allow CLI resume.
 
+### Caller turn waits
+
+For `resident` and `rpc`, top-level `turnWaitMs` controls how long the client
+waits for a terminal item after the turn-start response. Omit it to retain the
+five-minute default (`300000`), pass an integer from 1 through 2147483647 for a
+finite wait in milliseconds, or pass `null` for an unlimited wait. Use `null`
+for work you actively monitor, with an `AbortSignal` to cancel the session.
+Invalid values and explicit use with `resume` are rejected before artifacts or
+processes are created. Persistent receipts record the effective `turn_wait_ms`.
+
+This is a client wait, separate from the native per-turn `profile.timeout`.
+It includes time spent waiting for a permission decision. `turnWaitMs: null`
+does not disable native deadlines, the five-minute control-request waits, or
+bounded shutdown. A finite client wait expiring fails the scope and starts
+cleanup; it does not automatically retry or resume. This option is not sent to
+the provider and does not change `due run`.
+
 ## What changes between backends
 
 | | `resume` | `resident` | `rpc` |
@@ -140,8 +157,9 @@ directories 0700 subject to umask. They contain prompts and native payloads.
 The resume adapter parses at most 8 MiB of result JSON. Its cooperative cleanup
 waits for Due process closure, as the existing Node caller does. Resident frames
 are capped at 16 MiB, its pending notifications at 1024 / 8 MiB, and protocol
-evidence at 64 MiB. Resident RPC/turn waits have a five-minute client deadline;
-the native profile deadline is separate. Resident close has bounded waits and
+evidence at 64 MiB. Resident control RPC waits have a five-minute client deadline;
+terminal-result waits use `turnWaitMs` (five minutes by default). The native
+profile deadline is separate. Resident close has bounded waits and
 can kill the Due process if it remains stuck, reporting that failure. Neither
 backend promises cleanup of every escaped native descendant. These differing
 cleanup policies are explicit experimental limits, not backend parity claims.
@@ -164,8 +182,9 @@ and calls the same operations through `tools/call` with structured tool results.
 The RPC client needs no discovery or MCP SDK. It removes the initialization,
 tool envelopes and result-content wrapper; it retains the same lifecycle work.
 Both variants distinguish native turn failure (result data) from a transport or
-RPC error (an exception). Neither variant in this small client exposes permission
-replies or mid-turn interrupts, even though both Due server adapters support them.
+RPC error (an exception). Both persistent clients expose permission replies
+through `onInteraction`. They do not yet expose mid-turn interrupts, which both
+Due server adapters support.
 
 For a small two-turn RPC client that writes every observed native item to stdout:
 
