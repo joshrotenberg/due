@@ -243,8 +243,7 @@ async fn drive(
         sink.finished(result);
     }
     if let Some(reason) = failure {
-        sink.failed(reason.clone());
-        return Err(reason);
+        sink.failed(reason);
     }
     if let Err(error) = &closed {
         sink.failed(error.clone());

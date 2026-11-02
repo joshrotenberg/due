@@ -22,7 +22,7 @@ pub(crate) use items::{PushQueue, SessionItems};
 
 use crate::{
     cli::{Effort, Provider},
-    result::{RunError, RunResult},
+    result::{ErrorKind, RunError, RunResult},
 };
 
 const MAX_EVENTS: usize = 256;
@@ -223,12 +223,44 @@ impl EventSink {
             let mut state = self.state.lock().unwrap();
             if state.failure.is_none() {
                 self.item("session_failed", json!({"message":message}), None);
+                state.failure = Some(message.clone());
             }
-            state.failure = Some(message.clone());
             state.provider
         };
         self.finished(RunResult::new(provider).fail(RunError::protocol(message)));
         self.changed.notify_waiters();
+    }
+
+    fn closed(&self, outcome: Result<(), String>) -> Result<Value, String> {
+        if let Err(error) = &outcome {
+            self.failed(error.clone());
+        } else {
+            let provider = self.state.lock().unwrap().provider;
+            // Backends normally finish an active turn themselves during cleanup.
+            self.finished(RunResult::new(provider).fail(RunError::new(
+                ErrorKind::Cancelled,
+                "Session closed during turn",
+            )));
+        }
+        let (native_session_id, session_error) = {
+            let state = self.state.lock().unwrap();
+            (state.native_session_id.clone(), state.failure.clone())
+        };
+        self.item(
+            "session_closed",
+            json!({
+                "error":outcome.as_ref().err(),
+                "session_error":session_error,
+                "native_session_id":native_session_id,
+            }),
+            None,
+        );
+        outcome?;
+        Ok(json!({
+            "closed":true,
+            "native_session_id":native_session_id,
+            "session_error":session_error,
+        }))
     }
 
     fn begin(&self) -> Result<String, String> {
@@ -326,9 +358,16 @@ struct Session {
     backend: Backend,
 }
 
+struct ReadSession {
+    id: String,
+    sink: EventSink,
+}
+
 #[derive(Default)]
 pub(crate) struct Manager {
     session: AsyncMutex<Option<Session>>,
+    // Readers must not queue behind provider controls or native cleanup.
+    read_session: Mutex<Option<ReadSession>>,
     stopping: AtomicBool,
     pub(crate) push: Arc<PushQueue>,
 }
@@ -363,6 +402,10 @@ impl Manager {
             "stream": {"enabled":options.stream},
         });
         sink.item("session_opened", response.clone(), None);
+        *self.read_session.lock().unwrap() = Some(ReadSession {
+            id: id.clone(),
+            sink: sink.clone(),
+        });
         *slot = Some(Session { id, sink, backend });
         Ok(response)
     }
@@ -397,10 +440,7 @@ impl Manager {
         if wait_ms > 10_000 {
             return Err("wait_ms must be at most 10000".into());
         }
-        let sink = {
-            let mut slot = self.session.lock().await;
-            Self::session(&mut slot, session_id)?.sink.clone()
-        };
+        let sink = self.read_sink(session_id)?;
         let notified = sink.changed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
@@ -419,10 +459,7 @@ impl Manager {
         after: u64,
         limit: usize,
     ) -> Result<Value, String> {
-        let sink = {
-            let mut slot = self.session.lock().await;
-            Self::session(&mut slot, session_id)?.sink.clone()
-        };
+        let sink = self.read_sink(session_id)?;
         sink.items.read(after, limit)
     }
 
@@ -480,24 +517,9 @@ impl Manager {
             return Ok(json!({"closed":true}));
         };
         let outcome = session.backend.close().await;
-        if let Err(error) = &outcome {
-            session.sink.failed(error.clone());
-        } else {
-            session.sink.state.lock().unwrap().failure = Some("session closed".into());
-            let provider = session.sink.state.lock().unwrap().provider;
-            session
-                .sink
-                .finished(RunResult::new(provider).fail(RunError::protocol("session closed")));
-        }
-        session.sink.item(
-            "session_closed",
-            json!({"error":outcome.as_ref().err()}),
-            None,
-        );
-        outcome?;
-        Ok(
-            json!({"closed":true,"native_session_id":session.sink.state.lock().unwrap().native_session_id}),
-        )
+        let response = session.sink.closed(outcome);
+        *self.read_session.lock().unwrap() = None;
+        response
     }
 
     pub(crate) async fn shutdown(&self) -> Result<Value, String> {
@@ -511,11 +533,101 @@ impl Manager {
             .filter(|s| s.id == id)
             .ok_or_else(|| "unknown session handle".into())
     }
+
+    fn read_sink(&self, id: &str) -> Result<EventSink, String> {
+        self.read_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|session| session.id == id)
+            .map(|session| session.sink.clone())
+            .ok_or_else(|| "unknown session handle".into())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn readers_do_not_wait_for_the_mutation_lock() {
+        let manager = Manager::default();
+        let sink = EventSink::new(Provider::Claude, "session".into(), None);
+        let turn = sink.begin().unwrap();
+        sink.item("turn_started", json!({}), Some(&turn));
+        *manager.read_session.lock().unwrap() = Some(ReadSession {
+            id: "session".into(),
+            sink: sink.clone(),
+        });
+
+        // Controls and cleanup hold this lock across provider awaits. Reads must
+        // complete before it is released, including while close is settling.
+        let _control = manager.session.lock().await;
+        let read = tokio::time::timeout(
+            Duration::from_millis(100),
+            manager.read("session", &turn, 0, 0),
+        )
+        .await
+        .expect("turn read queued behind a control")
+        .unwrap();
+        assert_eq!(read["state"], "running");
+        let journal = tokio::time::timeout(
+            Duration::from_millis(100),
+            manager.session_read("session", 0, 10),
+        )
+        .await
+        .expect("session read queued behind a control")
+        .unwrap();
+        assert_eq!(journal["items"][0]["kind"], "turn_started");
+
+        sink.closed(Ok(())).unwrap();
+        *manager.read_session.lock().unwrap() = None;
+        assert_eq!(
+            manager.read("session", &turn, 0, 0).await.unwrap_err(),
+            "unknown session handle"
+        );
+        assert_eq!(
+            manager.session_read("session", 0, 10).await.unwrap_err(),
+            "unknown session handle"
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_keeps_the_first_session_failure_and_native_id() {
+        let sink = EventSink::new(Provider::Claude, "session".into(), None);
+        sink.native_session("native".into());
+        sink.failed("original provider failure".into());
+        sink.failed("later provider failure".into());
+        assert_eq!(
+            sink.closed(Err("cleanup failed".into())).unwrap_err(),
+            "cleanup failed"
+        );
+        let journal = sink.items.read(0, 10).unwrap();
+        let items = journal["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "only the first failure emits an item");
+        assert_eq!(items[0]["kind"], "session_failed");
+        assert_eq!(items[0]["data"]["message"], "original provider failure");
+        assert_eq!(items[1]["kind"], "session_closed");
+        assert_eq!(items[1]["data"]["error"], "cleanup failed");
+        assert_eq!(
+            items[1]["data"]["session_error"],
+            "original provider failure"
+        );
+        assert_eq!(items[1]["data"]["native_session_id"], "native");
+    }
+
+    #[test]
+    fn close_fallback_cancels_an_unfinished_turn_without_failing_the_session() {
+        let sink = EventSink::new(Provider::Codex, "session".into(), None);
+        let turn = sink.begin().unwrap();
+        let closed = sink.closed(Ok(())).unwrap();
+        assert_eq!(closed["closed"], true);
+        assert!(closed["session_error"].is_null());
+        let snapshot = sink.snapshot(&turn, 0).unwrap();
+        assert_eq!(snapshot["result"]["status"], "cancelled");
+        assert_eq!(snapshot["result"]["error"]["kind"], "cancelled");
+        assert!(snapshot["session_error"].is_null());
+    }
 
     #[tokio::test]
     async fn shutdown_rejects_queued_session_creation() {

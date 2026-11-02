@@ -42,7 +42,7 @@ on failure; use requests for session mutations whose outcome matters.
 | `session.read` | `session_id`; optional `after`, `limit` | Session items across turns, cursor and loss indicators |
 | `turn.interrupt` | `session_id`, `turn_id` | Interruption requested; wait for the terminal result |
 | `interaction.reply` | `session_id`, `turn_id`, `request_id`, `response` | Native reply accepted for delivery |
-| `session.close` | `session_id` | Awaited native shutdown and last native ID |
+| `session.close` | `session_id` | Awaited native shutdown, last native ID and first session failure, if any |
 
 Parameters are JSON objects, with a deliberately smaller schema than a
 `due run --request` file. Pass them directly through RPC; there is no request-file
@@ -76,7 +76,10 @@ Open a session with streaming enabled:
 
 The response's `result` contains `session_id`, `protocol_version: 1` and
 `stream: {"enabled":true,"method":"session.item"}`. Register the notification
-handler before open: startup items can precede its response. Use the returned
+handler before open: startup items can precede its response. If opening fails,
+those items (including `session_failed`) carry a provisional session ID for
+diagnostics, not a usable handle. Only a successful open publishes a handle;
+another open may be attempted after the failed request settles. Use the returned
 Due handle in subsequent requests:
 
 ```json
@@ -114,6 +117,21 @@ After its terminal result, read any needed journal items and close:
 Continue reading stdout during close and through EOF, then await the Due child
 exit. A terminal item may precede the `turn.start` response; clients need to
 correlate by IDs rather than assuming response-first ordering.
+
+Close reports provider cleanup separately from an earlier session failure. When
+the backend's close operation succeeds, its result contains `closed: true`,
+`native_session_id` and `session_error` (the first recorded failure, or null).
+The `session_closed` item carries the same ID and failure, plus `error` for the
+cleanup outcome. A cleanup error still returns RPC error `-32000`; its lifecycle
+item preserves those identifiers. Native wrapper shutdown errors are preserved,
+including a nonzero child exit reported by Codex. Successful cleanup does not
+make a failed turn successful. Successful cleanup cancels any unfinished turn.
+
+Reads remain available while provider controls or close are awaiting native
+completion, subject to the connection's request/output limits. After close
+settles, the handle is removed even if cleanup failed; new reads reject it.
+Reads already admitted may finish using their retained view. Save required
+items and identifiers before closing.
 
 The runnable [JavaScript example](../examples/session-harness/rpc-example.mjs)
 does two turns, independently checks both answers and writes all observed
@@ -163,8 +181,11 @@ exposes the request body rather than the whole control envelope. A delayed
 initialization snapshot is available only when retained in a turn. Native
 resume does not replay all earlier provider history through Due.
 
-Streaming is opt-in. `session.read` works without it and recovers gaps using the
-last session-wide `cursor`. Keep that cursor separate from `turn.read`'s cursor.
+Streaming is opt-in: `stream` controls pushed notifications, not native event
+collection. Claude partial-message events are requested and retained for polling
+even with `stream: false`. `session.read` works without pushes and recovers gaps
+using the last session-wide `cursor`. Keep that cursor separate from
+`turn.read`'s cursor.
 For example:
 
 ```json
@@ -230,6 +251,18 @@ stdout writer interleaves responses and items without interleaving their bytes.
 Responses have an 8 MiB individual/aggregate queued-byte limit and a queue of 16;
 overflow ends the connection and starts cleanup rather than silently losing a
 response. A blocked write or final drain has a five-second deadline.
+The concurrency error `-32001` is a recoverable admission rejection only while
+output capacity remains available. Parse/admission error responses also consume
+that capacity, and an in-flight response retains its byte budget until flushed.
+The request limit does not reserve room for an unlimited stream of errors: a
+caller that stops reading can hit the hard output limit and lose the connection.
+A burst of immediate errors can also fill the queue before the writer runs,
+even when the caller is reading.
+
+Malformed JSON within a valid UTF-8 line receives `-32700` and leaves the
+connection usable. Invalid UTF-8 or an oversized input line is a framing error
+and ends the connection. There is no attempt to resynchronize after invalid
+byte framing.
 
 EOF, SIGINT/SIGTERM/SIGHUP, invalid framing or failed output starts native
 cleanup and rejects new sessions/turns. Queued terminal items are drained when
@@ -242,8 +275,12 @@ not fully bounded by Due's outward journal limits. A native deadline closes the
 session; close its failed Due handle before opening another. Codex caps native
 output at 64 MiB per resident process and final answer text at 4 MiB. The pinned
 Claude wrapper retains native turn events without a configurable byte cap.
-Pending native requests are capped at 32. Claude's native cost is a session
-total, including spend restored on resume; Codex cost remains absent.
+Pending native requests are capped at 32. Claude denies excess permission
+requests and keeps the session running. Codex rejects an excess native request
+and fails the session, both before and after its native turn ID arrives. These
+policies differ because Claude exposes typed permission decisions while Codex
+exposes a broader native request stream. Claude's native cost is a session total,
+including spend restored on resume; Codex cost remains absent.
 
 ## Rust host and language client
 
@@ -280,9 +317,12 @@ node --test examples/session-harness/*.test.mjs
 ```
 
 The offline tests use fake native peers for both providers. They cover session
-continuity, full live items, cursor replay, permissions, interrupt during a
-concurrent long poll, native failures, deadlines, early results, framing and
-cleanup. No model credentials are used by those tests.
+continuity, full live items, cursor replay, permission overflow, startup and late
+interrupt acknowledgements, reads during controls, failed-session cleanup,
+deadlines, early results, framing and output saturation. No model credentials
+are used by those tests. CI enables RPC on Linux and macOS. Process tests use
+both pipes and Unix sockets, exercising Linux's pipe path and the fallback used
+by Node-style socket-backed stdio.
 
 To compare CLI resume with RPC using a real provider and a disposable workspace:
 

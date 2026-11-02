@@ -20,6 +20,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: node --test examples/node-caller/caller.test.mjs
+      - run: node --test examples/session-harness/*.test.mjs
   python-caller-examples:
     runs-on: ubuntu-latest
     steps:
@@ -63,9 +64,22 @@ jobs:
           PATH='' "$binary" schema trace-summary > due-installed-summary.schema.json
           : > due-empty-trace.jsonl
           PATH='' "$binary" trace summarize due-empty-trace.jsonl --output json > due-installed-summary.json
+  rpc:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --locked --all-targets --features rpc -- -D warnings
+      - run: cargo test --locked --features rpc
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90
       - run: cargo check --locked
+      - run: cargo check --locked --features rpc

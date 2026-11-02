@@ -17,6 +17,13 @@ use std::{
 };
 use tempfile::TempDir;
 
+#[path = "rpc/bounds_review.rs"]
+mod bounds_review;
+#[path = "rpc/close_review.rs"]
+mod close_review;
+#[path = "rpc/transport_review.rs"]
+mod transport_review;
+
 struct Client {
     dir: TempDir,
     child: Child,

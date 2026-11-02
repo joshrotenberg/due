@@ -402,6 +402,46 @@ fn finish(result: Result<(), String>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        pin::Pin,
+        sync::Mutex,
+        task::{Context, Poll, Waker},
+    };
+
+    #[derive(Default)]
+    struct FlushGate {
+        released: bool,
+        waiting: Option<tokio::sync::oneshot::Sender<()>>,
+        waker: Option<Waker>,
+    }
+
+    struct GatedWriter(Arc<Mutex<FlushGate>>);
+
+    impl AsyncWrite for GatedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            let mut gate = self.0.lock().unwrap();
+            if gate.released {
+                return Poll::Ready(Ok(()));
+            }
+            gate.waker = Some(cx.waker().clone());
+            if let Some(waiting) = gate.waiting.take() {
+                let _ = waiting.send(());
+            }
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.poll_flush(cx)
+        }
+    }
 
     #[test]
     fn absent_id_and_explicit_null_are_different() {
@@ -473,5 +513,83 @@ mod tests {
         drop(frame);
         assert_eq!(budget.available_permits(), 32);
         assert!(enqueue(&tx, &budget, json!({"too_large":"a".repeat(32)})).is_err());
+    }
+
+    #[tokio::test]
+    async fn eight_mib_response_budget_includes_a_frame_until_flush_finishes() {
+        let (tx, rx) = mpsc::channel(MAX_REQUESTS);
+        let budget = Arc::new(Semaphore::new(MAX_OUTPUT));
+        // Two JSON quotes and the terminating newline count toward the limit.
+        assert_eq!(
+            enqueue(&tx, &budget, json!("x".repeat(MAX_OUTPUT - 2))).unwrap_err(),
+            "RPC response exceeds 8 MiB output limit"
+        );
+        assert_eq!(budget.available_permits(), MAX_OUTPUT);
+        enqueue(&tx, &budget, json!("x".repeat(MAX_OUTPUT - 3))).unwrap();
+        assert_eq!(budget.available_permits(), 0);
+
+        let (waiting, blocked) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(Mutex::new(FlushGate {
+            waiting: Some(waiting),
+            ..FlushGate::default()
+        }));
+        let push = Arc::new(PushQueue::default());
+        push.close();
+        let output = tokio::spawn(write_output(GatedWriter(gate.clone()), rx, push));
+        tokio::time::timeout(Duration::from_secs(2), blocked)
+            .await
+            .expect("writer did not reach its flush")
+            .unwrap();
+        assert_eq!(
+            tx.capacity(),
+            MAX_REQUESTS,
+            "frame must have left the queue"
+        );
+        assert_eq!(budget.available_permits(), 0, "flush still owns the bytes");
+        assert_eq!(
+            enqueue(&tx, &budget, Value::Null).unwrap_err(),
+            "RPC response backlog exceeds 8 MiB"
+        );
+
+        let waker = {
+            let mut gate = gate.lock().unwrap();
+            gate.released = true;
+            gate.waker.take().unwrap()
+        };
+        waker.wake();
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(2), output)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(budget.available_permits(), MAX_OUTPUT);
+    }
+
+    #[tokio::test]
+    async fn full_response_queue_rejects_without_leaking_byte_permits() {
+        let (tx, rx) = mpsc::channel(MAX_REQUESTS);
+        let budget = Arc::new(Semaphore::new(MAX_OUTPUT));
+        for _ in 0..MAX_REQUESTS {
+            enqueue(&tx, &budget, Value::Null).unwrap();
+        }
+        let remaining = budget.available_permits();
+        assert_eq!(
+            enqueue(&tx, &budget, Value::Null).unwrap_err(),
+            "RPC response queue full or closed"
+        );
+        assert_eq!(budget.available_permits(), remaining);
+        drop(rx);
+        assert_eq!(budget.available_permits(), MAX_OUTPUT);
+    }
+
+    #[tokio::test]
+    async fn immediate_error_response_overload_fails_the_connection() {
+        // This test uses the current-thread runtime and an immediately ready
+        // reader. Parse errors fill the queue in one poll before the spawned
+        // output task can run, independent of kernel pipe buffer sizes.
+        let input = "{\n".repeat(MAX_REQUESTS + 1);
+        let result = run(input.as_bytes(), tokio::io::sink(), std::future::pending()).await;
+        assert_eq!(result.unwrap_err(), "RPC response queue full or closed");
     }
 }

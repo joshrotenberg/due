@@ -6,7 +6,11 @@
 set -eu
 
 provider=claude
-for arg in "$@"; do [ "$arg" != app-server ] || provider=codex; done
+partial_messages=0
+for arg in "$@"; do
+  [ "$arg" != app-server ] || provider=codex
+  [ "$arg" != --include-partial-messages ] || partial_messages=1
+done
 printf '%s\n' "$$" > "$DUE_SESSION_FIXTURE_DIR/pid"
 trap 'touch "$DUE_SESSION_FIXTURE_DIR/exited"' EXIT
 count=0
@@ -95,6 +99,28 @@ begin() {
     notify item/started '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"id":"exec-fixture","type":"commandExecution","command":"fixture-only","fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}}'
   fi
   case "$line" in
+    *'"native-exit"'*) exit 0 ;;
+    *'"native-exit-error"'*) exit 17 ;;
+    *'"partial-payload"'*)
+      if [ "$provider" = claude ] && [ "$partial_messages" = 1 ]; then
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial chunk\nsecond line"}},"fixturePartial":{"unknown":[true,null,{"future":42}]}}'
+      fi
+      finish completed 'partial payload finished'
+      ;;
+    *'"permission-overflow"'*)
+      if [ "$provider" = codex ]; then
+        # Tests release this only after observing the native turn/start reply,
+        # so this exercises the established turn path instead of early replay.
+        while [ ! -f "$DUE_SESSION_FIXTURE_DIR/release-permissions" ]; do sleep 0.01; done
+      fi
+      for request in $(seq 1 33); do
+        if [ "$provider" = claude ]; then
+          emit '{"type":"control_request","request_id":"permission-'"$request"'","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"fixture-only"}}}'
+        else
+          emit '{"method":"item/commandExecution/requestApproval","id":'"$((100 + request))"',"params":{"threadId":"'"$native"'","turnId":"'"$turn"'","command":"fixture-only"}}'
+        fi
+      done
+      ;;
     *'"hold"'*|*'"late-ack"'*|*'"late-error"'*|*'"startup-hold"'*|*'"startup-complete"'*|*'"stale-approval"'*|*'"early-release"'*) : ;;
     *'"ask"'*|*'"ask-resolved"'*|*'"ask-completed"'*|*'"startup-ask"'*)
       pending=1
