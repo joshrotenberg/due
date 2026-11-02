@@ -14,6 +14,7 @@ Any external client -------------------------------> due rpc
 ```
 
 Rust owns process startup, byte capture, bounded I/O and child settlement.
+With `--async`, it also owns bounded verifier processes and their cleanup.
 The language libraries own IDs, response routing, item delivery, permissions,
 turn waiting and session convenience methods. The existing Rust RPC server
 continues to own provider-specific session behavior. Neither embedded client
@@ -79,7 +80,7 @@ The bridge has the same synchronous operations in each language:
 | `log(text)` | Diagnostic text on stderr |
 | `args` | Original caller JSON string |
 
-This slice uses an explicit cooperative event pump. Callbacks must finish
+Without `--async`, the client uses an explicit cooperative event pump. Callbacks must finish
 synchronously. They can enqueue requests, interrupts and permission replies,
 but recursive blocking calls are rejected. Returning null/nil from
 `onInteraction` defers the decision; the caller can keep polling and later call
@@ -87,8 +88,7 @@ but recursive blocking calls are rejected. Returning null/nil from
 for a resolved or finished turn is rejected locally.
 
 The Rust reader continues while guest code runs, but guest callbacks run only
-when the client pumps. This is not yet a Promise/coroutine scheduler or a test
-of concurrent workflows. JavaScript Promise use is rejected, including discarded
+when the client pumps. In this synchronous mode, JavaScript Promise use is rejected, including discarded
 rejections. Lua callback yields are rejected. Detached caller-created Lua
 coroutines are not supervised; this experiment is for trusted scripts.
 
@@ -98,6 +98,92 @@ fail explicitly. Valid old cursor duplicates are ignored. These small clients
 do not yet recover gaps using `session.read`; the raw RPC method remains
 available to clients that implement replay. They retain bounded request,
 interaction and terminal state rather than a whole conversation transcript.
+
+## Async supervision
+
+Pass `--async` to compare JavaScript Promises with managed Lua coroutines on
+the same Rust command runner. The [JavaScript](workflows/supervision.js) and
+[Lua](workflows/supervision.lua) examples implement the same bounded assignment:
+ask the worker, run an independent caller-selected check, and send failed check
+output back for a limited number of revisions in the same session.
+
+```sh
+examples/rpc-languages/target/release/due-rpc-languages \
+  js examples/rpc-languages/workflows/supervision.js --async \
+  --due "$PWD/target/release/due" --cwd /path/to/project \
+  --evidence /tmp/due-supervision-js \
+  --args '{"profile":{"request":"/path/to/worker.json","cwd":"/path/to/project"},"task":"Fix the parser regression and add a test.","verify":{"program":"cargo","args":["test","--locked"],"timeout_ms":120000},"max_revisions":2}'
+```
+
+Replace `js` and the workflow path with `lua` and `workflows/supervision.lua`
+to run the Lua version. A small JavaScript workflow looks like this:
+
+```js
+Due.run(async scope => {
+  const worker = await scope.open({request: '/path/to/worker.json'}, {
+    onItem(item) { bridge.log(JSON.stringify(item)); },
+    async onInteraction(item, signal) {
+      await scope.sleep(100, signal); // Other items continue arriving.
+      signal.throwIfAborted();
+      return {decision: 'decline'}; // Codex approval shape; choose for your provider.
+    },
+  });
+  const turn = await worker.turn('Investigate the parser regression.');
+  if (turn.status !== 'succeeded') throw Error('Worker failed');
+  const check = await scope.exec({program: 'cargo', args: ['test', '--locked']});
+  if (check.error != null || check.status !== 'succeeded') throw Error('Check failed');
+});
+```
+
+Lua uses `Due.run(function(scope) ... end)` and colon methods; its managed
+coroutine suspends inside `scope:exec`, `scope:sleep` and worker methods. It does
+not need an `await` keyword. JSON array arguments use `json.array({...})`.
+
+| Async API | Contract |
+| --- | --- |
+| `scope.open(profile, callbacks)` | Open the scope's single resident session; return a worker with `opened` details |
+| `worker.start`, `wait`, `turn`, `interrupt`, `reply`, `close` | Awaitable versions of the existing validated client operations |
+| `scope.exec(spec, signal?)` | Run a caller-owned program, wait for settlement, return its result |
+| `scope.sleep(ms, signal?)` | Yield while frames and other managed work continue |
+| `scope.signal`, `scope.cancel(reason)` | Sticky scope cancellation; catching it does not make the workflow succeed |
+
+`Due.run` owns one root workflow. It closes the session and joins managed
+permission callbacks and commands before returning. Returning with an unfinished
+turn or unjoined work fails. `onItem` remains synchronous; Promise returns or
+Lua yields are errors. Lua's async mode disables direct coroutine scheduling and
+the bare synchronous client to keep managed work within this scope. JavaScript
+also checks unhandled rejections and unsettled Promises.
+
+An interaction callback receives its own cancellation signal. Pass that signal
+to its awaited commands and sleeps: interaction retirement, a terminal turn or
+session closure cancels that work and suppresses a late decision. A distinct
+callback failure remains a failure even after retirement. A reply already sent
+must still consume its acknowledgement; only a known stale-reply error after
+matching retirement is ignored. A failed native session cancels the root scope,
+including verification between turns. An ordinary failed turn or nonzero command
+exit is result data that the caller must check.
+
+The command specification accepts only `program`, string-array `args`, optional
+`cwd`, `timeout_ms` and `max_output_bytes`. Working directories resolve against
+the runner's `--cwd`, not the native session's profile. Commands inherit the
+runner environment, receive closed stdin and use no implicit shell. Defaults are
+30 seconds and 64 KiB combined stdout/stderr; maxima are five minutes and 1 MiB.
+At most eight command results may be pending. Output overflow or invalid UTF-8
+is an explicit failure; invalid text is unavailable rather than silently replaced.
+Results include `status`, `exit_code`, `signal`, `stdout`, `stderr` and `error`.
+
+The Rust owner cancels and joins commands even when guest cleanup fails. Unix
+commands have their own process groups; cleanup signals the group before reaping
+its leader and drains both pipes with deadlines. Shutdown has a shared seven-second
+command cleanup budget. Descendants that escape that group are not supervised;
+non-Unix builds only control the direct child and are not covered by this trial.
+
+These are trusted caller scripts. Native profile permissions and sandboxes do
+not constrain host verifier commands. The caller chooses programs, arguments
+and acceptance criteria; never construct commands from worker output. The example
+denies unexpected approvals and retries only normal verifier test failures, not
+timeouts, cancellation or infrastructure failures. `permission_check` optionally
+runs a caller command before denial to exercise an awaited interaction.
 
 ## JSON and evidence
 
@@ -118,6 +204,8 @@ Both engines share these private, exclusive-create evidence files:
 - `receipt.json`: child PID, exit status, settlement, forced kill and transport
   error, plus actual retained byte count.
 - `workflow.json`: language, workflow outcome, error and elapsed time.
+- `exec.jsonl` in async mode: resolved command specifications, spawned PIDs and
+  bounded command results. Its 64 MiB cap and write failures fail the workflow.
 
 The capture retains a fixed 64 MiB prefix; overflow fails the run. Frames are
 limited to 8 MiB, outbound requests to 1 MiB, and the receive queue to 256 frames
@@ -152,5 +240,5 @@ or `--no-default-features --features js` with the nested manifest. The common
 fixture suite exercises both clients against identical wire sequences. Tests
 require Python 3 on Unix; no model authentication is used.
 
-See the [comparison report](../../../docs/rpc-languages.md) for the observed
+See the [comparison report](../../docs/rpc-languages.md) for the observed
 results and remaining decision points.

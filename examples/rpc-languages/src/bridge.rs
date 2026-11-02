@@ -68,6 +68,11 @@ pub struct Bridge {
 }
 
 impl Bridge {
+    /// Share the I/O runtime with caller-owned asynchronous verifier processes.
+    pub(crate) fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
+    }
+
     /// Launch an absolute Due binary with `rpc`, using a new evidence directory.
     pub fn spawn(program: &Path, cwd: &Path, evidence: &Path) -> Result<Self, String> {
         if !program.is_absolute() {

@@ -90,10 +90,11 @@ A verification result arriving after cancellation cannot accept the assignment
 or start another turn. Gracefully interrupting a worker turn is distinct from
 cancelling the whole session.
 
-This example runs in Node. The embedded Lua and QuickJS comparison currently
-provides cooperative RPC pumping rather than an asynchronous process bridge for
-external verifiers. Their caller can supervise turns through raw RPC today;
-embedding a standalone verifier requires that separate bridge work.
+This example runs in Node. The separate [embedded Lua and QuickJS comparison](../rpc-languages/README.md#async-supervision)
+now implements the same bounded assignment with `--async`: Promises or managed
+coroutines over a shared Rust command supervisor. That owner provides command
+deadlines, output bounds, cancellation and settlement without a Node runtime.
+The raw RPC interface remains available to independently written clients.
 
 Run the deterministic examples without providers or credentials:
 

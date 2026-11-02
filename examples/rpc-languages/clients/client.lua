@@ -2,10 +2,12 @@
 -- Validated old cursors are ignored. Raw-byte fidelity belongs to the host.
 DueClient = {}
 DueClient.__index = DueClient
+local clientType = DueClient
 local function object(v) return type(v) == 'table' and v ~= json.null end
 local function str(v) return type(v) == 'string' and #v > 0 end
 local function integer(v) return type(v) == 'number' and v == v and v >= 0 and v <= 9007199254740991 and v % 1 == 0 end
 local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
+local coroutine_create, coroutine_resume, coroutine_status = coroutine.create, coroutine.resume, coroutine.status
 -- Copy only callback-sensitive lifecycle payloads, never re-encode received
 -- numbers. Preserve the host's array/object metatables and JSON null identity.
 local function copy(value, seen)
@@ -21,7 +23,7 @@ end
 function DueClient.new(options)
   options = options or {}
   return setmetatable({onItem=options.onItem, onInteraction=options.onInteraction,
-    pending={}, finished={}, interactions={}, seq=0, cursor=0}, DueClient)
+    pending={}, finished={}, interactions={}, seq=0, cursor=0}, clientType)
 end
 function DueClient:_fail(e)
   if self.failure == nil then self.failure = e; self.interactions = {} end
@@ -42,11 +44,11 @@ function DueClient:_callback(fn, item)
   if type(fn) ~= 'function' then self:_fail('Callback must be a function') end
   -- A private coroutine is used solely to detect yield, never as a scheduler.
   self.callback = true
-  local co = coroutine.create(fn)
-  local ok, value = coroutine.resume(co, item)
+  local co = coroutine_create(fn)
+  local ok, value = coroutine_resume(co, item)
   self.callback = false
   if not ok then self:_fail(value) end
-  if coroutine.status(co) ~= 'dead' or type(value) == 'thread' or type(value) == 'function' then
+  if coroutine_status(co) ~= 'dead' or type(value) == 'thread' or type(value) == 'function' then
     self:_fail('Callbacks must complete synchronously')
   end
   self:_check(false)
@@ -170,6 +172,33 @@ function DueClient:await(id, timeout)
   if p.error then error(p.error, 0) end -- Ordinary RPC errors are recoverable.
   return p.result
 end
+-- Nonblocking hooks shared with the coroutine adapter. Protocol validation and
+-- private lifecycle state remain in this client.
+function DueClient:tryAwait(id)
+  self:_check(false)
+  local p = self.pending[id]
+  if not p or p.automatic then error('Unknown request ID', 0) end
+  if not p.done then return false end
+  self.pending[id] = nil
+  if p.error then error(p.error, 0) end
+  return true, p.result
+end
+function DueClient:tryWait(turn)
+  self:_check(false)
+  if not str(turn) then error('Invalid turn ID', 0) end
+  local value = self.finished[turn]
+  if value == nil then return false end
+  self.finished[turn] = nil
+  return true, value
+end
+function DueClient:acceptOpen(r)
+  self:_guard(function()
+    assert(object(r) and r.protocol_version == 1 and object(r.stream) and r.stream.enabled == true and r.stream.method == 'session.item' and str(r.session_id), 'Unsupported session protocol')
+    assert(not self.session or self.session == r.session_id, 'Session identity changed')
+    self.session, self.opened = r.session_id, true
+  end)
+  return r
+end
 function DueClient:open(profile)
   self:_check(true)
   if self.opened or self.openAttempted then error('Session already opened', 0) end
@@ -179,12 +208,7 @@ function DueClient:open(profile)
     local p = json.object({}); for k,v in pairs(profile) do p[k]=v end; p.stream=true; return p
   end)
   local r = self:await(self:request('session.open', params))
-  self:_guard(function()
-    assert(object(r) and r.protocol_version == 1 and object(r.stream) and r.stream.enabled == true and r.stream.method == 'session.item' and str(r.session_id), 'Unsupported session protocol')
-    assert(not self.session or self.session == r.session_id, 'Session identity changed')
-    self.session, self.opened = r.session_id, true
-  end)
-  return r
+  return self:acceptOpen(r)
 end
 function DueClient:_params(extra)
   assert(self.opened, 'Session not open'); extra.session_id=self.session; return json.object(extra)

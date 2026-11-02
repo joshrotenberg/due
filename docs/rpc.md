@@ -377,12 +377,15 @@ caller-owned verification or checkpoint work. Full items remain in evidence;
 the parent can consume summaries without putting the whole transcript into its
 model context.
 
-The embedded comparison still uses synchronous callbacks and a cooperative
-pump. It has no host command/file API for an independent verifier and no owned
-Promise/coroutine scheduler. The async Node example demonstrates the workflow;
-an embedded async bridge remains a separate design and comparison step. A
-session is also process-local: durable reconnection or replay after process loss
-is not provided by the bounded journal.
+The [embedded comparison](../examples/rpc-languages/README.md#async-supervision)
+now offers an opt-in `--async` mode with the same supervised assignment in Lua
+and QuickJS. Both clients keep consuming items while a permission check or
+independent verifier awaits the shared Rust command runner. The caller scope
+owns cancellation, joins managed work and closes the session; Rust owns command
+limits, process settlement and evidence. JSON profiles work unchanged. This is
+still a private comparison, not a shipped harness command. A session remains
+process-local: durable reconnection or replay after process loss is not provided
+by the bounded journal.
 
 ## Checking the spike
 

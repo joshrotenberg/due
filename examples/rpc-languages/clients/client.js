@@ -481,6 +481,53 @@ var DueClient = (function () {
     });
   };
 
+  // Nonblocking settlement hooks for the optional Promise scheduler. They reuse
+  // the same decoder, identity checks and lifecycle transitions as sync calls.
+  P._asyncTake = function (id) {
+    this._guard();
+    var entry = this._pending.get(id);
+    if (!entry || entry.auto) throw DueError('usage', 'unknown request id');
+    return entry.done ? { ready: true, value: finish(this, id, entry) } : { ready: false };
+  };
+  P._asyncOpen = function (r) {
+    if (!isObject(r) || r.protocol_version !== 1 || !isObject(r.stream) || r.stream.enabled !== true ||
+        r.stream.method !== 'session.item' || !nonEmptyString(r.session_id)) {
+      throw this._fatal('protocol', 'unsupported session.open result');
+    }
+    if (this._itemSession && this._itemSession !== r.session_id) throw this._fatal('protocol', 'session_id differs from earlier items');
+    this._sessionId = r.session_id;
+    return r;
+  };
+  P._asyncStart = function (r) {
+    if (!isObject(r) || !nonEmptyString(r.turn_id)) throw this._fatal('protocol', 'turn.start result lacks turn_id');
+    if (!this._turns.has(r.turn_id)) {
+      if (this._turns.size >= MAX_TURNS) throw this._fatal('protocol', 'finished-turn cache full');
+      this._turns.set(r.turn_id, undefined);
+    }
+    return r.turn_id;
+  };
+  P._asyncWait = function (id) {
+    this._guard();
+    if (!this._turns.has(id)) throw DueError('usage', 'unknown turn id');
+    var value = this._turns.get(id);
+    if (value === undefined) return { ready: false };
+    this._turns.delete(id);
+    return { ready: true, value: value };
+  };
+  P._asyncBeginClose = function () {
+    this._guard();
+    this._closing = true;
+    this._interactions.clear();
+    return this._send('session.close', { session_id: this._sessionId }, false);
+  };
+  P._asyncClosed = function (result) {
+    this._pending.clear();
+    this._turns.clear();
+    this.closed = true;
+    this._closeResult = result;
+    return result;
+  };
+
   P.poll = function (timeoutMs) {
     timeoutMs = checkTimeout(timeoutMs, 0, 'timeoutMs');
     return this._run('poll', function () {

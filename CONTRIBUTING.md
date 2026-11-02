@@ -12,6 +12,9 @@ it must preserve `due run` behavior and existing wrapper revisions. See the
 isolated in a separate private crate under `examples/rpc-languages`; it uses the
 same RPC bridge for Lua and JavaScript and must not change default Due dependencies
 or `due run`.
+That comparison includes explicitly scoped async supervision: Promises and
+managed coroutines over the same bounded Rust verifier bridge. It does not
+unfreeze unrelated features or enable the earlier source-trial workflow.
 
 Use [installation](docs/install.md) for local setup and
 [dogfooding](docs/dogfooding.md) for issue reports. Keep changes small and include

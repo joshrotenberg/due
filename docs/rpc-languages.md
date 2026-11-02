@@ -20,9 +20,10 @@ deferred decisions, interruption and cleanup. The common Rust bridge captures
 raw bytes before conversion, bounds frames and queues, handles signals and
 settles the owned Due process.
 
-This first slice uses synchronous callbacks and a cooperative pump. It deliberately
-does not establish which language is better for concurrent asynchronous workflow
-composition. QuickJS is embedded JavaScript, with no Node, npm or browser API;
+The original synchronous slice uses callbacks and a cooperative pump. The
+opt-in `--async` comparison now adds owned JavaScript Promises and Lua coroutines,
+with the same Rust process supervisor beneath both. QuickJS is embedded
+JavaScript, with no Node, npm or browser API;
 Lua has selected standard libraries and the explicit bridge/JSON helpers.
 See the [QuickJS binding documentation](https://docs.rs/rquickjs/0.14.0/rquickjs/)
 and [Lua language model](https://www.lua.org/manual/5.4/manual.html#2.1).
@@ -35,7 +36,9 @@ and [Lua language model](https://www.lua.org/manual/5.4/manual.html#2.1).
 | Universally lossless numbers | No | No; unsigned values above signed range can become floats |
 | Raw evidence | Identical Rust byte capture | Identical Rust byte capture |
 | Routing, permissions, lifecycle | Implemented in client | Implemented in client |
-| Async evaluation in this slice | Promise use rejected | Callback yields rejected; detached coroutines not supervised |
+| Async evaluation with `--async` | `async`/`await`, bounded microtask pump, tracked Promises and rejections | Managed coroutines suspend inside client methods; raw coroutine scheduling disabled |
+| Independent verification | Shared Rust-owned command runner | Same command runner and limits |
+| Synchronous compatibility | Promise use still rejected without `--async` | Callback yields still rejected without `--async` |
 
 JavaScript remains the provisional lead for a JSON-facing client: callers can
 work directly with the protocol's shapes, and the host needs less conversion
@@ -44,7 +47,7 @@ show that most difficult behavior belongs to transport and session lifecycle,
 not syntax. This was not a controlled comparison of agent authoring quality or
 a runtime performance benchmark.
 
-## Evidence from 2026-11-02
+## Initial synchronous evidence from 2026-11-02
 
 The shared deterministic peer exercises early startup items, terminal items before
 start replies, reversed response ordering, ordinary RPC errors, failed model
@@ -69,7 +72,7 @@ simple conversations. Private raw evidence, receipts and SHA-256 manifests are
 retained under `/private/tmp/due-rpc-languages-20261102/live` in the `*-final`
 directories. Earlier smoke runs against `cf5cb86` also passed.
 
-The final validation passed 177 default Due tests, 225 RPC-enabled tests, all
+Validation of that initial synchronous slice passed 177 default Due tests, 225 RPC-enabled tests, all
 104 existing Node client tests, and 23 embedded-runner tests. The explicit
 native-adapter integration test also passed all four language/provider
 combinations against the actual Due server with fake native binaries. Formatting,
@@ -114,19 +117,81 @@ checkout. No blanket permission change was made.
   the control now has bounded owner-level lifetime independent of the active
   turn, with late replies attributed to its original immutable IDs.
 
-## What remains before choosing a harness
+## Async supervision evidence
 
-The next discriminating comparison is the same asynchronous workflow in both
-languages: keep streaming while a permission callback awaits another operation,
-cancel that operation when its turn ends, and join all spawned work before
-returning. That means testing Lua coroutine composition against JavaScript
-Promises on the same asynchronous Rust bridge, with identical ownership and
-cleanup rules. The earlier workflow spikes contain useful patterns, but this
-experiment does not import their scheduler.
+Both embedded clients now perform the same bounded assignment through
+`Due.run`: open one session from a JSON profile, send a turn, independently check
+the changed artifact, and request a revision only when that check fails normally.
+The [matching workflows](../examples/rpc-languages/README.md#async-supervision)
+use caller-selected commands. A worker's claim that tests passed is not acceptance.
+
+The deterministic peer keeps emitting items while a delayed permission command
+or verifier runs. Shared scenarios cover continued delivery, interaction retirement,
+turn completion during a callback, late permission acknowledgements, genuine and
+stale reply errors, callback failure, caught cancellation, native failure during
+verification, workflow expiry, unfinished turns and abandoned commands. Tests
+inspect receipts, peer EOF and child liveness rather than only workflow exit codes.
+They also send SIGTERM while a checker is running, retain a distinct callback
+error after retirement, and run both checked-in verify/revise examples.
+The actual Due server also passes both languages against both fake native adapters,
+including profile loading, deferred denial, interruption and reuse. These async
+checks make no model calls; the live conversations above tested the earlier
+synchronous clients.
+
+Final embedded validation passes 59 tests plus two explicit native integration
+tests covering all eight sync/async language/provider combinations. Formatting,
+all-target clippy with both engines and with each engine separately, the Rust 1.90
+check and the release build pass. The unchanged default Due suite passes all
+177 tests and its required pre-commit checks. These local checks ran on macOS.
+The full RPC-enabled suite also passes all 251 tests and all-target clippy.
+
+Rust owns command spawning, combined output limits, strict UTF-8 decoding,
+deadlines and cancellation. Unix cleanup signals the owned process group before
+reaping its leader and drains both output pipes. Its tests include a leader that
+exits while descendants retain those pipes. macOS reports `EPERM` when signaling
+a group containing only an unreaped exited leader; the implementation tolerates
+that only after verifying the leader exited and no other group members remain.
+Cleanup and receipt failures stay sticky even after a script consumes a result.
+
+Permission work belongs to the supplied interaction signal. Retirement aborts
+that signal and suppresses a late decision, but a distinct callback error still
+fails the workflow. Already-sent replies retain their acknowledgement ownership.
+Scope cancellation remains failure even when caught. On exit, managed callbacks,
+commands and native-session cleanup must settle; an unfinished operation cannot
+silently turn into success.
+
+This comparison supports choosing JavaScript for caller-facing ergonomics: JSON
+needs no table conventions and `async`/`await` makes suspension visible in the
+workflow. The host implementation is not automatically simpler. QuickJS needs
+bounded job pumping, rejection tracking and inspection of actual Promise state;
+its resolve hook alone does not account for rejected Promises. Lua's restricted
+managed coroutines make ownership easier to enumerate, at the cost of an explicit
+JSON adapter and suspension hidden inside method calls. Both pass the same
+supervision contract. Neither result measures agent authoring quality or speed.
+
+## Proposed path to a supported harness
+
+Choose one supported embedded language after reviewing the paired workflows;
+JavaScript is the current recommendation. Keep the Rust provider lifecycle and
+raw RPC contract independently usable. The language layer should own assignment
+composition, callbacks and acceptance policy, with the Rust bridge owning its
+processes and bounds. Preserve JSON profiles and existing `due run` semantics.
+
+The next implementation slice should define the shipped command, supported client
+API and evidence contract, then integrate that one runtime into packaging. Update
+help, examples, delegate guidance and plugin features together so callers can
+choose one-shot work or a supervised resident assignment. Unfreeze that scope
+explicitly; it does not reinstate the old mandatory source-trial/reporting workflow.
+Review and merge the RPC/harness work with those interfaces in place, then use it
+on ordinary development projects and collect concrete failures and friction.
 
 Other explicit limits remain: these clients fail on item gaps instead of
 implementing cursor replay; interpreter deadlines are cooperative, including
 Lua's non-preemptible library C calls; and the runner is for trusted scripts,
-not an untrusted-code sandbox. A public Rust RPC crate or shipped standalone
-client can be decided after the client contract stabilizes. Neither requires
-choosing the embedding language first.
+not an untrusted-code sandbox. Each scope owns one session; parallel workers
+require separate scopes/processes, not a new server-side agent loop. Host verifier
+commands are not constrained by native profile sandboxes. Unix descendants that
+escape their owned process group are outside supervision; non-Unix group cleanup
+is not implemented. The local async evidence is macOS-only; Linux CI must also
+pass before promoting this as supported behavior. A public Rust RPC crate or
+standalone client remains a packaging decision after the contract stabilizes.

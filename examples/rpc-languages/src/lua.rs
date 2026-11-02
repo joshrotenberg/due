@@ -1,13 +1,18 @@
 use crate::Host;
-use mlua::{HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value, VmState};
+use mlua::{Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value, VmState};
 use serde_json::{Map, Value as Json};
 use std::{collections::HashSet, rc::Rc};
 
-pub(crate) fn run(host: Rc<Host>, source: &str, args: &str) -> Result<(), String> {
-    execute(host, source, args).map_err(|e| format!("Lua: {e}"))
+pub(crate) fn run(
+    host: Rc<Host>,
+    source: &str,
+    args: &str,
+    async_mode: bool,
+) -> Result<(), String> {
+    execute(host, source, args, async_mode).map_err(|e| format!("Lua: {e}"))
 }
 
-fn execute(host: Rc<Host>, source: &str, args: &str) -> mlua::Result<()> {
+fn execute(host: Rc<Host>, source: &str, args: &str, async_mode: bool) -> mlua::Result<()> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE,
         LuaOptions::default(),
@@ -50,12 +55,52 @@ fn execute(host: Rc<Host>, source: &str, args: &str) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    if async_mode {
+        let executor = Rc::clone(&host);
+        bridge.set(
+            "exec_start",
+            lua.create_function(move |_, spec: String| {
+                executor.exec_start(&spec).map_err(mlua::Error::external)
+            })?,
+        )?;
+        let executor = Rc::clone(&host);
+        bridge.set(
+            "exec_poll",
+            lua.create_function(move |_, id: u64| {
+                executor.exec_poll(id).map_err(mlua::Error::external)
+            })?,
+        )?;
+        let executor = Rc::clone(&host);
+        bridge.set(
+            "exec_cancel",
+            lua.create_function(move |_, id: u64| {
+                executor.exec_cancel(id).map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
     lua.globals().set("bridge", bridge)?;
     install_json(&lua)?;
     lua.load(include_str!("../clients/client.lua"))
         .set_name("client.lua")
         .exec()?;
+    if async_mode {
+        lua.load(include_str!("../clients/async.lua"))
+            .set_name("async.lua")
+            .exec()?;
+    }
     lua.load(source).set_name("workflow.lua").exec()?;
+    if async_mode {
+        let due: Table = lua.globals().get("Due")?;
+        let step: Function = due.get("_step")?;
+        loop {
+            host.check().map_err(mlua::Error::external)?;
+            if step.call::<bool>(())? {
+                break;
+            }
+            // The background Rust reader remains active between bounded guest ticks.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
     Ok(())
 }
 

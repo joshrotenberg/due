@@ -5,6 +5,7 @@ mod bridge;
 mod javascript;
 #[cfg(feature = "lua")]
 mod lua;
+mod supervisor;
 
 use bridge::Bridge;
 use clap::Parser;
@@ -14,6 +15,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
+use supervisor::Supervisor;
 
 #[derive(Parser)]
 #[command(about = "Compare embedded Lua/QuickJS clients on one Rust RPC bridge")]
@@ -32,6 +34,9 @@ struct Options {
     /// JSON passed verbatim to bridge.args.
     #[arg(long, default_value = "{}")]
     args: String,
+    /// Run managed Promise/coroutine workflows with supervised verifier processes.
+    #[arg(long = "async")]
+    async_mode: bool,
     /// Whole workflow deadline, including RPC waits.
     #[arg(long, default_value_t = 300_000, value_parser = clap::value_parser!(u64).range(1..=2_147_483_647))]
     timeout_ms: u64,
@@ -39,6 +44,7 @@ struct Options {
 
 pub(crate) struct Host {
     bridge: RefCell<Bridge>,
+    supervisor: RefCell<Option<Supervisor>>,
     start: Instant,
     deadline: Instant,
     failure: RefCell<Option<String>>,
@@ -89,6 +95,32 @@ impl Host {
     fn now_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
     }
+
+    fn exec_start(&self, spec: &str) -> Result<u64, String> {
+        self.check()?;
+        self.supervisor
+            .borrow_mut()
+            .as_mut()
+            .ok_or("external commands require --async")?
+            .start(spec)
+    }
+
+    // Cleanup must remain possible after transport failure or workflow expiry.
+    fn exec_poll(&self, id: u64) -> Result<Option<String>, String> {
+        self.supervisor
+            .borrow_mut()
+            .as_mut()
+            .ok_or("external commands require --async")?
+            .poll(id)
+    }
+
+    fn exec_cancel(&self, id: u64) -> Result<(), String> {
+        self.supervisor
+            .borrow_mut()
+            .as_mut()
+            .ok_or("external commands require --async")?
+            .cancel(id)
+    }
 }
 
 fn run(options: Options) -> Result<(), String> {
@@ -106,26 +138,43 @@ fn run(options: Options) -> Result<(), String> {
     if source.len() > 1024 * 1024 {
         return Err("script exceeds 1 MiB".into());
     }
-    let host = Rc::new(Host {
-        bridge: RefCell::new(Bridge::spawn(
-            &options.due,
+    let bridge = Bridge::spawn(&options.due, &options.cwd, &options.evidence)?;
+    let supervisor = if options.async_mode {
+        Some(Supervisor::new(
+            bridge.runtime_handle(),
             &options.cwd,
             &options.evidence,
-        )?),
+        )?)
+    } else {
+        None
+    };
+    let host = Rc::new(Host {
+        bridge: RefCell::new(bridge),
+        supervisor: RefCell::new(supervisor),
         start: Instant::now(),
         deadline: Instant::now() + Duration::from_millis(options.timeout_ms),
         failure: RefCell::new(None),
     });
     let evaluated = match options.language.as_str() {
         #[cfg(feature = "lua")]
-        "lua" => lua::run(Rc::clone(&host), &source, &options.args),
+        "lua" => lua::run(Rc::clone(&host), &source, &options.args, options.async_mode),
         #[cfg(feature = "js")]
-        "js" => javascript::run(Rc::clone(&host), &source, &options.args),
+        "js" => javascript::run(Rc::clone(&host), &source, &options.args, options.async_mode),
         _ => unreachable!(),
     };
     let checked = host.check();
     // Always settle the owned process, including on guest exceptions or caught host errors.
-    let cleanup = host.bridge.borrow_mut().finish();
+    let commands = host
+        .supervisor
+        .borrow_mut()
+        .as_mut()
+        .map_or(Ok(()), Supervisor::finish);
+    let native_cleanup = host.bridge.borrow_mut().finish();
+    let cleanup = match (commands, native_cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(native)) => Err(format!("{error}; Due cleanup: {native}")),
+    };
     let result = match (checked.and(evaluated), cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),
@@ -134,6 +183,7 @@ fn run(options: Options) -> Result<(), String> {
     };
     let receipt = serde_json::json!({
         "language": options.language,
+        "async": options.async_mode,
         "status": if result.is_ok() { "succeeded" } else { "failed" },
         "error": result.as_ref().err(),
         "elapsed_ms": host.now_ms(),

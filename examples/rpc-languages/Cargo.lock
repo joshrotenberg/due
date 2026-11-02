@@ -153,6 +153,7 @@ name = "due-rpc-languages"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "libc",
  "mlua",
  "rquickjs",
  "serde_json",
