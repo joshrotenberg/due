@@ -59,6 +59,230 @@ for (const [mode, pattern] of [['lost', /journal lost/], ['malformed', /JSON/], 
     assert.equal(JSON.parse(await readFile(join(artifactDir, 'resident-exit.json'))).exit_code, 0);
   });
 }
+const inputs = async artifactDir => (await readFile(join(artifactDir, 'fixture-input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  .map(row => transport === 'rpc' ? { name: row.method.replace('.', '_'), args: row.params } : { name: row.params?.name, args: row.params?.arguments })
+  .filter(row => row.name === 'interaction_reply');
+async function interactive(t, model, onInteraction, signal, observe = () => {}) {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-interaction-'));
+  t.after(() => rm(artifactDir, { recursive: true, force: true }));
+  const items = [];
+  const backend = await open({ dueBinary, artifactDir, profile: { provider: 'codex', cwd: artifactDir, model }, onInteraction, signal, onItem: item => { items.push(item); observe(item); } });
+  t.after(async () => { try { await backend.close(); } catch {} });
+  return { backend, items, artifactDir };
+}
+test(`${transport}: interactionReply is advertised only with a callback`, async t => {
+  assert.equal((await setup(t)).backend.capabilities.interactionReply, false);
+  assert.equal((await interactive(t, 'early', () => ({}))).backend.capabilities.interactionReply, true);
+  await assert.rejects(open({ dueBinary, artifactDir: '/nonexistent', profile: {}, onInteraction: 'yes' }), /must be a function/);
+});
+for (const response of [{ decision: 'decline' }, { decision: 'accept' }]) {
+  test(`${transport}: async ${response.decision} is routed with exact IDs while items keep flowing`, async t => {
+    let seenAtDecision, passed;
+    const { backend, items, artifactDir } = await interactive(t, 'interaction', async (record, signal) => {
+      passed = { record, signal };
+      await new Promise(resolve => setTimeout(resolve, 50));
+      seenAtDecision = items.map(i => i.data.kind + ':' + (i.data.data.method ?? ''));
+      return response;
+    });
+    const turn = await backend.turn({ id: 'first', prompt: 'one' });
+    assert.equal(turn.result.status, 'succeeded');
+    assert.ok(seenAtDecision.includes('native:fixture/during-decision'));
+    assert.equal(passed.record.data.kind, 'interaction'); assert.equal(passed.record.turn_id, 'first');
+    assert.ok(passed.signal instanceof AbortSignal);
+    const replies = await inputs(artifactDir);
+    assert.deepEqual(replies, [{ name: 'interaction_reply', args: { session_id: 'due-session', turn_id: 'native-turn-1', request_id: 'permission', response } }]);
+    assert.deepEqual(items.find(i => i.data.data.method === 'fixture/reply').data.data.params, response);
+    assert.equal((await backend.close()).processes[0].exit_code, 0);
+  });
+}
+for (const [label, callback, pattern] of [
+  ['callback error', () => { throw new Error('policy exploded'); }, /policy exploded/],
+  ['async callback error', async () => { throw new Error('policy rejected'); }, /policy rejected/],
+  ['invalid response', () => 'accept', /provider-native response object/],
+  ['missing response', () => undefined, /provider-native response object/]]) {
+  test(`${transport}: ${label} fails truthfully without sending a reply`, async t => {
+    const { backend, artifactDir } = await interactive(t, 'interaction', callback);
+    await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), pattern);
+    assert.match((await backend.close()).execution_error.message, pattern);
+    assert.deepEqual(await inputs(artifactDir), []);
+    assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
+  });
+}
+test(`${transport}: cancellation signals the callback, ignores its late result and does not hang`, async t => {
+  const control = new AbortController();
+  let release, observed;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { backend, artifactDir } = await interactive(t, 'interaction', async (record, signal) => {
+    observed = signal; await gate; return { decision: 'accept' }; // Deliberately ignores the signal.
+  }, control.signal);
+  const turn = backend.turn({ id: 'first', prompt: 'one' });
+  while (!observed) await new Promise(resolve => setTimeout(resolve, 5));
+  control.abort();
+  await assert.rejects(turn, /cancelled/);
+  assert.equal(observed.aborted, true);
+  const receipt = await backend.close(); // The callback is still pending here.
+  release();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.match(receipt.execution_error.message, /cancelled/);
+  assert.deepEqual(await inputs(artifactDir), []);
+  assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
+});
+test(`${transport}: closing aborts a pending decision and never sends it late`, async t => {
+  let release, observed;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { backend, artifactDir } = await interactive(t, 'interaction', async (record, signal) => { observed = signal; await gate; return { decision: 'accept' }; });
+  const turn = backend.turn({ id: 'first', prompt: 'one' }); turn.catch(() => {});
+  while (!observed) await new Promise(resolve => setTimeout(resolve, 5));
+  const started = performance.now();
+  const receipt = await backend.close();
+  assert.ok(performance.now() - started < 5000);
+  assert.equal(receipt.execution_error, undefined); // Releasing the waiter is not a failure.
+  assert.equal(observed.aborted, true);
+  release();
+  await assert.rejects(turn, /closed before the turn finished/);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.deepEqual(await inputs(artifactDir), []);
+});
+test(`${transport}: a turn finishing first makes the decision stale and unsent`, async t => {
+  let release, observed;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { backend, artifactDir } = await interactive(t, 'interaction-finished', async (record, signal) => { observed = signal; await gate; return { decision: 'accept' }; });
+  assert.equal((await backend.turn({ id: 'first', prompt: 'one' })).result.status, 'succeeded');
+  assert.equal(observed.aborted, true);
+  release();
+  assert.equal((await backend.close()).execution_error, undefined);
+  assert.deepEqual(await inputs(artifactDir), []);
+});
+test(`${transport}: a reply racing turn completion is not an error`, async t => {
+  const { backend, artifactDir } = await interactive(t, 'interaction-race', () => ({ decision: 'decline' }));
+  assert.equal((await backend.turn({ id: 'first', prompt: 'one' })).result.status, 'succeeded');
+  const receipt = await backend.close();
+  assert.equal(receipt.execution_error, undefined);
+  assert.equal((await inputs(artifactDir)).length, 1);
+  assert.equal(receipt.processes[0].exit_code, 0);
+});
+for (const [mode, pattern] of [['interaction-stale-genuine', /unknown or finished turn/], ['interaction-reject', /Fixture rejected reply/]]) {
+  test(`${transport}: ${mode} reply rejection is a real failure when the turn did not finish`, async t => {
+    const { backend } = await interactive(t, mode, () => ({ decision: 'decline' }));
+    await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), pattern);
+    assert.match((await backend.close()).execution_error.message, pattern);
+  });
+}
+test(`${transport}: onInteraction gets the streamed record shape, not the process receipt`, async t => {
+  let got;
+  const { backend } = await interactive(t, 'interaction', record => { got = record; return { decision: 'decline' }; });
+  await backend.turn({ id: 'first', prompt: 'one' });
+  assert.deepEqual(Object.keys(got).sort(), ['data', 'source', 'turn_id']);
+  assert.equal(got.source, 'native_session');
+  assert.equal(got.data.session_id, 'due-session'); assert.equal(got.data.data.request_id, 'permission');
+  assert.equal(got.pid, undefined);
+});
+test(`${transport}: onItem mutation cannot redirect the reply or lifecycle`, async t => {
+  let got;
+  const { backend, artifactDir } = await interactive(t, 'interaction', record => { got = record; return { decision: 'accept' }; }, undefined, record => {
+    if (record.data.kind === 'interaction') {
+      Object.assign(record.data, { session_id: 'forged', turn_id: 'forged' }); record.data.data.request_id = 'forged';
+    }
+    if (record.data.kind === 'turn_finished') record.data.turn_id = 'forged';
+  });
+  assert.equal((await backend.turn({ id: 'first', prompt: 'one' })).result.status, 'succeeded');
+  assert.equal(got.data.session_id, 'due-session'); assert.equal(got.data.data.request_id, 'permission');
+  assert.deepEqual((await inputs(artifactDir)).map(row => [row.args.session_id, row.args.turn_id, row.args.request_id]),
+    [['due-session', 'native-turn-1', 'permission']]);
+});
+test(`${transport}: a genuine reply error after the terminal item is preserved`, async t => {
+  const { backend } = await interactive(t, 'interaction-late-error', () => ({ decision: 'decline' }));
+  await backend.turn({ id: 'first', prompt: 'one' }).catch(() => {});
+  for (let i = 0; i < 400 && !backend.getReceipt().execution_error; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.match(backend.getReceipt().execution_error?.message ?? '', /permissions backend unavailable/);
+  assert.match((await backend.close()).execution_error.message, /permissions backend unavailable/);
+});
+test(`${transport}: a callback error after the turn finished is preserved; cooperative abort is not`, async t => {
+  let fail;
+  const { backend } = await interactive(t, 'interaction-finished', (record, signal) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(fail ? new Error('policy crashed late') : signal.reason), { once: true });
+  }));
+  assert.equal((await backend.turn({ id: 'first', prompt: 'one' })).result.status, 'succeeded');
+  assert.equal((await backend.close()).execution_error, undefined); // Rejecting with the abort reason is cooperative.
+  fail = true;
+  const second = await interactive(t, 'interaction-finished', (record, signal) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('policy crashed late')), { once: true });
+  }));
+  await second.backend.turn({ id: 'first', prompt: 'one' }).catch(() => {});
+  for (let i = 0; i < 400 && !second.backend.getReceipt().execution_error; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.match((await second.backend.close()).execution_error.message, /policy crashed late/);
+});
+test(`${transport}: a matching interaction_resolved aborts the pending decision and nothing is sent late`, async t => {
+  let release, observed;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { backend, artifactDir } = await interactive(t, 'interaction-resolved', async (record, signal) => { observed = signal; await gate; return { decision: 'accept' }; });
+  const turn = backend.turn({ id: 'first', prompt: 'one' });
+  while (!observed?.aborted) await new Promise(resolve => setTimeout(resolve, 5));
+  release(); // The callback returns while the turn is still active.
+  assert.equal((await turn).result.status, 'succeeded');
+  assert.deepEqual(await inputs(artifactDir), []);
+  assert.equal((await backend.close()).execution_error, undefined);
+});
+test(`${transport}: an unrelated request's resolution leaves the decision alive`, async t => {
+  let observed;
+  const { backend, artifactDir } = await interactive(t, 'interaction-unrelated', async (record, signal) => {
+    observed = signal; await new Promise(resolve => setTimeout(resolve, 50)); return { decision: 'decline' };
+  });
+  assert.equal((await backend.turn({ id: 'first', prompt: 'one' })).result.status, 'succeeded');
+  assert.equal(observed.aborted, true); // Aborted only afterwards, by the turn finishing.
+  assert.equal((await inputs(artifactDir)).length, 1);
+  assert.equal((await backend.close()).execution_error, undefined);
+});
+test(`${transport}: an in-flight reply losing to its own resolution is a healthy race`, async t => {
+  const { backend, artifactDir } = await interactive(t, 'interaction-resolved-race', () => ({ decision: 'decline' }));
+  assert.equal((await backend.turn({ id: 'first', prompt: 'one' })).result.status, 'succeeded');
+  assert.equal((await inputs(artifactDir)).length, 1);
+  const receipt = await backend.close();
+  assert.equal(receipt.execution_error, undefined); assert.equal(receipt.processes[0].exit_code, 0);
+  const wire = (await readFile(join(artifactDir, 'protocol.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(wire.some(row => row.direction === 'local' && row.message.event === 'stale_interaction_reply'));
+});
+test(`${transport}: another request's resolution does not excuse a stale reply error`, async t => {
+  const { backend } = await interactive(t, 'interaction-unrelated-race', () => ({ decision: 'decline' }));
+  await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), /unknown or resolved interaction/);
+  assert.match((await backend.close()).execution_error.message, /unknown or resolved interaction/);
+});
+async function initial(t, model, onItem) {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-init-'));
+  t.after(() => rm(artifactDir, { recursive: true, force: true }));
+  const backend = await open({ dueBinary, artifactDir, profile: { provider: 'codex', cwd: artifactDir, model }, onItem });
+  t.after(async () => { try { await backend.close(); } catch {} });
+  return backend;
+}
+test(`${transport}: root Claude init supplies a null-open native ID before observers and survives failure`, async t => {
+  const backend = await initial(t, 'init-hold', record => {
+    if (record.data.kind === 'native_summary' && record.data.data.event.session_id === 'claude-native') {
+      assert.equal(backend.getReceipt().native_session_id, 'claude-native'); // Captured before the observer ran.
+      throw new Error('observer failed after init');
+    }
+  });
+  assert.equal(backend.getReceipt().native_session_id, null);
+  await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), /observer failed after init/);
+  const receipt = await backend.close();
+  assert.equal(receipt.native_session_id, 'claude-native');
+  assert.equal(receipt.processes[0].exit_code, 0);
+});
+test(`${transport}: the init ID survives a later protocol failure`, async t => {
+  const backend = await initial(t, 'init-malformed');
+  await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), /JSON/);
+  const receipt = await backend.close();
+  assert.equal(receipt.native_session_id, 'claude-native'); assert.equal(receipt.processes[0].exit_code, 0);
+});
+test(`${transport}: a conflicting root init is rejected and the first ID is kept`, async t => {
+  const backend = await initial(t, 'init-conflict');
+  await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), /identity changed/);
+  assert.equal((await backend.close()).native_session_id, 'claude-native');
+});
+test(`${transport}: nested, non-init, non-Claude and assistant IDs are never adopted`, async t => {
+  const backend = await initial(t, 'init-unrelated');
+  await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), /JSON/);
+  assert.equal((await backend.close()).native_session_id, null);
+});
 test(`${transport}: abort cancels the active turn and waits for process cleanup on close`, async t => {
   const control = new AbortController();
   const { backend, artifactDir, items } = await setup(t, 'hold', control.signal);

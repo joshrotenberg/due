@@ -214,3 +214,123 @@ for (const backend of ['resident', 'rpc']) {
     });
   }
 }
+
+test('onInteraction is validated and rejected for resume before anything is created or launched', async t => {
+  const { options } = await setup(t);
+  await assert.rejects(withSession({ ...options, onInteraction: () => ({}) }, () => {}), /unsupported by the resume backend/);
+  await assert.rejects(stat(options.artifactDir), { code: 'ENOENT' });
+  for (const backend of ['resume', 'resident', 'rpc']) {
+    for (const bad of ['allow', {}, null]) {
+      await assert.rejects(withSession({ ...options, backend, onInteraction: bad }, () => {}), /onInteraction must be a function/);
+    }
+  }
+  await assert.rejects(stat(options.artifactDir), { code: 'ENOENT' });
+});
+
+for (const backend of ['resident', 'rpc']) {
+  async function interactive(t, model, extra = {}) {
+    const ctx = await setup(t, { backend, ...extra });
+    ctx.options.profile.model = model;
+    await copyFile(fileURLToPath(new URL('./resident.fixture.mjs', import.meta.url)), ctx.options.dueBinary);
+    return ctx;
+  }
+  test(`${backend}: interactionReply capability is true only with a callback`, async t => {
+    const without = await interactive(t, 'early');
+    assert.equal(await withSession(without.options, async agent => agent.capabilities.interactionReply), false);
+    const withCallback = await interactive(t, 'early', { onInteraction: () => ({}) });
+    assert.equal(await withSession(withCallback.options, async agent => agent.capabilities.interactionReply), true);
+    assert.equal((await withCallback.receipt()).capabilities.interactionReply, true);
+  });
+  test(`${backend}: default stays fail-closed with receipts`, async t => {
+    const { options, receipt } = await interactive(t, 'interaction');
+    await assert.rejects(withSession(options, agent => agent.turn({ id: 'first', prompt: 'x' })), /explicit decision/);
+    const evidence = await receipt();
+    assert.match(evidence.body_error, /explicit decision/);
+    assert.equal(evidence.processes[0].exit_code, 0);
+  });
+  test(`${backend}: async decision, onItem sees the raw item and the reply carries exact IDs`, async t => {
+    const seen = [];
+    const { options, receipt } = await interactive(t, 'interaction', {
+      onItem: record => seen.push(record.data),
+      onInteraction: async (record, signal) => {
+        assert.ok(signal instanceof AbortSignal);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        return { decision: 'decline', for: [record.data.session_id, record.data.turn_id, record.data.data.request_id] };
+      } });
+    const result = await withSession(options, agent => agent.turn({ id: 'first', prompt: 'x' }));
+    assert.equal(result.status, 'succeeded');
+    assert.deepEqual(seen.find(item => item.kind === 'interaction').data, { request_id: 'permission', request: { command: 'must-not-run' } });
+    const reply = seen.find(item => item.data?.method === 'fixture/reply');
+    assert.deepEqual(reply.data.params, { decision: 'decline', for: ['due-session', 'native-turn-1', 'permission'] });
+    const evidence = await receipt();
+    assert.equal(evidence.body_error, null);
+    assert.equal(evidence.processes[0].exit_code, 0);
+    const saved = (await readFile(join(options.artifactDir, 'items.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.ok(saved.some(row => row.data.kind === 'interaction'));
+  });
+  test(`${backend}: a callback error is the caller failure and process receipts survive`, async t => {
+    const original = new Error('policy exploded');
+    const { options, receipt } = await interactive(t, 'interaction', { onInteraction: () => { throw original; } });
+    await assert.rejects(withSession(options, agent => agent.turn({ id: 'first', prompt: 'x' })), error => error === original);
+    const evidence = await receipt();
+    assert.match(evidence.body_error, /policy exploded/);
+    assert.equal(evidence.native_session_id, 'native-one');
+    assert.equal(evidence.processes.length, 1);
+    assert.ok(evidence.processes[0].pid > 0); assert.equal(evidence.processes[0].exit_code, 0);
+    assert.equal(evidence.cleanup_error, null);
+  });
+  test(`${backend}: a genuine reply failure during pending close is the body failure, not cleanup`, { timeout: 10000 }, async t => {
+    const { options, receipt } = await interactive(t, 'interaction-late-error-on-close', { onInteraction: () => ({ decision: 'decline' }) });
+    await assert.rejects(withSession(options, agent => agent.turn({ id: 'first', prompt: 'x' })), /permissions backend unavailable/);
+    const evidence = await receipt();
+    assert.match(evidence.body_error, /permissions backend unavailable/);
+    assert.equal(evidence.cleanup_error, null);
+    assert.equal(evidence.processes[0].exit_code, 0);
+    assert.equal(evidence.processes[0].signal, null);
+    assert.equal(evidence.native_session_id, 'native-one');
+  });
+  test(`${backend}: a callback rejecting after the scope closed is handled, unsent and cannot rewrite the receipt`, { timeout: 10000 }, async t => {
+    const controller = new AbortController();
+    let reject;
+    const gate = new Promise((_, no) => { reject = no; });
+    const { dir, options, receipt } = await interactive(t, 'interaction', { signal: controller.signal,
+      onInteraction: async () => { controller.abort(new Error('caller cancelled')); await gate; } });
+    const unhandled = [];
+    const listener = reason => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    t.after(() => process.off('unhandledRejection', listener));
+    await assert.rejects(withSession(options, agent => agent.turn({ id: 'first', prompt: 'x' })), /cancelled/);
+    const before = await readFile(join(options.artifactDir, 'session.json'), 'utf8');
+    reject(new Error('arrived after the scope closed'));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(unhandled, []);
+    assert.equal(await readFile(join(options.artifactDir, 'session.json'), 'utf8'), before);
+    assert.ok(!/interaction[._]reply/.test(await readFile(join(dir, 'fixture-input.jsonl'), 'utf8')));
+    assert.doesNotMatch(before, /arrived after/);
+    assert.equal((await receipt()).cleanup_error, null);
+  });
+  test(`${backend}: a fresh null-open session keeps the root init native ID through observer and protocol failures`, async t => {
+    for (const [model, observer, pattern] of [['init-hold', true, /observer failed/], ['init-malformed', false, /JSON/]]) {
+      const { options, receipt } = await interactive(t, model);
+      if (observer) options.onItem = record => { if (record.data.data?.event?.session_id === 'claude-native') throw new Error('observer failed after init'); };
+      await assert.rejects(withSession(options, agent => agent.turn({ id: 'first', prompt: 'x' })), pattern);
+      const evidence = await receipt();
+      assert.equal(evidence.native_session_id, 'claude-native');
+      assert.equal(evidence.processes[0].exit_code, 0); assert.equal(evidence.cleanup_error, null);
+      assert.ok(evidence.body_error);
+    }
+  });
+  test(`${backend}: scope cancellation does not hang on an uncooperative callback or send late`, { timeout: 10000 }, async t => {
+    const controller = new AbortController();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const { dir, options, receipt } = await interactive(t, 'interaction', { signal: controller.signal,
+      onInteraction: async () => { controller.abort(new Error('caller cancelled')); await gate; return { decision: 'accept' }; } });
+    await assert.rejects(withSession(options, agent => agent.turn({ id: 'first', prompt: 'x' })), /caller cancelled|cancelled/);
+    release();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const input = await readFile(join(dir, 'fixture-input.jsonl'), 'utf8');
+    assert.ok(!/interaction[._]reply/.test(input));
+    assert.equal((await receipt()).processes[0].exit_code, 0);
+  });
+}

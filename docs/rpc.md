@@ -134,6 +134,15 @@ Already-allowed native actions need not ask. `turn.interrupt` requests a stop;
 continue reading until the turn settles before sending the next prompt.
 Interruption does not roll back effects or prove every native command stopped.
 
+The optional Node harness (`examples/session-harness`) rejects interactions by
+default. Its caller-supplied `onInteraction(record, signal)` may be async and
+returns the native response; the harness sends it with the IDs from the item,
+discards any result produced after the interaction resolved, the turn finished,
+the session failed or the scope closed, and treats a stale-reply error as a race
+only after observing that exact interaction's resolution or its turn's terminal
+item. Other reply failures remain session failures. A callback that settles
+after its scope has closed cannot change the saved receipt. See its README.
+
 Input frames are bounded to 1 MiB and concurrent operations to 16. The sole
 stdout writer interleaves responses and items without interleaving their bytes.
 Responses have an 8 MiB individual/aggregate queued-byte limit and a queue of 16;
@@ -219,3 +228,32 @@ run using the pre-fix RPC binary; the fixes were checked through offline
 regressions, not live native approval tests. Native permissions were inherited
 (`approval: never`, `sandbox: dangerFullAccess`), so this was not a
 sandbox-boundary test.
+
+## Claude coding trial (2026-11-02 UTC)
+
+Claude Code 2.1.316 (`sonnet`, medium effort) worked on the Node session client
+in a disposable Due checkout based on `3674146`. A caller-owned permission
+bridge reviewed concrete native requests and sent 26 `interaction.reply`
+requests; native settings were inherited, with no bypass mode added.
+
+The first caller hit its 15-minute wait limit before the task finished. Due
+cancelled the turn and exited 0 without a forced kill. After inspecting partial
+edits, the caller explicitly resumed the same native Claude conversation in a
+second Due process, with an actively monitored caller and no fixed turn wait.
+That process completed three coding turns and closed cleanly. This used one
+native conversation across two RPC processes.
+
+Across both captures, the caller retained 5295 session items with consecutive
+cursors within each process, zero reported push drops, no omitted items, and
+both final session-closed items. No journal polling was needed. The initial
+failed receipt lost the native ID even though initialization and the cancelled
+terminal item retained it; the stream supplied the ID used for explicit resume.
+
+The work added explicit asynchronous permission decisions to the Node client,
+corrected permission resolution and failure receipts, and retained fresh Claude
+initialization IDs before observer callbacks. Independent reproductions and
+132 offline Node tests passed. The live run used a caller-only permission bridge
+and the pre-fix client; the final example changes were verified offline. These
+are local macOS observations, not a performance comparison or evidence of other
+platforms' native process behavior. The checked-in example still documents its
+fixed wait limits; this trial did not change them.

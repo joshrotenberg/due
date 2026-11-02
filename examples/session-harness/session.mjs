@@ -30,10 +30,12 @@ async function profileFor(input) {
 
 /** All backends preserve conversation context; persistent backends provide native items. */
 export async function withSession(options, body) {
-  const { backend: mode, dueBinary = 'due', artifactDir, onItem, signal, maxTurns = 4 } = options;
+  const { backend: mode, dueBinary = 'due', artifactDir, onItem, onInteraction, signal, maxTurns = 4 } = options;
   if (!['resume', 'resident', 'rpc'].includes(mode)) throw new Error('backend must be resume, resident or rpc');
   if (!artifactDir || typeof body !== 'function') throw new Error('artifactDir and callback are required');
   if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 64) throw new Error('maxTurns must be 1..64');
+  if (onInteraction !== undefined && typeof onInteraction !== 'function') throw new Error('onInteraction must be a function');
+  if (onInteraction && mode === 'resume') throw new Error('onInteraction is unsupported by the resume backend; use resident or rpc');
   const profile = await profileFor(options.profile);
   signal?.throwIfAborted();
   await mkdir(artifactDir, { mode: 0o700 }); // Exclusive, including failed earlier attempts.
@@ -74,7 +76,7 @@ export async function withSession(options, body) {
   try {
     const opening = performance.now();
     backend = await ({ resume: openResume, resident: openResident, rpc: openRpc }[mode])({
-      dueBinary, profile, artifactDir, onItem: item, signal: controller.signal,
+      dueBinary, profile, artifactDir, onItem: item, onInteraction, signal: controller.signal,
     });
     receipt.open_duration_ms = Math.round(performance.now() - opening);
     receipt.capabilities = backend.capabilities;

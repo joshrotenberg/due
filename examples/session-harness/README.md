@@ -68,8 +68,59 @@ configuration change is added. Persistence is enabled to allow CLI resume.
 `source: 'due_trace'` or `source: 'native_session'`; they are not equivalent event
 schemas or comparable event counts. Both persistent backends recover cursor gaps
 with `session_read` / `session.read`, fail when retention is insufficient, and do
-not use `turn_read` polling. Native permission requests fail explicitly in this small
-comparison; no approval callback or mid-turn interruption API is exposed yet.
+not use `turn_read` polling. Native permission requests fail explicitly unless the
+caller supplies `onInteraction` (below); no mid-turn interruption API is exposed yet.
+
+### Answering native permission requests
+
+`withSession({ ..., onInteraction })` optionally takes `onInteraction(record, signal)`
+for the `resident` and `rpc` backends. `record` is a copy of the record `onItem`
+saw (`{ source: 'native_session', turn_id, data }`), where `data` is the complete
+`interaction` item. The callback may be async and returns the provider-native
+response object, for example `{ decision: 'decline' }` for Codex command approval
+or `{ behavior: 'deny', message: '...' }` for Claude. Nothing is translated and
+nothing is approved by default.
+
+- Absent callback: the existing fail-closed behavior. The turn fails with
+  "requires an explicit decision" and receipts are kept.
+- The reply is sent as `interaction_reply` / `interaction.reply` using the
+  `session_id`, `turn_id` and `data.request_id` Due sent, snapshotted before
+  `onItem` runs, so an observer mutating its record cannot redirect a reply.
+  `onItem` still observes the complete raw item synchronously, and stdout parsing
+  and later items continue while the decision is pending.
+- `signal` aborts when the interaction resolves, the turn finishes, the session
+  fails or is cancelled, or the scope closes. A result returned after that is
+  discarded and never sent;
+  close does not wait for the callback. Rejecting with `signal.reason` (or an
+  `AbortError`) after an abort is treated as cooperative cancellation.
+- A thrown/rejected callback or a non-object response fails the session with
+  that error; process receipts are preserved. The same applies to a callback
+  error that arrives after the turn finished but before scope settlement.
+- A reply Due rejects as an unknown/finished turn or resolved interaction is
+  ignored only when that interaction's resolution or its turn's terminal item
+  was observed. Any other rejection observed before scope settlement, including
+  one arriving after the terminal item, is a session failure.
+- An `interaction_resolved` item aborts the pending decision for that exact
+  session, turn and request ID only; resolutions of other requests do not. A
+  result returned by the resolved decision is discarded without sending a reply.
+- A reply failure that arrives while scope close is pending is the body failure
+  (`body_error`). The close call it collaterally rejects is not reported as
+  `cleanup_error`; that field stays reserved for the session close itself failing
+  or the Due process exiting non-zero.
+- Close does not wait for a callback that ignores its signal. A callback that
+  rejects after the scope has closed is handled (no unhandled rejection) and its
+  reply is never sent, but it cannot fail the completed scope or rewrite the saved
+  `session.json`. Only failures observed before close completes are recorded.
+- `agent.capabilities.interactionReply` is true only for `resident`/`rpc` with a
+  callback. `resume` with `onInteraction` is rejected before any artifact
+  directory is created or process launched, as is a non-function value.
+
+For the persistent backends, a fresh Claude session can open with
+`native_session_id: null`. The ID is then taken from the root
+`system`/`init` event of a `native_summary` or `native_snapshot` item (provider
+`claude`) before observers run, so it is kept in the receipt even if an observer
+or the protocol fails afterwards. IDs in nested, non-init, assistant or non-Claude
+payloads are ignored, and a later conflicting root init fails the session.
 
 Native IDs must stay stable within a scope. The resume adapter keeps an available
 ID after an explicit failed turn, so a deliberate follow-up can use it; if the
