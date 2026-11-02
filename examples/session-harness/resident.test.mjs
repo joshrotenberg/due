@@ -4,9 +4,9 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openResident, openRpc } from './resident.mjs';
+import { openResident } from './resident.mjs';
 const dueBinary = fileURLToPath(new URL('./resident.fixture.mjs', import.meta.url));
-for (const [transport, open] of [['mcp', openResident], ['rpc', openRpc]]) {
+const transport = 'mcp', open = openResident;
 async function setup(t, model = 'early', signal, extra = {}) {
   const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-'));
   t.after(() => rm(artifactDir, { recursive: true, force: true }));
@@ -50,14 +50,9 @@ test(`${transport}: two turns share a process, early results and final output ar
   assert.deepEqual(items.find(i => i.data.kind === 'native').data.data.params.item.nested.future, [null, 3, true]);
   assert.deepEqual(items.filter(i => i.data.kind === 'turn_finished').map(i => i.turn_id), ['first', 'second']);
   const input = (await readFile(join(artifactDir, 'fixture-input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-  const names = input.map(i => transport === 'rpc' ? i.method.replace('.', '_') : i.params?.name);
+  const names = input.map(i => i.params?.name);
   assert.equal(names.filter(name => name === 'session_open').length, 1);
   assert.equal(names.filter(name => name === 'turn_read').length, 0);
-  if (transport === 'rpc') {
-    const wire = (await readFile(join(artifactDir, 'protocol.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-    assert.ok(wire.filter(row => row.direction === 'in').every(row => !['initialize', 'notifications/initialized', 'tools/call'].includes(row.message.method)));
-    assert.ok(wire.some(row => row.direction === 'out' && row.message.method === 'session.item'));
-  }
   assert.equal((JSON.parse(await readFile(join(artifactDir, 'first/result.json')))).run_id, 'native-turn-1');
 });
 test(`${transport}: cursor gaps recover full items once`, async t => {
@@ -82,7 +77,7 @@ for (const [mode, pattern] of [['lost', /journal lost/], ['malformed', /JSON/], 
   });
 }
 const inputs = async artifactDir => (await readFile(join(artifactDir, 'fixture-input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
-  .map(row => transport === 'rpc' ? { name: row.method.replace('.', '_'), args: row.params } : { name: row.params?.name, args: row.params?.arguments })
+  .map(row => ({ name: row.params?.name, args: row.params?.arguments }))
   .filter(row => row.name === 'interaction_reply');
 async function interactive(t, model, onInteraction, signal, observe = () => {}) {
   const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-interaction-'));
@@ -332,16 +327,3 @@ test(`${transport}: a rejected async item callback is handled and fails explicit
     onItem: () => Promise.reject(new Error('async callback failure')) }), /onItem must be synchronous/);
   assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
 });
-
-if (transport === 'rpc') {
-  test('rpc: direct error responses are surfaced and cleanup still runs', async t => {
-    const { backend, artifactDir } = await setup(t, 'rpc-error');
-    await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), /-32000.*Fixture request rejected/);
-    assert.match((await backend.close()).execution_error.message, /Fixture request rejected/);
-    assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
-  });
-  test('rpc: unsupported protocol version fails before starting turns', async t => {
-    await assert.rejects(setup(t, 'wrong-version'), /Unsupported Due RPC session protocol/);
-  });
-}
-}

@@ -10,11 +10,8 @@ publish = false
 [features]
 default = []
 mcp = ["dep:tower-mcp", "codex-wrapper/app-server"]
-rpc = ["codex-wrapper/app-server", "dep:tokio-util", "dep:futures-util", "tokio/io-std", "tokio/net", "tokio/sync"]
 
 [dependencies]
-tokio-util = { version = "0.7", features = ["codec"], optional = true }
-futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
 tower-mcp = { version = "0.25", optional = true }
 claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
 codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "e91e6279bc60bdb54ef85940a5bc7a9b03e944dc" }

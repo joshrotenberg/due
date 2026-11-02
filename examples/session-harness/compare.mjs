@@ -14,8 +14,8 @@ const { values } = parseArgs({ options: {
   model: { type: 'string' },
   effort: { type: 'string', default: 'low' },
 } });
-if (!values.artifacts || !['both', 'all', 'resume', 'resident', 'rpc'].includes(values.backend)) {
-  throw new Error('usage: node compare.mjs --artifacts FRESH_DIR [--due PATH] [--provider claude|codex] [--backend both|all|resume|resident|rpc] [--cwd DIR]');
+if (!values.artifacts || !['both', 'all', 'resume', 'resident'].includes(values.backend)) {
+  throw new Error('usage: node compare.mjs --artifacts FRESH_DIR [--due PATH] [--provider claude|codex] [--backend both|all|resume|resident] [--cwd DIR]');
 }
 const artifacts = resolve(values.artifacts);
 await mkdir(artifacts, { mode: 0o700 });
@@ -29,8 +29,7 @@ const profile = { provider: values.provider, cwd: resolve(values.cwd), effort: v
 if (values.model) profile.model = values.model;
 const comparison = { profile, workflow: 'two-turn-correction', arms: [] };
 try {
-  const backends = values.backend === 'all' ? ['resume', 'resident', 'rpc']
-    : values.backend === 'both' ? ['resume', 'resident'] : [values.backend];
+  const backends = ['all', 'both'].includes(values.backend) ? ['resume', 'resident'] : [values.backend];
   for (const backend of backends) {
     const artifactDir = join(artifacts, backend);
     const started = performance.now();

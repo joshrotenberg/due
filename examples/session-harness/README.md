@@ -1,21 +1,21 @@
 # A session API over CLI resume and resident execution
 
 This optional Node.js 22+ experiment runs the same JavaScript correction workflow
-through CLI resume, resident MCP, or resident plain JSON-RPC. The JavaScript uses
+through CLI resume or resident MCP. The JavaScript uses
 Node built-ins only; it adds no embedded language or change to `due run`. Use a
 source-built Due executable with the selected optional transport feature.
 
 ```sh
-cargo build --locked --release --features mcp,rpc
+cargo build --locked --release --features mcp
 node examples/session-harness/compare.mjs \
   --due ./target/release/due --provider codex --cwd /path/to/project \
   --artifacts /path/to/fresh-comparison --backend all
 ```
 
-Select `--provider claude` to exercise Claude, or `--backend resume`,
-`--backend resident` (MCP), or `--backend rpc` for one arm. `--backend all` runs all
-three; the existing default `both` still runs resume and MCP. Optionally select
-`--model` / `--effort`. Running the comparison invokes real models. The default workflow requests no tools: it
+Select `--provider claude` to exercise Claude. Select `--backend resume` or
+`--backend resident` (MCP) for one arm. Both `--backend all` and the default
+`both` run resume and MCP. Optionally select `--model` / `--effort`. Running the
+comparison invokes real models. The default workflow requests no tools: it
 asks for a small order total, then corrects the shipping fee. The second prompt
 omits the marker and order details, testing conversation continuity. The caller
 checks each JSON answer separately from execution success. A mismatch stops the
@@ -27,7 +27,7 @@ The script-facing API is small:
 import { withSession } from './session.mjs';
 
 const output = await withSession({
-  backend: 'rpc', // Or 'resume' or 'resident'; the workflow stays the same.
+  backend: 'resident', // Or 'resume'; the workflow stays the same.
   dueBinary: './target/release/due',
   profile: { provider: 'codex', cwd: '/path/to/project', timeout: '2m' },
   artifactDir: '/path/to/fresh-session',
@@ -56,7 +56,7 @@ configuration change is added. Persistence is enabled to allow CLI resume.
 
 ### Caller turn waits
 
-For `resident` and `rpc`, top-level `turnWaitMs` controls how long the client
+For `resident`, top-level `turnWaitMs` controls how long the client
 waits for a terminal item after the turn-start response. Omit it to retain the
 five-minute default (`300000`), pass an integer from 1 through 2147483647 for a
 finite wait in milliseconds, or pass `null` for an unlimited wait. Use `null`
@@ -90,7 +90,7 @@ const stop = () => controller.abort();
 process.once('SIGINT', stop);
 try {
   const results = await withSession({
-    backend: 'rpc',
+    backend: 'resident',
     dueBinary: './target/release/due',
     profile: { provider: 'claude', cwd: '/path/to/project' },
     artifactDir: '/path/to/fresh-session',
@@ -123,25 +123,25 @@ try {
 
 ## What changes between backends
 
-| | `resume` | `resident` | `rpc` |
-| --- | --- | --- | --- |
-| Invocation | A new `due run --request -` per turn | One `due mcp` process per scope | One `due rpc` process per scope |
-| Conversation | Verified native ID carried as `resume` | One open native session | One open native session |
-| Observations | Existing normalized Due trace records | Full native session items exposed by the wrappers | Same native session items |
-| Turn result | Result plus actual process receipt | Terminal result while process stays alive | Same |
-| Scope cleanup | Joins any active Due invocation | Closes session and drains output through process exit | Same |
+| | `resume` | `resident` |
+| --- | --- | --- |
+| Invocation | A new `due run --request -` per turn | One `due mcp` process per scope |
+| Conversation | Verified native ID carried as `resume` | One open native session |
+| Observations | Existing normalized Due trace records | Full native session items exposed by the wrappers |
+| Turn result | Result plus actual process receipt | Terminal result while process stays alive |
+| Scope cleanup | Joins any active Due invocation | Closes session and drains output through process exit |
 
 `onItem(record)` optionally observes records synchronously. Records are tagged
 `source: 'due_trace'` or `source: 'native_session'`; they are not equivalent event
-schemas or comparable event counts. Both persistent backends recover cursor gaps
-with `session_read` / `session.read`, fail when retention is insufficient, and do
+schemas or comparable event counts. The resident backend recovers cursor gaps
+with `session_read`, fails when retention is insufficient, and does
 not use `turn_read` polling. Native permission requests fail explicitly unless the
 caller supplies `onInteraction` (below); no mid-turn interruption API is exposed yet.
 
 ### Answering native permission requests
 
 `withSession({ ..., onInteraction })` optionally takes `onInteraction(record, signal)`
-for the `resident` and `rpc` backends. `record` is a copy of the record `onItem`
+for the `resident` backend. `record` is a copy of the record `onItem`
 saw (`{ source: 'native_session', turn_id, data }`), where `data` is the complete
 `interaction` item. The callback may be async and returns the provider-native
 response object, for example `{ decision: 'decline' }` for Codex command approval
@@ -150,7 +150,7 @@ nothing is approved by default.
 
 - Absent callback: the existing fail-closed behavior. The turn fails with
   "requires an explicit decision" and receipts are kept.
-- The reply is sent as `interaction_reply` / `interaction.reply` using the
+- The reply is sent as `interaction_reply` using the
   `session_id`, `turn_id` and `data.request_id` Due sent, snapshotted before
   `onItem` runs, so an observer mutating its record cannot redirect a reply.
   `onItem` still observes the complete raw item synchronously, and stdout parsing
@@ -178,11 +178,11 @@ nothing is approved by default.
   rejects after the scope has closed is handled (no unhandled rejection) and its
   reply is never sent, but it cannot fail the completed scope or rewrite the saved
   `session.json`. Only failures observed before close completes are recorded.
-- `agent.capabilities.interactionReply` is true only for `resident`/`rpc` with a
+- `agent.capabilities.interactionReply` is true only for `resident` with a
   callback. `resume` with `onInteraction` is rejected before any artifact
   directory is created or process launched, as is a non-function value.
 
-For the persistent backends, a fresh Claude session can open with
+For the resident backend, a fresh Claude session can open with
 `native_session_id: null`. The ID is then taken from the root
 `system`/`init` event of a `native_summary` or `native_snapshot` item (provider
 `claude`) before observers run, so it is kept in the receipt even if an observer
@@ -220,37 +220,9 @@ not a startup benchmark or evidence that one transport improves answer quality.
 All arms use the same requested profile and workflow, but effective native
 configuration should be inspected independently where the providers expose it.
 
-## MCP versus plain JSON-RPC
-
-`resident.mjs` shares process ownership, streaming, cursor recovery and cleanup
-between the two persistent transports. The RPC variant starts `due rpc` and
-calls `session.open`, `turn.start`, `session.read`, and `session.close` directly.
-It consumes `session.item` notifications. It validates `protocol_version: 1` in
-the open result and requires the advertised stream. MCP initializes the protocol
-and calls the same operations through `tools/call` with structured tool results.
-
-The RPC client needs no discovery or MCP SDK. It removes the initialization,
-tool envelopes and result-content wrapper; it retains the same lifecycle work.
-Both variants distinguish native turn failure (result data) from a transport or
-RPC error (an exception). Both persistent clients expose permission replies
-through `onInteraction`. They do not yet expose mid-turn interrupts, which both
-Due server adapters support.
-
-For a small two-turn RPC client that writes every observed native item to stdout:
-
-```sh
-cargo build --locked --release --features rpc
-node examples/session-harness/rpc-example.mjs \
-  --due ./target/release/due --provider codex --cwd /path/to/project \
-  --artifacts /path/to/fresh-rpc-session > /path/to/session-items.jsonl
-```
-
-The example runs `correctionWorkflow`, which makes two `agent.turn` calls and
-independently validates both answers. Use `--provider claude` for Claude. Results
-and process evidence are also retained under the fresh artifact directory.
-[The RPC guide](../../docs/rpc.md) describes the wire methods and limitations.
-Future embedded Lua or QuickJS bindings can call the shared Rust session host
-directly; external transports do not have to become part of the script API.
+The [MCP guide](../../docs/mcp.md) describes the wire tools and limitations.
+Future embedded Lua or QuickJS bindings can call the Rust session host directly;
+the external transport does not have to become part of the script API.
 
 ## Offline checks
 
@@ -264,8 +236,7 @@ outcomes, cancellation, scope ownership and the shared correction workflow.
 
 ## Earlier resume/MCP live comparison (2026-11-01)
 
-The earlier comparison below predates the RPC adapter. On macOS arm64 / Node
-26.12.1, Claude Code 2.1.316 and Codex CLI 0.165.0 each completed the identical two-turn correction through both backends. Requested
+On macOS arm64 / Node 26.12.1, Claude Code 2.1.316 and Codex CLI 0.165.0 each completed the identical two-turn correction through both backends. Requested
 profiles used `sonnet` / `gpt-6-astra` respectively, low effort, a two-minute
 native deadline, and the same disposable workspace. Both remembered the marker
 and original order details, producing totals 19 then 17. No tools were requested.
@@ -294,12 +265,3 @@ Forty-three offline tests passed, including the identical application function
 on both synthetic backends. No Rust runtime or wrapper revision changed for
 this JavaScript experiment. The useful conclusion is API portability and
 conversation continuity; richer live controls remain a separate follow-up.
-
-
-The subsequent plain-RPC run completed the same correction with both providers:
-43 Claude items and 99 Codex items, no cursor gaps or push drops, stable native
-session IDs, and clean Due exits. It used the RPC-only binary, four direct
-requests per conversation, and no polling. See the
-[RPC observation](../../docs/rpc.md#live-observation-2026-11-01) for versions and
-limits. The existing timing table above remains the earlier resume/MCP sample;
-it is not a timing comparison against RPC.

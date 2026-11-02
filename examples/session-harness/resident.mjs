@@ -1,4 +1,4 @@
-// Optional Node 22+ persistent backends. Both transports share lifecycle and recovery.
+// Optional Node 22+ resident MCP backend with lifecycle and recovery.
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,9 +20,6 @@ async function bounded(promise, ms, message) {
   finally { clearTimeout(timer); }
 }
 
-export const openResident = options => openPersistent(options, 'mcp');
-export const openRpc = options => openPersistent(options, 'rpc');
-
 // Node timers overflow above this range and would turn a long wait into 1 ms.
 export function normalizeTurnWaitMs(value = 300_000) {
   if (value !== null && (!Number.isInteger(value) || value < 1 || value > 2_147_483_647)) {
@@ -37,15 +34,15 @@ const STALE_REPLY = /unknown or finished turn|unknown or resolved interaction|No
 // onItem saw (`record.data` is the complete interaction item, so the exact session_id, turn_id and
 // data.request_id come from it). `signal` aborts when the turn finishes, the session fails or is
 // cancelled, or the scope closes; a result returned after that is discarded and never sent.
-async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => {}, onInteraction, signal, turnWaitMs }, transport) {
+export async function openResident({ dueBinary, profile, artifactDir, onItem = () => {}, onInteraction, signal, turnWaitMs }) {
   const waitMs = normalizeTurnWaitMs(turnWaitMs);
   if (onInteraction !== undefined && typeof onInteraction !== 'function') throw new Error('onInteraction must be a function');
-  const label = transport === 'rpc' ? 'RPC' : 'MCP';
-  const notification = transport === 'rpc' ? 'session.item' : 'notifications/due/session_item';
+  const label = 'MCP';
+  const notification = 'notifications/due/session_item';
   if (signal?.aborted) throw new Error('Session cancelled before launch');
   const wire = openSync(join(artifactDir, 'protocol.jsonl'), 'wx', 0o600);
   const stderr = openSync(join(artifactDir, 'stderr.log'), 'wx', 0o600);
-  const child = spawn(dueBinary, [transport], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(dueBinary, ['mcp'], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
   const exited = deferred(), pending = new Map(), turnIds = new Map(), decisions = new Map(), finishedTurns = new Set(), resolvedKeys = new Set();
   let sequence = 0, cursor = 0, sessionId, nativeId, active, fatal, closePromise, spawned = false;
   let closing = false, closed = false, buffer = Buffer.alloc(0), tail = Promise.resolve();
@@ -99,7 +96,6 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
     finally { pending.delete(id); }
   }
   async function call(name, args, soft = false, meta = {}) {
-    if (transport === 'rpc') return rpc(name.replace('_', '.'), args, soft, meta);
     const value = await rpc('tools/call', { name, arguments: args }, soft, meta);
     if (value.isError) throw Object.assign(new Error(`${name}: ${JSON.stringify(value.content)}`), { remote: true });
     if (!value.structuredContent) throw new Error(`${name}: missing structured result`);
@@ -302,13 +298,9 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
     getReceipt,
   };
   try {
-    if (transport === 'mcp') {
-      await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'due-session-harness', version: '1' } });
-      send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-    }
+    await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'due-session-harness', version: '1' } });
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' });
     const opened = await call('session_open', { ...profile, ephemeral: false, stream: true });
-    if (transport === 'rpc' && (opened.protocol_version !== 1 || opened.stream?.enabled !== true
-      || opened.stream?.method !== notification)) throw new Error('Unsupported Due RPC session protocol');
     sessionId = opened.session_id;
     if (opened.native_session_id) {
       if (nativeId && nativeId !== opened.native_session_id) throw new Error('Native session identity changed');

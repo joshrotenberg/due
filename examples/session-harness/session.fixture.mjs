@@ -30,28 +30,25 @@ if (process.argv[2] === 'run') {
   appendFileSync(join(request.cwd, 'launches.jsonl'), `${JSON.stringify({ type: 'run', pid: process.pid, resume: request.resume ?? null, nativeId })}\n`);
   process.stderr.write(`${JSON.stringify({ schema_version: 1, run_id: `due-${process.pid}`, event: 'session_started', session_id: nativeId })}\n`);
   output(result(request.provider, nativeId, value));
-} else if (['mcp', 'rpc'].includes(process.argv[2])) {
-  const plain = process.argv[2] === 'rpc';
+} else if (process.argv[2] === 'mcp') {
   let provider, nativeId, dueId, cwd, state = {}, cursor = 0, items = [];
   const respond = (id, value) => output({ jsonrpc: '2.0', id, result: value });
-  const tool = (id, value) => respond(id, plain ? value : { structuredContent: value, content: [] });
+  const tool = (id, value) => respond(id, { structuredContent: value, content: [] });
   function item(kind, data, turn_id = null) {
     const params = { session_id: dueId, turn_id, cursor: ++cursor, kind, data };
     items.push(params);
-    output({ jsonrpc: '2.0', method: plain ? 'session.item' : 'notifications/due/session_item', params: { ...params, push_dropped: 0 } });
+    output({ jsonrpc: '2.0', method: 'notifications/due/session_item', params: { ...params, push_dropped: 0 } });
   }
   for await (const line of createInterface({ input: process.stdin })) {
     const message = JSON.parse(line);
-    if (!plain && message.method === 'initialize') { respond(message.id, { protocolVersion: '2025-11-25' }); continue; }
-    if (!plain && message.method === 'notifications/initialized') continue;
-    const { name, arguments: args } = plain
-      ? { name: message.method.replace('.', '_'), arguments: message.params } : message.params;
+    if (message.method === 'initialize') { respond(message.id, { protocolVersion: '2025-11-25' }); continue; }
+    if (message.method === 'notifications/initialized') continue;
+    const { name, arguments: args } = message.params;
     if (name === 'session_open') {
       ({ provider, cwd } = args); nativeId = randomUUID(); dueId = randomUUID();
       appendFileSync(join(cwd, 'launches.jsonl'), `${JSON.stringify({ type: `${process.argv[2]}-open`, pid: process.pid, nativeId })}\n`);
       item('session_opened', { provider });
-      tool(message.id, { session_id: dueId, native_session_id: nativeId,
-        ...(plain ? { protocol_version: 1, stream: { enabled: true, method: 'session.item' } } : {}) });
+      tool(message.id, { session_id: dueId, native_session_id: nativeId });
     } else if (name === 'turn_start') {
       const id = randomUUID();
       item('turn_started', { prompt: args.prompt }, id);

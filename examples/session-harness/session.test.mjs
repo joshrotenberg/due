@@ -130,7 +130,7 @@ test('ordinary failed execution remains inspectable data', async t => {
 
 test('identical correction workflow validates through all backends with distinct process ownership', async t => {
   const outputs = [];
-  for (const backend of ['resume', 'resident', 'rpc']) {
+  for (const backend of ['resume', 'resident']) {
     await t.test(backend, async t => {
       const { dir, options, receipt } = await setup(t, { backend });
       await copyFile(fileURLToPath(new URL('./session.fixture.mjs', import.meta.url)), options.dueBinary);
@@ -156,11 +156,10 @@ test('identical correction workflow validates through all backends with distinct
     });
   }
   assert.deepEqual(outputs[0], outputs[1]);
-  assert.deepEqual(outputs[1], outputs[2]);
 });
 
 
-test('comparison CLI accepts all transports and RPC example consumes complete items', async t => {
+test('comparison CLI accepts both available transports', async t => {
   const { dir, options } = await setup(t);
   await copyFile(fileURLToPath(new URL('./session.fixture.mjs', import.meta.url)), options.dueBinary);
   await chmod(options.dueBinary, 0o700);
@@ -169,19 +168,11 @@ test('comparison CLI accepts all transports and RPC example consumes complete it
   const comparison = await run(process.execPath, [fileURLToPath(new URL('./compare.mjs', import.meta.url)),
     ...common, '--backend', 'all', '--artifacts', join(dir, 'comparison')], { timeout: 10000 });
   const summary = JSON.parse(comparison.stdout);
-  assert.deepEqual(summary.arms.map(arm => arm.backend), ['resume', 'resident', 'rpc']);
-  assert.deepEqual(summary.arms.map(arm => arm.processes.length), [2, 1, 1]);
-  const example = await run(process.execPath, [fileURLToPath(new URL('./rpc-example.mjs', import.meta.url)),
-    ...common, '--artifacts', join(dir, 'rpc-example')], { timeout: 10000 });
-  const records = example.stdout.trim().split('\n').map(JSON.parse);
-  assert.equal(records.filter(record => record.data.kind === 'turn_finished').length, 2);
-  assert.equal(records.at(-1).data.kind, 'session_closed');
-  assert.deepEqual(records.find(record => record.data.kind === 'native').data.data.params.item.unknown.nested,
-    [null, 7, { keep: true }]);
-  assert.match(example.stderr, /Validated both turns/);
+  assert.deepEqual(summary.arms.map(arm => arm.backend), ['resume', 'resident']);
+  assert.deepEqual(summary.arms.map(arm => arm.processes.length), [2, 1]);
 });
 
-for (const backend of ['resident', 'rpc']) {
+for (const backend of ['resident']) {
   for (const mode of ['observer', 'malformed', 'cleanup-failure']) {
     test(`${backend} retains failed scope evidence: ${mode}`, async t => {
       const original = new Error('observer exploded');
@@ -219,7 +210,7 @@ test('onInteraction is validated and rejected for resume before anything is crea
   const { options } = await setup(t);
   await assert.rejects(withSession({ ...options, onInteraction: () => ({}) }, () => {}), /unsupported by the resume backend/);
   await assert.rejects(stat(options.artifactDir), { code: 'ENOENT' });
-  for (const backend of ['resume', 'resident', 'rpc']) {
+  for (const backend of ['resume', 'resident']) {
     for (const bad of ['allow', {}, null]) {
       await assert.rejects(withSession({ ...options, backend, onInteraction: bad }, () => {}), /onInteraction must be a function/);
     }
@@ -230,7 +221,7 @@ test('onInteraction is validated and rejected for resume before anything is crea
 test('turnWaitMs is validated before scope artifacts or launch and is unsupported for resume', async t => {
   const { dir, options } = await setup(t);
   options.dueBinary = join(dir, 'must-not-launch');
-  for (const backend of ['resident', 'rpc']) {
+  for (const backend of ['resident']) {
     for (const turnWaitMs of [0, -1, 1.5, NaN, Infinity, 2 ** 31, Number.MAX_SAFE_INTEGER, '20', false, {}, []]) {
       await assert.rejects(withSession({ ...options, backend, turnWaitMs }, () => {}), /turnWaitMs/);
       await assert.rejects(stat(options.artifactDir), { code: 'ENOENT' });
@@ -247,7 +238,7 @@ test('an undefined turn wait keeps the resume backend and its receipt unchanged'
   assert.equal(Object.hasOwn(await receipt(), 'turn_wait_ms'), false);
 });
 
-for (const backend of ['resident', 'rpc']) {
+for (const backend of ['resident']) {
   async function interactive(t, model, extra = {}) {
     const ctx = await setup(t, { backend, ...extra });
     ctx.options.profile.model = model;
@@ -263,8 +254,8 @@ for (const backend of ['resident', 'rpc']) {
       assert.equal(evidence.turn_wait_ms, expected);
       assert.equal(evidence.profile.timeout, '2m');
       const input = (await readFile(join(dir, 'fixture-input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-      const opening = input.find(row => backend === 'rpc' ? row.method === 'session.open' : row.params?.name === 'session_open');
-      const nativeProfile = backend === 'rpc' ? opening.params : opening.params.arguments;
+      const opening = input.find(row => row.params?.name === 'session_open');
+      const nativeProfile = opening.params.arguments;
       assert.equal(nativeProfile.timeout, '2m');
       assert.equal(Object.hasOwn(nativeProfile, 'turnWaitMs'), false);
       assert.equal(Object.hasOwn(nativeProfile, 'turn_wait_ms'), false);

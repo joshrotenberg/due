@@ -3,48 +3,40 @@
 import { createInterface } from 'node:readline';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-const plain = process.argv[2] === 'rpc';
-if (!['mcp', 'rpc'].includes(process.argv[2])) throw new Error('Unknown transport');
+if (process.argv[2] !== 'mcp') throw new Error('Unknown transport');
 let directory, mode, count = 0, cursor = 0, journal = [], current, held;
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const result = (id, value) => send({ jsonrpc: '2.0', id, result: value });
-const tool = (id, value) => result(id, plain ? value : { structuredContent: value, content: [{ type: 'text', text: JSON.stringify(value) }] });
+const tool = (id, value) => result(id, { structuredContent: value, content: [{ type: 'text', text: JSON.stringify(value) }] });
 const item = (kind, data, turn_id = null, push = true) => {
   const record = { session_id: 'due-session', cursor: ++cursor, turn_id, kind, data };
   journal.push(record);
-  if (push) send({ jsonrpc: '2.0', method: plain ? 'session.item' : 'notifications/due/session_item', params: { ...record, push_dropped: 0 } });
+  if (push) send({ jsonrpc: '2.0', method: 'notifications/due/session_item', params: { ...record, push_dropped: 0 } });
   return record;
 };
 const outcome = turn => ({ schema_version: 1, provider: 'codex', run_id: mode === 'wrong-run' ? 'stale-turn' : turn,
   session_id: mode === 'missing-id' ? null : mode.startsWith('init') ? 'claude-native' : 'native-one', status: mode === 'unknown-status' ? 'finished' : mode === 'failed' ? 'failed' : 'succeeded',
   text: `turn ${count}`, error: ['failed', 'false-success'].includes(mode) ? { kind: 'provider', message: 'synthetic failure' } : null });
-const reject = (id, message) => plain
-  ? send({ jsonrpc: '2.0', id, error: { code: -32000, message } })
-  : result(id, { isError: true, content: [{ type: 'text', text: message }] });
+const reject = (id, message) => result(id, { isError: true, content: [{ type: 'text', text: message }] });
 const finishTurn = () => item('turn_finished', outcome(current), current);
 const input = createInterface({ input: process.stdin });
 input.on('line', line => {
   const request = JSON.parse(line);
   if (directory) appendFileSync(join(directory, 'fixture-input.jsonl'), line + '\n');
-  if (!plain && request.method === 'initialize') return result(request.id, { protocolVersion: '2025-11-25' });
-  if (!plain && request.method !== 'tools/call') return;
-  const { name, arguments: args } = plain
-    ? { name: request.method.replace('.', '_'), arguments: request.params } : request.params;
+  if (request.method === 'initialize') return result(request.id, { protocolVersion: '2025-11-25' });
+  if (request.method !== 'tools/call') return;
+  const { name, arguments: args } = request.params;
   if (name === 'session_open') {
     directory = args.cwd; mode = args.model;
     appendFileSync(join(directory, 'fixture-input.jsonl'), line + '\n');
     item('session_opened', {});
-    return tool(request.id, { session_id: 'due-session', native_session_id: mode.startsWith('init') ? null : 'native-one',
-      ...(plain ? { protocol_version: mode === 'wrong-version' ? 9 : 1, stream: { enabled: true, method: 'session.item' } } : {}) });
+    return tool(request.id, { session_id: 'due-session', native_session_id: mode.startsWith('init') ? null : 'native-one' });
   }
   if (name === 'session_read') {
     const items = journal.filter(value => value.cursor > args.after).slice(0, 64);
     return tool(request.id, { items, cursor: items.at(-1)?.cursor ?? args.after, items_lost: mode === 'lost', has_more: false });
   }
   if (name === 'turn_start') {
-    if (mode === 'rpc-error') {
-      send({ jsonrpc: '2.0', id: request.id, error: { code: -32000, message: 'Fixture request rejected' } }); return;
-    }
     current = `native-turn-${++count}`;
     item('turn_started', { prompt: args.prompt }, current);
     if (mode.startsWith('init')) {

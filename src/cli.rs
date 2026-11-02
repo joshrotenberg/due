@@ -22,9 +22,6 @@ pub enum Command {
     /// Experimental resident sessions over MCP stdio (one session per process).
     #[cfg(feature = "mcp")]
     Mcp,
-    /// Experimental resident sessions over JSON-RPC stdio (one session per process).
-    #[cfg(feature = "rpc")]
-    Rpc,
     /// Run one noninteractive turn, optionally continuing an existing session.
     Run(Box<RunCommand>),
     /// Install the bundled delegate plugin locally; no model work is started.

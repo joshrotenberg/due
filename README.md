@@ -181,17 +181,8 @@ due trace summarize run.jsonl --output json
 
 ## Experimental resident sessions
 
-The opt-in `rpc` feature adds a direct JSON-RPC stdio interface:
-
-```sh
-cargo build --locked --features rpc
-./target/debug/due rpc
-```
-
-It exposes `session.open`, `turn.start`, `session.read`, interruption, interaction
-replies and close, with `session.item` streaming. It needs no initialization or
-tool envelopes. See the [RPC guide](docs/rpc.md) and
-[two-turn JavaScript client](examples/session-harness/rpc-example.mjs).
+This branch preserves the MCP experiment. Active RPC development is on the
+[RPC spike branch](https://github.com/joshrotenberg/due/tree/codex/due-rpc-spike).
 
 An opt-in `mcp` feature adds resident Claude and Codex sessions over MCP stdio:
 
@@ -207,8 +198,7 @@ Set `stream: true` on `session_open` for native item notifications; `session_rea
 provides bounded recovery across turns. See [the spike guide](docs/mcp.md) for
 examples, lifecycle, limits and validation.
 A [JavaScript harness example](examples/session-harness/README.md) compares CLI
-resume, resident MCP and resident RPC behind one scoped conversation API. The
-two resident adapters share the same session host; RPC-only builds omit MCP.
+resume and resident MCP behind one scoped conversation API.
 
 ## Limits of `due run`
 

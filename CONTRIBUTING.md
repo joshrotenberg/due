@@ -5,9 +5,9 @@ packaging, and tests that protect existing behavior. The explicitly scoped `due 
 is the packaging exception: it installs the existing delegate plugin without
 starting agent work. Other new commands, configuration layers, automatic retries,
 schedulers and MCP servers remain outside the freeze. The explicitly requested
-resident-session spike is isolated behind the opt-in `mcp` and `rpc` features;
+resident-session spike is isolated behind the opt-in `mcp` feature;
 it must preserve `due run` behavior and existing wrapper revisions. See the
-[MCP guide](docs/mcp.md) and [plain RPC guide](docs/rpc.md).
+[MCP guide](docs/mcp.md).
 
 Use [installation](docs/install.md) for local setup and
 [dogfooding](docs/dogfooding.md) for issue reports. Keep changes small and include
@@ -38,7 +38,7 @@ python3 -B -m unittest discover -s examples/mcp-client -p 'test_*.py' -v
 ```
 
 The optional [JavaScript session comparison](examples/session-harness/README.md)
-uses one scoped API over CLI resume, resident MCP and resident RPC. Its offline tests use fake
+uses one scoped API over CLI resume and resident MCP. Its offline tests use fake
 Due peers and do not invoke models:
 
 ```sh

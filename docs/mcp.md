@@ -1,9 +1,7 @@
 # MCP stdio spike
 
-The [plain JSON-RPC alternative](rpc.md) exposes the same resident session host
-through direct methods and `session.item` notifications. It removes MCP
-initialization/tool envelopes; both adapters preserve the same provider and
-session behavior. Build both with `--features mcp,rpc` to compare them.
+This branch preserves the MCP experiment. Active RPC development is on the
+[RPC spike branch](https://github.com/joshrotenberg/due/tree/codex/due-rpc-spike).
 
 Build the opt-in feature and launch it from an MCP client:
 
@@ -227,8 +225,7 @@ before opening another. Process exit and complete descendant termination are
 subject to the underlying wrapper/platform contracts.
 On platforms using the Tokio blocking-stdio fallback, including macOS, an
 open stdin can keep the MCP process alive after signal-driven native cleanup.
-Callers must close stdin to release that read. The RPC adapter uses dedicated
-stdio bridges and tests this shutdown case explicitly.
+Callers must close stdin to release that read.
 
 The `turn_read` native event window holds at most 256 records and 1 MiB per turn. Use
 `events_lost` and `dropped_events` to detect gaps; events are diagnostic, while

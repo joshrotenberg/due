@@ -187,6 +187,10 @@ impl Client {
         }
     }
 
+    fn finished(&mut self, session: &str, turn: &str) -> Value {
+        self.read_until(session, turn, "finished")["result"].clone()
+    }
+
     fn close(&mut self, session: &str) {
         assert_eq!(
             self.ok("session_close", json!({"session_id":session}))["closed"],
@@ -687,4 +691,202 @@ fn pushes_codex_items_outside_a_turn() {
     );
     client.close(&session);
     client.eof();
+}
+
+#[test]
+fn codex_early_requests_wait_for_authoritative_turn_and_replay_in_order() {
+    let mut client = Client::new(true);
+    let session = client.open_stream("codex");
+    let first = client.start(&session, "normal");
+    assert_eq!(client.finished(&session, &first)["status"], "succeeded");
+    let second = client.start(&session, "stale-approval");
+    let raw =
+        client.pushed_until(|item| item["kind"] == "native_request" && item["data"]["id"] == 18);
+    assert!(raw["turn_id"].is_null(), "{raw}");
+    assert_eq!(
+        raw["data"]["params"]["unknown"],
+        json!({"keep":[true,null,42]})
+    );
+    let read = client.ok("turn_read", json!({"session_id":session,"turn_id":second}));
+    assert!(
+        read["interactions"].as_array().unwrap().is_empty(),
+        "{read}"
+    );
+    client.pushed_until(|item| {
+        item["turn_id"] == second
+            && item["kind"] == "native_response"
+            && item["data"]["method"] == "turn/start"
+    });
+    // Wait for a correlated notification to prove the ordered replay has run.
+    client.read_until(&session, &second, "running");
+    let read = client.ok("turn_read", json!({"session_id":session,"turn_id":second}));
+    assert!(
+        read["interactions"].as_array().unwrap().is_empty(),
+        "{read}"
+    );
+    client.ok(
+        "turn_interrupt",
+        json!({"session_id":session,"turn_id":second}),
+    );
+    client.finished(&session, &second);
+    let third = client.start(&session, "ask");
+    let interaction =
+        client.pushed_until(|item| item["turn_id"] == third && item["kind"] == "interaction");
+    assert_eq!(interaction["data"]["request_id"], "codex:17");
+    client.ok("interaction_reply", json!({"session_id":session,"turn_id":third,"request_id":"codex:17","response":{"decision":"cancel"}}));
+    assert_eq!(
+        client.finished(&session, &third)["text"],
+        "permission denied"
+    );
+    let fourth = client.start(&session, "ask-resolved");
+    assert_eq!(
+        client.finished(&session, &fourth)["text"],
+        "resolved before start"
+    );
+    let read = client.ok("turn_read", json!({"session_id":session,"turn_id":fourth}));
+    assert!(
+        read["interactions"].as_array().unwrap().is_empty(),
+        "{read}"
+    );
+    let fifth = client.start(&session, "ask-completed");
+    assert_eq!(
+        client.finished(&session, &fifth)["text"],
+        "completed with pending request"
+    );
+    let read = client.ok("turn_read", json!({"session_id":session,"turn_id":fifth}));
+    assert!(
+        read["interactions"].as_array().unwrap().is_empty(),
+        "{read}"
+    );
+    let records = client.ok("session_read", json!({"session_id":session}));
+    let items = records["items"].as_array().unwrap();
+    assert!(
+        !items
+            .iter()
+            .any(|i| i["turn_id"] == second && i["kind"] == "interaction")
+    );
+    let position = |kind| {
+        items
+            .iter()
+            .position(|i| i["turn_id"] == fourth && i["kind"] == kind)
+            .unwrap()
+    };
+    assert!(position("interaction") < position("interaction_resolved"));
+    assert!(position("interaction_resolved") < position("turn_finished"));
+    client.close(&session);
+    client.eof();
+    let input = fs::read_to_string(client.dir.path().join("input.jsonl")).unwrap();
+    let rejection = input
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["id"] == 18 && v.get("error").is_some())
+        .unwrap();
+    assert_eq!(
+        rejection["error"]["message"],
+        "Request belongs to another turn"
+    );
+    for (id, message) in [(17, "Due turn has finished"), (19, "No active Due turn")] {
+        assert!(
+            input
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .any(|v| v["id"] == id && v["error"]["message"] == message)
+        );
+    }
+}
+
+#[test]
+fn codex_limits_unanswered_early_requests_before_start_response() {
+    for prompt in [
+        "early-overflow",
+        "early-foreign-resolution",
+        "early-release",
+    ] {
+        let mut client = Client::new(true);
+        let session = client.open_stream("codex");
+        let turn = client.start(&session, prompt);
+        let raw = client.pushed_until(|i| i["kind"] == "native_request" && i["data"]["id"] == 133);
+        assert!(raw["turn_id"].is_null());
+        if prompt == "early-release" {
+            fs::write(client.dir.path().join("release-start"), "release").unwrap();
+            client.pushed_until(|i| {
+                i["kind"] == "interaction" && i["data"]["request_id"] == "codex:133"
+            });
+            let read = client.ok("turn_read", json!({"session_id":session,"turn_id":turn}));
+            let pending = read["interactions"].as_array().unwrap();
+            assert_eq!(pending.len(), 32, "{read}");
+            assert!(!pending.iter().any(|i| i["request_id"] == "codex:101"));
+            assert!(pending.iter().any(|i| i["request_id"] == "codex:133"));
+            client.ok(
+                "turn_interrupt",
+                json!({"session_id":session,"turn_id":turn}),
+            );
+            assert_eq!(client.finished(&session, &turn)["status"], "cancelled");
+        } else {
+            let result = client.finished(&session, &turn);
+            assert_eq!(result["status"], "failed", "{result}");
+            assert!(
+                result["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("32 pending interaction limit"),
+                "{result}"
+            );
+            assert!(client.dir.path().join("exited").exists());
+        }
+        let records = client.ok("session_read", json!({"session_id":session,"limit":256}));
+        let items = records["items"].as_array().unwrap();
+        let requests: Vec<_> = items
+            .iter()
+            .filter(|i| i["kind"] == "native_request")
+            .collect();
+        assert_eq!(requests.len(), 33);
+        for (index, request) in requests.iter().enumerate() {
+            assert_eq!(request["data"]["id"], 101 + index);
+            assert!(request["turn_id"].is_null());
+            assert_eq!(request["data"]["params"]["turnId"], "turn-1");
+        }
+        if prompt == "early-release" {
+            let position = |kind, id: &str| {
+                items
+                    .iter()
+                    .position(|i| i["kind"] == kind && i["data"]["request_id"] == id)
+                    .unwrap()
+            };
+            assert!(
+                position("interaction", "codex:101")
+                    < position("interaction_resolved", "codex:101")
+            );
+            assert!(
+                position("interaction_resolved", "codex:101")
+                    < position("interaction", "codex:133")
+            );
+        } else {
+            assert!(!items.iter().any(|i| i["kind"] == "interaction"));
+            assert!(
+                !items
+                    .iter()
+                    .any(|i| i["kind"] == "native_response" && i["data"]["method"] == "turn/start")
+            );
+        }
+        client.close(&session);
+        client.eof();
+        let input = fs::read_to_string(client.dir.path().join("input.jsonl")).unwrap();
+        let replies: Vec<Value> = input
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v.get("method").is_none())
+            .collect();
+        assert!(
+            !replies.iter().any(|v| v.get("result").is_some()),
+            "must never auto-approve: {replies:?}"
+        );
+        if prompt != "early-release" {
+            assert!(
+                replies.iter().any(|v| v["id"] == 133
+                    && v["error"]["message"] == "Too many pending Due interactions"),
+                "{replies:?}"
+            );
+        }
+    }
 }

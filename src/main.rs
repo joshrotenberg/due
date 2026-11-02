@@ -6,10 +6,8 @@ mod mcp;
 mod providers;
 mod request;
 mod result;
-#[cfg(feature = "rpc")]
-mod rpc;
 mod schema;
-#[cfg(any(feature = "mcp", feature = "rpc"))]
+#[cfg(feature = "mcp")]
 mod session;
 mod skills;
 mod telemetry;
@@ -32,8 +30,6 @@ async fn main() -> ExitCode {
     match Cli::parse().command {
         #[cfg(feature = "mcp")]
         Command::Mcp => mcp::execute().await,
-        #[cfg(feature = "rpc")]
-        Command::Rpc => rpc::execute().await,
         Command::Run(run) => run_command(*run).await,
         Command::Init(args) => init::execute(args).await,
         Command::Skills(args) => skills::execute(&args),
