@@ -20,9 +20,19 @@ struct Skill {
 
 const SKILLS: &[Skill] = &[
     Skill {
+        name: "overview",
+        description: "Choose between Due's one-shot run, resident script and raw RPC modes, get started offline, discover installed help and guides, and troubleshoot or report problems.",
+        content: include_str!("../embedded-skills/overview/SKILL.md"),
+    },
+    Skill {
         name: "run",
-        description: "Run one bounded Claude Code or Codex task through Due and independently verify its artifacts and effects.",
+        description: "Scope, execute and independently verify one bounded Claude Code or Codex assignment, with optional native-session resume.",
         content: include_str!("../embedded-skills/run/SKILL.md"),
+    },
+    Skill {
+        name: "profiles",
+        description: "Write and reuse versioned JSON profiles across due run, due script and raw RPC, including precedence, path rules and which native options each surface accepts.",
+        content: include_str!("../embedded-skills/profiles/SKILL.md"),
     },
     Skill {
         name: "contracts",
@@ -34,10 +44,16 @@ const SKILLS: &[Skill] = &[
         description: "Observe a Due run through content-limited progress traces while preserving final results and detecting trace loss.",
         content: include_str!("../embedded-skills/observe/SKILL.md"),
     },
+    #[cfg(feature = "rpc")]
+    Skill {
+        name: "rpc",
+        description: "Write a raw stdio JSON-RPC client for a resident Claude Code or Codex session, with the method map, streaming items, interaction replies, retention limits, lifecycle and error semantics.",
+        content: include_str!("../embedded-skills/rpc/SKILL.md"),
+    },
     #[cfg(feature = "harness")]
     Skill {
         name: "supervise",
-        description: "Supervise a resident Claude Code or Codex assignment with embedded JavaScript, streamed items, explicit permissions and independent verification.",
+        description: "Supervise a bounded Claude Code or Codex assignment across resident turns with embedded JavaScript, streamed items, explicit permission decisions and independent verification.",
         content: include_str!("../embedded-skills/supervise/SKILL.md"),
     },
 ];

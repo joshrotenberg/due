@@ -16,7 +16,8 @@ const MAX_INPUT: u64 = 1024 * 1024;
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  due script workflow.js --evidence ./evidence/task-1 --args '{\"task\":\"Review the parser\"}'\n  due script workflow.js -C /work/project --evidence ./evidence/task-2 --args-file assignment.json --timeout 10m\n\nJavaScript calls Due.run(async scope => { ... }) and returns JSON data.\nDue.args contains parsed JSON arguments; Due.log(text) writes to stderr.\nStdout is one versioned JSON result after owned work and cleanup settle.\nInspect the returned result and independently verify the assignment's artifacts.\n\nThe evidence directory must be new; its parent must already exist.\nScript, argument-file and evidence paths resolve from the invocation directory.\n--cwd is the RPC server and default verifier working directory; session profiles\nresolve from that directory. Verifier cwd can override it explicitly.\n\nThis embeds JavaScript without Node, npm, imports, or browser APIs.\nScripts and verifier commands are trusted caller code. Provider permissions\ndo not constrain host commands. Pass interaction signals to awaited checks.\nRead `due skills show supervise` and `due schema script-result` for contracts."
+    after_help = crate::help::SHORT,
+    after_long_help = crate::help::SCRIPT
 )]
 pub struct ScriptArgs {
     /// UTF-8 JavaScript file, at most 1 MiB.

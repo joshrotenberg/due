@@ -138,8 +138,11 @@ step; output-limit failures retain a capped prefix and mark its stream as
 truncated. Host output can include local paths; inspect it before sharing.
 
 Start a new host session or reload plugins after installation or an update. The
-entry point is `due:delegate`; it routes into the installed binary's guides for
-one-shot work, contracts, observation and supervised assignments.
+entry point is `due:delegate`, a short skill that routes agents to `due -h`,
+`due --help`, `due COMMAND --help` and `due skills` in the installed binary. Its
+guides (`overview`, `run`, `profiles`, `contracts`, `observe`, and `rpc` and
+`supervise` where built) cover one-shot work, profiles, raw RPC clients and
+supervised assignments without a source checkout or website.
 Native host registration succeeding is distinct from verifying skill discovery in
 a fresh session. Codex uses the [official local-plugin workflow](https://developers.openai.com/plugins/build/plugins).
 
@@ -205,9 +208,13 @@ for the current scope and verification contract.
 ## Check installation without a provider call
 
 ```sh
+due -h                         # Short help; --help adds examples
 due skills list --output json
+due skills show overview
 due skills show run
-due skills show supervise
+due skills show profiles
+due skills show supervise      # Only if `due -h` lists script
+due skills show rpc            # Only if `due -h` lists rpc
 due script --help
 due rpc --help
 due schema script-result

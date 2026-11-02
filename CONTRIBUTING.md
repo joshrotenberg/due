@@ -93,3 +93,12 @@ The [historical Lua/JavaScript comparison](examples/rpc-languages/README.md) has
 its own lockfile and fixtures. It shares the production Rust/JavaScript runtime;
 validate its nested manifest separately when changing that boundary. New product
 examples and guidance should target `due script`, not the comparison runner.
+
+Help uses progressive disclosure: `-h` is the concise command/option reference;
+`--help` adds workflow examples and contracts. Keep command help in `src/help.rs`
+and its option-specific details aligned with embedded guides. `src/skills.rs`
+provides the installed catalog; keep its names/descriptions consistent with each
+guide's frontmatter. Feature-gate guides and help routes with their commands.
+The plugin entry skill explains purpose/scope and routes into installed discovery;
+mode-specific procedures belong in the binary. Check examples offline with fake
+providers, and rebuild after any embedded text or plugin package change.

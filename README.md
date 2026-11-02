@@ -54,23 +54,28 @@ due init --dry-run
 due init                   # Both hosts; use --host claude or --host codex for one
 ```
 
-Its short `delegate` skill points agents at the installed binary's help and
-embedded guides. Due and the selected host CLI must be on PATH. Setup starts no
+Its short `delegate` skill frames Due as an independent worker and points agents
+at the installed binary's `due -h`, `due --help` and `due skills` for the rest. Due and the selected host CLI must be on PATH. Setup starts no
 model work and does not configure authentication or enable a global delegation policy.
 See [installation](docs/install.md) for update, migration and recovery details.
 
 ## Quickstart
 
 Check the provider-free parts first. None of these start a provider or use the
-network:
+network. Help comes in two lengths: `-h` is the short command and option list,
+and `--help` adds examples and detail. Every subcommand has both.
 
 ```sh
-due --help
-due run --help
-due script --help
-due skills
+due -h                       # Short: the commands in this build
+due --help                   # Long: examples and where to read next
+due run --help               # Full option reference for one command
+due skills                   # Guides embedded in this binary
+due skills show overview     # Choose a mode, get started, troubleshoot
 due run --provider codex -p "Say hello" --dry-run --output json
 ```
+
+Reduced builds may omit `script` or `rpc` (and their guides); `due -h` and
+`due skills` show what the installed binary offers.
 
 Then run a real turn. Send longer prompts through stdin so they do not appear in
 Due's own argv:
@@ -150,13 +155,20 @@ The binary embeds its own guidance and JSON Schemas, so an agent can inspect the
 exact installed contract offline:
 
 ```sh
+due skills list --output json  # Catalog for automated selection
+due skills show overview       # Choose a mode, set up, troubleshoot, report
 due skills show run            # Scoping, execution, and verifying effects
+due skills show profiles       # JSON profiles for run, script and RPC
 due skills show contracts      # Request and result semantics
 due skills show observe        # Progress traces and trace loss
+due skills show rpc            # Raw stdio client wire reference (RPC builds)
 due skills show supervise      # Resident assignments and JavaScript supervision
 due schema script-result       # The JavaScript harness result envelope
 due schema request             # Also: result, trace, trace-summary
 ```
+
+Installed guides are complete without a source checkout or website; the links in
+this repository are supplemental.
 
 `--schema FILE` asks the provider for an answer matching a JSON Schema and
 returns it as `structured_output`. The provider enforces its own supported
@@ -253,8 +265,8 @@ remains outside this implementation.
 - [Troubleshooting](docs/troubleshooting.md): diagnose installation, host,
   authentication, permissions, and schema failures; repair an existing source build without changing its revision.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development workflow and checks.
-- `due run --help` and `due skills show NAME`: the authoritative reference for
-  the installed version.
+- `due -h`, `due COMMAND --help` and `due skills show NAME`: the authoritative
+  reference for the installed version, available offline.
 
 ## License
 

@@ -1,5 +1,8 @@
 # JavaScript supervision
 
+The installed reference is available offline with `due skills show supervise`.
+Use `due -h` for available commands and `due COMMAND --help` for detailed examples.
+
 `due script` runs a trusted JavaScript workflow inside Due. It keeps one Claude
 Code or Codex session alive while the caller observes items, makes explicit
 permission decisions, checks artifacts independently and decides whether to

@@ -16,13 +16,17 @@ Detailed guidance ships inside the executable, so it stays available alongside
 the installed behavior without a source checkout, provider process, or network:
 
 ```sh
-due --help
-due run --help
+due -h                             # Short help: commands in this build
+due --help                         # Long help: examples and cross-references
+due run --help                     # Every subcommand has short -h and long --help
 due skills                         # Names and short descriptions
 due skills list --output json      # Versioned catalog for automated selection
+due skills show overview           # Choose a mode, set up, troubleshoot, report
 due skills show run                # Scope, execution, and verifying effects
+due skills show profiles           # JSON profiles across run, script and RPC
 due skills show contracts          # Structured answers and result semantics
 due skills show observe            # Progress, trace loss, and cancellation
+due skills show rpc                # Raw stdio client wire reference
 due skills show supervise          # Resident JavaScript assignments
 due skills show contracts --output json
 due schema request                # Installed input contract as JSON Schema
@@ -41,6 +45,12 @@ a provider installation. The canonical instructions live in
 [`embedded-skills/`](../embedded-skills) and are included at compile time;
 changing them requires rebuilding the binary.
 
+Short `-h` output lists commands and options compactly; `--help` adds examples
+and detail. The `rpc` and
+`supervise` guides appear only in builds that include `due rpc` and `due script`;
+use `due -h` and `due skills` to see what an installed binary offers. Installed
+guides are self-contained, so a source checkout or website is not required.
+
 The entry skill stays small; load only the detailed guide relevant to the task.
 The current contract concerns execution and returned data. Artifact and external
 side effects still require the caller's independent verification.
@@ -57,8 +67,9 @@ for paths, partial failures, update and migration rules.
 
 
 The skills-only plugin in [`plugin/due`](../plugin/due) provides one short
-[`delegate` skill](../plugin/due/skills/delegate/SKILL.md). It starts an agent with
-the installed binary's help and skill catalog. The plugin requires local command
+[`delegate` skill](../plugin/due/skills/delegate/SKILL.md). It frames Due as an
+independent worker and starts an agent with `due -h`, `due --help`,
+`due COMMAND --help`, `due skills list --output json` and `due skills show NAME`. The plugin requires local command
 execution, Due on PATH, and the selected provider CLI installed and authenticated.
 It follows the [Agent Plugins package format](https://agent-plugins.org/plugin-authors/build-an-agent-plugin).
 The package does not install Due or a provider and does not change the caller's
@@ -208,6 +219,9 @@ due run --request task.json --no-ephemeral --resume native-session-id \
   --stdin --output json < follow-up.txt
 cat task.json | due run --request - -p "Use this replacement prompt" --output json
 ```
+
+`due skills show profiles` covers the same files for `due run`, `due script` and
+raw RPC, including the narrower native options resident sessions accept.
 
 Only `schema_version: 1` is required in the file. A provider and non-whitespace
 prompt must be present after merging, or use `--stdin` for the prompt.

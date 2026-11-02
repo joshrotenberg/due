@@ -8,6 +8,7 @@ use std::{
 use clap::{Args, ValueEnum};
 
 #[derive(Debug, Args)]
+#[command(after_help = crate::help::SHORT, after_long_help = crate::help::SCHEMA)]
 pub struct SchemaArgs {
     /// Contract to print as JSON; no provider, configuration or stdin is read.
     #[arg(value_enum)]
@@ -16,11 +17,16 @@ pub struct SchemaArgs {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Contract {
+    /// JSON task or reusable worker profile.
     Request,
+    /// One-shot or resident turn result.
     Result,
+    /// One progress JSONL record.
     Trace,
+    /// Offline summary or parsing-error envelope.
     TraceSummary,
     #[cfg(feature = "harness")]
+    /// JavaScript workflow result and evidence paths.
     ScriptResult,
 }
 

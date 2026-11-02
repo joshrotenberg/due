@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "One CLI for Claude Code and Codex",
-    after_help = "Use `due run --help` for one turn or a resumed conversation.\nWhen available, `due script --help` supervises a resident session with embedded JavaScript.\nInstall the bundled plugin with `due init`; preview with `due init --dry-run`.\nAgents can discover bundled guidance with `due skills`."
+    about = "Delegate and supervise coding work with Claude Code or Codex",
+    after_help = crate::help::SHORT,
+    after_long_help = crate::help::overview()
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -19,27 +20,29 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Resident sessions over JSON-RPC stdio (one session per process).
-    #[cfg(feature = "rpc")]
-    Rpc,
-    /// Supervise a bounded assignment with embedded JavaScript; no Node required.
+    /// Run one assignment, optionally continuing a saved native session.
+    Run(Box<RunCommand>),
+    /// Supervise resident turns, streamed items and independent checks in JavaScript.
     #[cfg(feature = "harness")]
     Script(crate::script::ScriptArgs),
-    /// Run one noninteractive turn, optionally continuing an existing session.
-    Run(Box<RunCommand>),
-    /// Install the bundled delegate plugin locally; no model work is started.
+    /// Host a resident session over JSON-RPC stdio for a custom client.
+    #[cfg(feature = "rpc")]
+    #[command(after_help = crate::help::SHORT, after_long_help = crate::help::RPC)]
+    Rpc,
+    /// Install or update the bundled delegate plugin in local agent hosts.
     Init(crate::init::InitArgs),
-    /// Discover and read agent skills embedded in this binary; no provider is started.
+    /// Discover and read the guides embedded in this binary.
     Skills(SkillsArgs),
-    /// Export a versioned JSON Schema locally; no provider is started.
+    /// Export a versioned request, result or trace JSON Schema.
     Schema(crate::contracts::SchemaArgs),
-    /// Summarize an existing progress trace locally; no provider is started.
+    /// Inspect a saved progress trace offline.
     Trace(crate::trace_summary::TraceArgs),
 }
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  due skills\n  due skills list --output json\n  due skills show run\n  due skills show contracts\n  due skills show observe\n\nSkills are local, read-only guidance for this installed version."
+    after_help = crate::help::SHORT,
+    after_long_help = crate::help::SKILLS
 )]
 pub struct SkillsArgs {
     /// Human-readable guidance or a versioned JSON document.
@@ -53,8 +56,10 @@ pub struct SkillsArgs {
 #[derive(Debug, Subcommand)]
 pub enum SkillsCommand {
     /// List available names and descriptions (also the default for `due skills`).
+    #[command(after_help = crate::help::SHORT, after_long_help = crate::help::SKILLS)]
     List,
     /// Print one complete embedded SKILL.md.
+    #[command(after_help = crate::help::SHORT, after_long_help = crate::help::SKILLS)]
     Show {
         /// Skill name from `due skills list`.
         #[arg(value_name = "NAME")]
@@ -113,11 +118,17 @@ impl Effort {
 #[command(
     group(ArgGroup::new("prompt_source").args(["prompt", "stdin"])),
     group(ArgGroup::new("progress_sink").multiple(true).args(["trace", "trace_file"])),
-    after_help = "Examples:\n  due run --provider claude -p 'Explain this repository'\n  due run --provider codex --stdin --output json --trace\n  due run --request profile.json --provider codex --stdin --output json\n  due run --request task.json --dry-run --output json\n  due run --request profile.json -p 'Review changes' --no-ephemeral -- --max-turns 5\n  due run --provider codex -p 'Summarize' --schema answer.schema.json --output json\n  due run --request - --output json --trace=json\n\nA request file may be a partial profile; explicit execution flags override its values.\nNative options after -- replace the profile's entire native_args list; use\n--clear-native-args for an empty replacement. --no-ephemeral overrides true.\nRequest cwd/schema paths resolve from the caller's cwd, not the profile directory.\n--request - and --stdin cannot share stdin. One invocation runs one foreground turn.\n\n--dry-run validates the merged request and prepares the invocation without spawning.\nIt does not verify provider authentication, model support, or answer-schema support.\nPrompt contents are omitted; native option values and schemas can appear in the plan.\n\nStdout carries the final answer/result; stderr carries diagnostics or progress.\n--output json wraps the result; --schema requests structured model data.\nExecution status, answer validity, review verdict and workspace effects are separate.\nFailure does not undo edits. Inspect effects before an authorized follow-up.\nNo default timeout. Monitor progress; use --timeout for a deliberate deadline.\nProvider settings and permissions apply. Due does not retry automatically.\nFor agent workflows, read `due skills show run`, `contracts`, or `observe`."
+    after_help = crate::help::SHORT,
+    after_long_help = crate::help::RUN
 )]
 pub struct RunCommand {
     /// Read a versioned JSON request/profile; explicit execution flags override it.
-    #[arg(long, value_name = "FILE|-", help_heading = "Request and prompt")]
+    #[arg(
+        long,
+        value_name = "FILE|-",
+        help_heading = "Request and prompt",
+        long_help = "Read a version-1 JSON task or partial profile from a file, or stdin with -. Explicit execution flags override file values; absent flags inherit. Paths inside the request resolve from the caller directory. See due skills show profiles."
+    )]
     pub request: Option<PathBuf>,
 
     /// Provider CLI to invoke; its existing authentication and settings apply.
@@ -154,7 +165,13 @@ pub struct RunCommand {
     pub timeout: Option<Duration>,
 
     /// Final answer text or one versioned JSON result, including runtime errors.
-    #[arg(long, value_enum, default_value = "text", help_heading = "Output")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "text",
+        help_heading = "Output",
+        long_help = "Select final answer text or one versioned Due JSON result, including runtime errors. This does not ask the model for JSON; --schema supplies a separate answer schema. JSON callers must inspect status and error, then independently verify task effects."
+    )]
     pub output: Output,
 
     /// Request a structured answer using this JSON Schema file.
