@@ -39,6 +39,17 @@ pub(super) async fn execute(signal: impl Future<Output = ()>) -> Result<(), Stri
                         .write_all(&bytes[..count])
                         .and_then(|()| output.flush());
                     writing.send_replace(None);
+                    if let Err(error) = &written {
+                        // One line at detection time. The final error is only
+                        // printed after provider cleanup, so without this a
+                        // slow cleanup is indistinguishable from an EPIPE that
+                        // was never observed.
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "due rpc: stdout bridge write failed ({} bytes): {error}",
+                            count
+                        );
+                    }
                     written.map_err(|error| format!("RPC stdout: {error}"))?;
                 }
             })();
@@ -85,6 +96,14 @@ pub(super) async fn execute(signal: impl Future<Output = ()>) -> Result<(), Stri
         }
     })
     .await;
+    if early_output.is_some() {
+        // Pairs with the detection line above: shows provider cleanup finished.
+        let _ = writeln!(
+            std::io::stderr(),
+            "due rpc: shutdown after output bridge stopped finished (ok: {})",
+            outcome.is_ok()
+        );
+    }
     match input_result.try_recv() {
         Ok(result) => outcome = outcome.and(result),
         Err(oneshot::error::TryRecvError::Empty) => {}
