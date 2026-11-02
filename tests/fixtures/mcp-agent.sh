@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Resident protocol fixture, never runs tools or contacts a model.
+# Codex envelopes follow codex-wrapper e91e627/tests/fake-app-server.sh
+# (captured CLI 0.149.0). Claude envelopes follow claude-wrapper 79ffb15
+# duplex parser/permission tests. IDs, counters and answer text are synthetic.
+set -eu
+
+provider=claude
+for arg in "$@"; do [ "$arg" != app-server ] || provider=codex; done
+printf '%s\n' "$$" > "$DUE_MCP_FIXTURE_DIR/pid"
+trap 'touch "$DUE_MCP_FIXTURE_DIR/exited"' EXIT
+count=0
+active=0
+pending=0
+native="native-$provider"
+turn=turn-0
+
+emit() { printf '%s\n' "$1"; }
+result() { emit '{"id":'"$1"',"result":'"$2"'}'; }
+notify() { emit '{"method":"'"$1"'","params":'"$2"'}'; }
+
+finish() {
+  active=0
+  pending=0
+  local status="$1" text="$2"
+  if [ "$provider" = claude ]; then
+    local subtype=success failed=false
+    if [ "$status" = failed ]; then subtype=error_during_execution; failed=true; fi
+    emit '{"type":"result","subtype":"'"$subtype"'","is_error":'"$failed"',"result":"'"$text"'","session_id":"'"$native"'","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":2}}'
+  else
+    local items='[]' error=null
+    if [ "$status" = completed ]; then
+      items='[{"type":"agentMessage","id":"answer-'"$count"'","text":"'"$text"'","phase":"final_answer","memoryCitation":null,"delivery":null}]'
+      notify item/completed '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"type":"agentMessage","id":"answer-'"$count"'","text":"'"$text"'","phase":"final_answer","memoryCitation":null,"delivery":null}}'
+    elif [ "$status" = failed ]; then
+      error='{"message":"fixture native failure","codexErrorInfo":null,"additionalDetails":null}'
+    fi
+    notify thread/tokenUsage/updated '{"threadId":"'"$native"'","turnId":"'"$turn"'","tokenUsage":{"last":{"inputTokens":10,"outputTokens":2,"totalTokens":12},"total":{"inputTokens":20,"outputTokens":4,"totalTokens":24},"modelContextWindow":258400}}'
+    notify turn/completed '{"threadId":"'"$native"'","turn":{"id":"'"$turn"'","items":'"$items"',"itemsView":"summary","status":"'"$status"'","error":'"$error"',"startedAt":1790223474,"completedAt":1790223492,"durationMs":18}}'
+  fi
+}
+
+begin() {
+  count=$((count + 1))
+  turn="turn-$count"
+  active=1
+  if [ "$provider" = claude ]; then
+    emit '{"type":"system","subtype":"init","session_id":"'"$native"'","fixtureInit":{"tools":["Read"],"unknown":true}}'
+    emit '{"type":"assistant","session_id":"'"$native"'","message":{"role":"assistant","content":[{"type":"text","text":"working"},{"type":"tool_use","id":"tool-fixture","name":"Read","input":{"file_path":"fixture.txt"}}]},"fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}'
+  else
+    start_response='{"turn":{"id":"'"$turn"'","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null},"fixtureResponse":{"unknown":[1,{"keep":true}]}}'
+    if [ "${DUE_MCP_EARLY:-0}" != 1 ]; then result "$id" "$start_response"; fi
+    notify turn/started '{"threadId":"'"$native"'","turn":{"id":"'"$turn"'","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1790223474,"completedAt":null,"durationMs":null}}'
+    notify item/started '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"id":"exec-fixture","type":"commandExecution","command":"fixture-only","fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}}'
+  fi
+  case "$line" in
+    *'"hold"'*) : ;;
+    *'"ask"'*)
+      pending=1
+      if [ "$provider" = claude ]; then
+        emit '{"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch never-created"}}}'
+      else
+        emit '{"method":"item/commandExecution/requestApproval","id":17,"params":{"threadId":"'"$native"'","turnId":"'"$turn"'","itemId":"exec-fixture","environmentId":"local","command":"touch never-created","cwd":"/tmp","availableDecisions":["accept","cancel"]}}'
+      fi
+      ;;
+    *'"fail"'*) finish failed 'partial answer' ;;
+    *) finish completed "turn $count" ;;
+  esac
+  if [ "$provider" = codex ] && [ "${DUE_MCP_EARLY:-0}" = 1 ]; then result "$id" "$start_response"; fi
+}
+
+id_re='"id":(-?[0-9]+)'
+request_re='"request_id":"([^"]+)"'
+method_re='"method":"([^"]+)"'
+
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$DUE_MCP_FIXTURE_DIR/input.jsonl"
+  if [ "$provider" = claude ]; then
+    case "$line" in
+      *'"type":"control_request"'*)
+        [[ "$line" =~ $request_re ]]
+        request_id="${BASH_REMATCH[1]}"
+        emit '{"type":"control_response","response":{"subtype":"success","request_id":"'"$request_id"'","response":{}}}'
+        if [ "$active" = 1 ]; then finish interrupted 'interrupted'; fi
+        ;;
+      *'"type":"control_response"'*)
+        if [ "$pending" = 1 ]; then
+          case "$line" in *'"behavior":"deny"'*) finish completed 'permission denied' ;; *) finish completed 'permission allowed' ;; esac
+        fi
+        ;;
+      *'"type":"user"'*) begin ;;
+    esac
+  else
+    if [[ "$line" =~ $method_re ]]; then
+      method="${BASH_REMATCH[1]}"
+      if [[ "$line" =~ $id_re ]]; then id="${BASH_REMATCH[1]}"; else continue; fi
+      case "$method" in
+        initialize) result "$id" '{"userAgent":"fixture/0.149.0","codexHome":"/tmp/fixture","platformFamily":"unix","platformOs":"macos"}' ;;
+        thread/start|thread/resume)
+          result "$id" '{"thread":{"id":"'"$native"'","turns":[],"fixtureThread":{"unknown":[1,{"keep":true}]}}}'
+          notify fixture/idle '{"threadId":"'"$native"'","future":{"nested":[null,{"keep":true}]}}'
+          ;;
+        turn/start) begin ;;
+        turn/interrupt) result "$id" '{}'; finish interrupted '' ;;
+      esac
+    elif [ "$pending" = 1 ]; then
+      notify serverRequest/resolved '{"threadId":"'"$native"'","requestId":17}'
+      case "$line" in *'"decision":"cancel"'*) finish completed 'permission denied' ;; *) finish completed 'permission allowed' ;; esac
+    fi
+  fi
+done

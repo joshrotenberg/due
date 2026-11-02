@@ -1,10 +1,16 @@
 mod cli;
 mod contracts;
 mod init;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod providers;
 mod request;
 mod result;
+#[cfg(feature = "rpc")]
+mod rpc;
 mod schema;
+#[cfg(any(feature = "mcp", feature = "rpc"))]
+mod session;
 mod skills;
 mod telemetry;
 mod trace_summary;
@@ -24,6 +30,10 @@ use result::{RunError, RunResult};
 #[tokio::main]
 async fn main() -> ExitCode {
     match Cli::parse().command {
+        #[cfg(feature = "mcp")]
+        Command::Mcp => mcp::execute().await,
+        #[cfg(feature = "rpc")]
+        Command::Rpc => rpc::execute().await,
         Command::Run(run) => run_command(*run).await,
         Command::Init(args) => init::execute(args).await,
         Command::Skills(args) => skills::execute(&args),

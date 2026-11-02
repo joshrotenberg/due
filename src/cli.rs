@@ -19,6 +19,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Experimental resident sessions over MCP stdio (one session per process).
+    #[cfg(feature = "mcp")]
+    Mcp,
+    /// Experimental resident sessions over JSON-RPC stdio (one session per process).
+    #[cfg(feature = "rpc")]
+    Rpc,
     /// Run one noninteractive turn, optionally continuing an existing session.
     Run(Box<RunCommand>),
     /// Install the bundled delegate plugin locally; no model work is started.
@@ -58,6 +64,8 @@ pub enum SkillsCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "mcp", derive(tower_mcp::schemars::JsonSchema))]
+#[cfg_attr(feature = "mcp", schemars(crate = "tower_mcp::schemars"))]
 pub enum Provider {
     Claude,
     Codex,
@@ -87,6 +95,8 @@ pub enum TraceFormat {
 
 #[derive(Debug, Clone, Copy, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "mcp", derive(tower_mcp::schemars::JsonSchema))]
+#[cfg_attr(feature = "mcp", schemars(crate = "tower_mcp::schemars"))]
 pub enum Effort {
     Low,
     Medium,

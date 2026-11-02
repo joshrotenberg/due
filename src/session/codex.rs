@@ -1,0 +1,724 @@
+//! Resident Codex transport. The owner keeps reading while callers control a turn.
+
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+
+use codex_wrapper::{
+    Codex,
+    app_server::{
+        AppServer, AppServerHandle, Notification, RequestId, ServerMessage, ThreadStartParams,
+        Turn, TurnStartParams, TurnStatus,
+    },
+};
+use serde_json::{Value, json};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
+
+use super::{EventSink, OpenOptions};
+use crate::{
+    cli::Provider,
+    result::{ErrorKind, RunError, RunResult, Usage},
+};
+
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_OUTPUT: usize = 64 * 1024 * 1024;
+const MAX_ANSWER: usize = 4 * 1024 * 1024;
+
+type Reply = oneshot::Sender<Result<(), String>>;
+
+enum Command {
+    Start {
+        id: String,
+        prompt: String,
+        reply: Reply,
+    },
+    Started {
+        id: String,
+        result: Result<Value, String>,
+    },
+    Interrupt(Reply),
+    Respond {
+        id: String,
+        response: Value,
+        reply: Reply,
+    },
+    Close,
+}
+
+pub struct Backend {
+    commands: mpsc::Sender<Command>,
+    owner: Option<JoinHandle<Result<(), String>>>,
+}
+
+struct Active {
+    id: String,
+    native_id: Option<String>,
+    answer: Option<String>,
+    usage: Option<Usage>,
+    requests: HashMap<String, RequestId>,
+    early: Vec<Notification>,
+    early_bytes: usize,
+    started: Instant,
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl Active {
+    fn matches(&mut self, native_id: &str) -> bool {
+        match &self.native_id {
+            Some(id) => id == native_id,
+            None => {
+                self.native_id = Some(native_id.to_owned());
+                true
+            }
+        }
+    }
+
+    fn result(self, thread_id: &str, turn: Option<Turn>, error: Option<RunError>) -> RunResult {
+        let mut result = RunResult::new(Provider::Codex);
+        result.run_id = Some(self.id);
+        result.session_id = Some(thread_id.to_owned());
+        result.duration_ms = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        result.usage = self.usage;
+        result.text = turn
+            .as_ref()
+            .and_then(Turn::final_message)
+            .map(str::to_owned)
+            .or(self.answer)
+            .unwrap_or_default();
+        if result.text.len() > MAX_ANSWER {
+            result.text.clear();
+            return result.fail(RunError::protocol(
+                "Codex answer exceeded the 4 MiB spike limit",
+            ));
+        }
+        if let Some(error) = error {
+            return result.fail(error);
+        }
+        match turn.map(|turn| (turn.status, turn.error)) {
+            Some((TurnStatus::Completed, _)) => result,
+            Some((TurnStatus::Interrupted, _)) => result.fail(RunError::new(
+                ErrorKind::Cancelled,
+                "Codex turn interrupted",
+            )),
+            Some((TurnStatus::Failed, error)) => result.fail(RunError::new(
+                ErrorKind::Provider,
+                error
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "Codex turn failed".into()),
+            )),
+            _ => result.fail(RunError::protocol(
+                "Codex completion has no terminal status",
+            )),
+        }
+    }
+}
+
+impl Backend {
+    pub async fn open(options: &OpenOptions, sink: EventSink) -> Result<Self, String> {
+        let turn_timeout = options.timeout_duration()?;
+        let mut builder = Codex::builder()
+            .timeout(CONTROL_TIMEOUT)
+            .termination_grace(Duration::from_secs(5))
+            .output_limit(MAX_OUTPUT);
+        if let Some(binary) = &options.binary {
+            builder = builder.binary(binary);
+        }
+        if let Some(cwd) = &options.cwd {
+            builder = builder.working_dir(cwd);
+        }
+        let client = builder.build().map_err(|e| e.to_string())?;
+        let server = AppServer::builder(&client)
+            .client_info("due", env!("CARGO_PKG_VERSION"))
+            .start()
+            .await
+            .map_err(|e| e.to_string())?;
+        let handle = server.handle();
+        let opened = if let Some(id) = &options.resume {
+            let mut params = json!({"threadId": id});
+            if let Some(cwd) = &options.cwd {
+                params["cwd"] = json!(cwd);
+            }
+            if let Some(model) = &options.model {
+                params["model"] = json!(model);
+            }
+            handle
+                .request("thread/resume", params)
+                .await
+                .map_err(|error| report_rpc_error(error, &sink, None))
+                .and_then(|response| {
+                    sink.item(
+                        "native_response",
+                        json!({"provider":"codex", "method":"thread/resume", "response":response}),
+                        None,
+                    );
+                    response
+                        .pointer("/thread/id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| "Codex resume response has no thread ID".to_owned())
+                })
+        } else {
+            let mut params = ThreadStartParams::new().ephemeral(options.ephemeral);
+            if let Some(cwd) = &options.cwd {
+                params = params.cwd(cwd);
+            }
+            if let Some(model) = &options.model {
+                params = params.model(model);
+            }
+            handle
+                .thread_start(params)
+                .await
+                .map(|thread| {
+                    sink.item(
+                        "native_response",
+                        json!({"provider":"codex", "method":"thread/start", "response":thread.raw}),
+                        None,
+                    );
+                    thread.id
+                })
+                .map_err(|error| report_rpc_error(error, &sink, None))
+        };
+        let thread_id = match opened {
+            Ok(id) => id,
+            Err(error) => {
+                let cleanup = server.shutdown().await;
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(e) => format!("{error}; shutdown: {e}"),
+                });
+            }
+        };
+        sink.native_session(thread_id.clone());
+        let (commands, receiver) = mpsc::channel(16);
+        let sender = commands.clone();
+        let effort = options.effort.map(|value| value.as_str().to_owned());
+        let owner = tokio::spawn(own(
+            server,
+            handle,
+            thread_id,
+            effort,
+            turn_timeout,
+            sink,
+            sender,
+            receiver,
+        ));
+        Ok(Self {
+            commands,
+            owner: Some(owner),
+        })
+    }
+
+    async fn call(&self, command: impl FnOnce(Reply) -> Command) -> Result<(), String> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(command(reply))
+            .await
+            .map_err(|_| "Codex session is closed".to_owned())?;
+        answer
+            .await
+            .map_err(|_| "Codex session closed during operation".to_owned())?
+    }
+
+    pub async fn start(&mut self, turn_id: String, prompt: String) -> Result<(), String> {
+        self.call(|reply| Command::Start {
+            id: turn_id,
+            prompt,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn interrupt(&mut self) -> Result<(), String> {
+        self.call(Command::Interrupt).await
+    }
+
+    pub async fn reply(&mut self, request_id: &str, response: Value) -> Result<(), String> {
+        self.call(|reply| Command::Respond {
+            id: request_id.to_owned(),
+            response,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn close(mut self) -> Result<(), String> {
+        let _ = self.commands.send(Command::Close).await;
+        self.owner
+            .take()
+            .expect("owner task")
+            .await
+            .map_err(|e| format!("Codex owner task failed: {e}"))?
+    }
+}
+
+impl Drop for Backend {
+    fn drop(&mut self) {
+        if let Some(owner) = &self.owner {
+            owner.abort();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn own(
+    mut server: AppServer,
+    handle: AppServerHandle,
+    thread_id: String,
+    effort: Option<String>,
+    turn_timeout: Option<Duration>,
+    sink: EventSink,
+    sender: mpsc::Sender<Command>,
+    mut commands: mpsc::Receiver<Command>,
+) -> Result<(), String> {
+    let mut active: Option<Active> = None;
+    let failure = 'owner: loop {
+        let deadline = active.as_ref().and_then(|turn| turn.deadline);
+        tokio::select! {
+            _ = deadline_elapsed(deadline) => break Some((ErrorKind::Timeout, "Codex turn deadline exceeded; session closed".to_owned())),
+            message = server.next_message() => match message {
+                Ok(Some(ServerMessage::Notification(notification))) => {
+                    // Session items preserve idle and late messages as well as active
+                    // turn messages. The turn-read view below keeps its stricter filter.
+                    sink.item("native", notification_item(&notification),
+                        native_turn_id(&notification.params, &thread_id, active.as_ref()));
+                    if let Err(error) = observe(&notification, &thread_id, &mut active, &sink) {
+                        break Some((ErrorKind::Protocol, error));
+                    }
+                }
+                Ok(Some(ServerMessage::Request(request))) => {
+                    let due_turn_id = native_turn_id(&request.params, &thread_id, active.as_ref()).map(str::to_owned);
+                    let reject = |message: &str| {
+                        sink.item("native_request", json!({"provider":"codex", "id":request.id, "method":request.method, "params":request.params}), due_turn_id.as_deref());
+                        let _ = handle.respond_error(request.id.clone(), -32000, message);
+                    };
+                    let Some(turn) = active.as_mut() else {
+                        reject("No active Due turn");
+                        continue;
+                    };
+                    if request.params.get("threadId").and_then(Value::as_str).is_some_and(|id| id != thread_id) {
+                        reject("Request belongs to another thread");
+                        continue;
+                    }
+                    if let Some(id) = request.params.get("turnId").and_then(Value::as_str)
+                        && turn.native_id.as_deref().is_some_and(|expected| expected != id) {
+                        reject("Request belongs to another turn");
+                        continue;
+                    }
+                    let key = request_key(&request.id);
+                    if !turn.requests.contains_key(&key) && turn.requests.len() >= 32 {
+                        reject("Too many pending Due interactions");
+                        break Some((ErrorKind::Protocol, "Codex exceeded the 32 pending interaction limit".into()));
+                    }
+                    turn.requests.insert(key.clone(), request.id.clone());
+                    sink.interaction(key, json!({"provider":"codex", "id":request.id, "method":request.method, "params":request.params}));
+                }
+                Ok(Some(_)) => {},
+                Ok(None) => break Some((ErrorKind::Protocol, "Codex app-server exited".to_owned())),
+                Err(error) => break Some((ErrorKind::Protocol, error.to_string())),
+            },
+            command = commands.recv() => match command {
+                Some(Command::Start { id, prompt, reply }) => {
+                    if active.is_some() { let _ = reply.send(Err("A Codex turn is already running".into())); continue; }
+                    let now = tokio::time::Instant::now();
+                    let deadline = match turn_timeout {
+                        None => None,
+                        Some(duration) => match now.checked_add(duration) {
+                            Some(deadline) => Some(deadline),
+                            None => { let _ = reply.send(Err("Turn timeout exceeds the clock range".into())); continue; }
+                        }
+                    };
+                    active = Some(Active { id: id.clone(), native_id: None, answer: None, usage: None,
+                        requests: HashMap::new(), early: Vec::new(), early_bytes: 0, started: Instant::now(), deadline });
+                    let mut params = TurnStartParams::text(&thread_id, prompt);
+                    if let Some(effort) = &effort { params = params.effort(effort); }
+                    let turn_handle = handle.clone();
+                    let responses = sender.clone();
+                    let turn_sink = sink.clone();
+                    tokio::spawn(async move {
+                        // Keep the entire response; the typed helper retains only Turn.
+                        let result = match serde_json::to_value(params) {
+                            Ok(params) => turn_handle.request("turn/start", params).await.map_err(|error| report_rpc_error(error, &turn_sink, Some(&id))),
+                            Err(error) => Err(format!("Invalid Codex turn/start parameters: {error}")),
+                        };
+                        let _ = responses.send(Command::Started { id, result }).await;
+                    });
+                    let _ = reply.send(Ok(()));
+                }
+                Some(Command::Started { id, result }) => {
+                    let response = match result {
+                        Ok(response) => response,
+                        Err(error) => break Some((ErrorKind::Provider, error)),
+                    };
+                    sink.item("native_response", json!({"provider":"codex", "method":"turn/start", "response":response}), Some(&id));
+                    // The completion notification may precede the start response.
+                    let Some(turn) = active.as_mut().filter(|turn| turn.id == id) else { continue; };
+                    match serde_json::from_value::<Turn>(response.get("turn").cloned().unwrap_or(Value::Null)) {
+                        Ok(native) => {
+                            turn.native_id = Some(native.id.clone());
+                            let early = std::mem::take(&mut turn.early);
+                            turn.early_bytes = 0;
+                            for notification in early {
+                                if let Err(error) = observe(&notification, &thread_id, &mut active, &sink) {
+                                    break 'owner Some((ErrorKind::Protocol, error));
+                                }
+                            }
+                            if native.status != TurnStatus::InProgress
+                                && let Some(done) = active.take() {
+                                sink.finished(done.result(&thread_id, Some(native), None));
+                            }
+                        }
+                        Err(error) => break Some((ErrorKind::Protocol, format!("Codex turn/start returned no usable turn: {error}"))),
+                    }
+                }
+
+                Some(Command::Interrupt(reply)) => {
+                    if let Some(turn) = active.as_ref()
+                        && let Some(id) = turn.native_id.clone() {
+                        let control = handle.clone();
+                        let thread = thread_id.clone();
+                        let due_turn_id = turn.id.clone();
+                        let control_sink = sink.clone();
+                        tokio::spawn(async move {
+                            let result = control.turn_interrupt(&thread, &id).await.map_err(|error| report_rpc_error(error, &control_sink, Some(&due_turn_id)));
+                            if result.is_ok() {
+                                control_sink.item("interrupt_requested", json!({}), Some(&due_turn_id));
+                            }
+                            let _ = reply.send(result);
+                        });
+                    } else {
+                        let _ = reply.send(Err("No native turn ID yet; retry after turn_started".into()));
+                    }
+                }
+                Some(Command::Respond { id, response, reply }) => {
+                    let result = if !response.is_object() {
+                        Err("Codex interaction response must be a JSON object".into())
+                    } else if let Some(turn) = active.as_mut() {
+                        if let Some(native_id) = turn.requests.get(&id) {
+                            match handle.respond(native_id.clone(), response.clone()) {
+                                Ok(()) => {
+                                    sink.item("interaction_reply", json!({"request_id":id,"response":response}), Some(&turn.id));
+                                    turn.requests.remove(&id);
+                                    sink.resolved(&id);
+                                    Ok(())
+                                },
+                                Err(error) => Err(error.to_string()),
+                            }
+                        } else { Err("Unknown or resolved interaction ID".into()) }
+                    } else { Err("No turn is waiting for an interaction".into()) };
+                    let _ = reply.send(result);
+                }
+                Some(Command::Close) | None => break None,
+            }
+        }
+    };
+    // EOF shutdown lets Codex stop commands it placed in other process groups.
+    let cleanup = server.shutdown().await.map_err(|e| e.to_string());
+    if let Some(turn) = active.take() {
+        let error = match &failure {
+            Some((kind, message)) => RunError::new(*kind, message),
+            None => RunError::new(ErrorKind::Cancelled, "Codex session closed"),
+        };
+        sink.finished(turn.result(&thread_id, None, Some(error)));
+    }
+    if let Some((_, message)) = failure {
+        sink.failed(message);
+    }
+    if let Err(error) = &cleanup {
+        sink.failed(format!("Codex shutdown failed: {error}"));
+    }
+    cleanup
+}
+
+async fn deadline_elapsed(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn report_rpc_error(
+    error: codex_wrapper::Error,
+    sink: &EventSink,
+    turn_id: Option<&str>,
+) -> String {
+    if let codex_wrapper::Error::AppServerRpc {
+        method,
+        code,
+        message,
+        data,
+    } = &error
+    {
+        sink.item(
+            "native_response",
+            json!({"provider":"codex", "method":method, "error":{"code":code,"message":message,"data":data}}),
+            turn_id,
+        );
+    }
+    error.to_string()
+}
+
+fn request_key(id: &RequestId) -> String {
+    format!(
+        "codex:{}",
+        serde_json::to_string(id).expect("request IDs serialize")
+    )
+}
+
+fn notification_item(notification: &Notification) -> Value {
+    json!({"provider":"codex", "method":notification.method, "params":notification.params})
+}
+
+fn native_turn_id<'a>(
+    params: &Value,
+    thread_id: &str,
+    active: Option<&'a Active>,
+) -> Option<&'a str> {
+    if params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id != thread_id)
+    {
+        return None;
+    }
+    let turn = active?;
+    let native_id = params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))?;
+    (turn.native_id.as_deref() == Some(native_id)).then_some(turn.id.as_str())
+}
+
+fn observe(
+    notification: &Notification,
+    thread_id: &str,
+    active: &mut Option<Active>,
+    sink: &EventSink,
+) -> Result<(), String> {
+    let params = &notification.params;
+    if params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id != thread_id)
+    {
+        return Ok(());
+    }
+    let Some(turn) = active.as_mut() else {
+        return Ok(());
+    };
+    // Wait for the authoritative start response, retaining early notifications.
+    // Otherwise a late usage event from the previous turn could select its ID.
+    if turn.native_id.is_none() {
+        let bytes = params.to_string().len();
+        if turn.early.len() >= 256 || turn.early_bytes.saturating_add(bytes) > 1024 * 1024 {
+            return Err("Codex start response lagged beyond the early-event limit".into());
+        }
+        turn.early_bytes += bytes;
+        turn.early.push(notification.clone());
+        return Ok(());
+    }
+    let native_id = params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .or_else(|| params.pointer("/turn/id").and_then(Value::as_str));
+    if let Some(id) = native_id
+        && !turn.matches(id)
+    {
+        return Ok(());
+    }
+    if notification.method == "serverRequest/resolved"
+        && let Some(id) = params.get("requestId")
+    {
+        let key = format!("codex:{id}");
+        if turn.requests.remove(&key).is_none() {
+            return Ok(());
+        }
+        sink.resolved(&key);
+    }
+    // Publish only after correlation, including when replaying early messages.
+    sink.event(notification_item(notification));
+    if let Some(message) = notification.agent_message()
+        && message.is_final_answer()
+    {
+        if message.text.len() > MAX_ANSWER {
+            return Err("Codex answer exceeded the 4 MiB spike limit".into());
+        }
+        turn.answer = Some(message.text);
+    }
+    if notification.method == "thread/tokenUsage/updated" {
+        // `last` is the native per-turn counter; `total` includes earlier turns.
+        if let Some(usage) = params.pointer("/tokenUsage/last") {
+            turn.usage = Some(Usage {
+                input_tokens: usage.get("inputTokens").and_then(Value::as_u64),
+                cached_input_tokens: usage.get("cachedInputTokens").and_then(Value::as_u64),
+                cache_write_input_tokens: usage
+                    .get("cacheWriteInputTokens")
+                    .and_then(Value::as_u64),
+                output_tokens: usage.get("outputTokens").and_then(Value::as_u64),
+                reasoning_output_tokens: usage.get("reasoningOutputTokens").and_then(Value::as_u64),
+                total_tokens: usage.get("totalTokens").and_then(Value::as_u64),
+            });
+        }
+    }
+    if notification.method == "turn/completed" {
+        let completed = notification
+            .turn_completed()
+            .ok_or("Malformed Codex turn/completed notification")?;
+        if completed.thread_id != thread_id {
+            return Ok(());
+        }
+        let turn = active.take().expect("active turn");
+        sink.finished(turn.result(thread_id, Some(completed.turn), None));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn active() -> Active {
+        Active {
+            id: "due-turn".into(),
+            native_id: Some("native-turn".into()),
+            answer: Some("earlier answer".into()),
+            usage: None,
+            requests: HashMap::new(),
+            early: Vec::new(),
+            early_bytes: 0,
+            started: Instant::now(),
+            deadline: None,
+        }
+    }
+
+    #[test]
+    fn native_failure_and_interruption_are_not_successful_results() {
+        for (status, expected) in [
+            ("failed", "failed"),
+            ("interrupted", "cancelled"),
+            ("inProgress", "failed"),
+        ] {
+            let turn =
+                serde_json::from_value(json!({"id":"native-turn", "status":status})).unwrap();
+            let result = active().result("native-thread", Some(turn), None);
+            let value = serde_json::to_value(result).unwrap();
+            assert_eq!(value["status"], expected);
+            assert_eq!(value["session_id"], "native-thread");
+            assert_eq!(value["run_id"], "due-turn");
+            assert!(!value["error"].is_null());
+        }
+    }
+
+    #[test]
+    fn terminal_items_take_precedence_over_observed_final_message() {
+        let turn =
+            serde_json::from_value(json!({"id":"native-turn", "status":"completed", "items":[
+                {"type":"agentMessage", "phase":"commentary", "text":"working"},
+                {"type":"agentMessage", "phase":"final_answer", "text":"finished"}
+            ]}))
+            .unwrap();
+        let result = active().result("native-thread", Some(turn), None);
+        assert_eq!(result.text, "finished");
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn numeric_and_string_native_request_ids_cannot_collide() {
+        assert_ne!(
+            request_key(&RequestId::Number(1)),
+            request_key(&RequestId::String("1".into()))
+        );
+    }
+
+    #[test]
+    fn native_rpc_failure_keeps_structured_error_data() {
+        let sink = EventSink::new(Provider::Codex, "session".into(), None);
+        let data = json!({"reason":{"unknown":[{"keep":true}, 42]}});
+        let message = report_rpc_error(
+            codex_wrapper::Error::AppServerRpc {
+                method: "turn/start".into(),
+                code: -32000,
+                message: "rejected".into(),
+                data: Some(data.clone()),
+            },
+            &sink,
+            Some("due-turn"),
+        );
+        assert!(message.contains("rejected"));
+        let history = sink.items.read(0, 1).unwrap();
+        let item = &history["items"][0];
+        assert_eq!(item["turn_id"], "due-turn");
+        assert_eq!(item["kind"], "native_response");
+        assert_eq!(item["data"]["method"], "turn/start");
+        assert_eq!(
+            item["data"]["error"],
+            json!({"code":-32000,"message":"rejected","data":data})
+        );
+    }
+
+    #[test]
+    fn native_items_preserve_unknown_tool_fields() {
+        let params = json!({
+            "threadId":"native-thread", "turnId":"native-turn",
+            "item": {
+                "id":"tool-1", "type":"futureTool",
+                "input":{"nested":[1, {"futureFlag":true}]},
+                "output":{"content":[{"type":"futureContent", "bytes":[0, 255]}]},
+                "futureMetadata":{"trace":"unchanged"}
+            },
+            "futureEnvelopeField":{"keep":"me"}
+        });
+        let item = notification_item(&Notification {
+            method: "item/completed".into(),
+            params: params.clone(),
+        });
+        assert_eq!(item["params"], params);
+        assert_eq!(item["method"], "item/completed");
+    }
+
+    #[test]
+    fn session_items_only_claim_an_authoritatively_matched_turn() {
+        let mut turn = active();
+        let mut notification = Notification {
+            method: "item/completed".into(),
+            params: json!({"threadId":"native-thread", "turnId":"native-turn"}),
+        };
+        assert_eq!(
+            native_turn_id(&notification.params, "native-thread", Some(&turn)),
+            Some("due-turn")
+        );
+        assert_eq!(
+            native_turn_id(&notification.params, "native-thread", None),
+            None
+        );
+        notification.params["turnId"] = json!("previous-turn");
+        assert_eq!(
+            native_turn_id(&notification.params, "native-thread", Some(&turn)),
+            None
+        );
+        notification.params = json!({"threadId":"other-thread", "turnId":"native-turn"});
+        assert_eq!(
+            native_turn_id(&notification.params, "native-thread", Some(&turn)),
+            None
+        );
+        notification.params = json!({"threadId":"native-thread", "turn":{"id":"native-turn"}});
+        assert_eq!(
+            native_turn_id(&notification.params, "native-thread", Some(&turn)),
+            Some("due-turn")
+        );
+        turn.native_id = None;
+        assert_eq!(
+            native_turn_id(&notification.params, "native-thread", Some(&turn)),
+            None
+        );
+        notification.params = json!({"threadId":"native-thread"});
+        assert_eq!(
+            native_turn_id(&notification.params, "native-thread", Some(&active())),
+            None
+        );
+    }
+}

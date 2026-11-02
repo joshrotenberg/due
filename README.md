@@ -179,7 +179,38 @@ due trace summarize run.jsonl --output json
 | `127` | Provider executable not found |
 | `130` | Cancelled by Ctrl-C or Unix SIGTERM/SIGHUP |
 
-## Limits
+## Experimental resident sessions
+
+The opt-in `rpc` feature adds a direct JSON-RPC stdio interface:
+
+```sh
+cargo build --locked --features rpc
+./target/debug/due rpc
+```
+
+It exposes `session.open`, `turn.start`, `session.read`, interruption, interaction
+replies and close, with `session.item` streaming. It needs no initialization or
+tool envelopes. See the [RPC guide](docs/rpc.md) and
+[two-turn JavaScript client](examples/session-harness/rpc-example.mjs).
+
+An opt-in `mcp` feature adds resident Claude and Codex sessions over MCP stdio:
+
+```sh
+cargo build --locked --features mcp
+./target/debug/due mcp
+```
+
+It exposes seven JSON tools for session creation/resume, turn start/read/interrupt,
+interaction replies and close. One session and one active turn per process; no
+TOML configuration or daemon. Default builds and `due run` behavior are unchanged.
+Set `stream: true` on `session_open` for native item notifications; `session_read`
+provides bounded recovery across turns. See [the spike guide](docs/mcp.md) for
+examples, lifecycle, limits and validation.
+A [JavaScript harness example](examples/session-harness/README.md) compares CLI
+resume, resident MCP and resident RPC behind one scoped conversation API. The
+two resident adapters share the same session host; RPC-only builds omit MCP.
+
+## Limits of `due run`
 
 - One foreground turn per invocation. There is no daemon, queue, scheduler, MCP
   server, local session database, or interactive UI.
