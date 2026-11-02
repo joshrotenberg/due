@@ -510,6 +510,27 @@ fn notification_item(notification: &Notification) -> Value {
     json!({"provider":"codex", "method":notification.method, "params":notification.params})
 }
 
+// Never select one identity from a contradictory native envelope.
+fn notification_turn_id(params: &Value) -> Result<Option<&str>, String> {
+    // Notification params are opaque in the pinned wrapper. Preserve null as
+    // unspecified here; typed turn/completed decoding still requires Turn.id.
+    fn identity(value: Option<&Value>) -> Result<Option<&str>, String> {
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(id)) => Ok(Some(id.as_str())),
+            Some(_) => Err("Codex notification has malformed turn ID".to_owned()),
+        }
+    }
+    let top = identity(params.get("turnId"))?;
+    let nested = identity(params.pointer("/turn/id"))?;
+    if let (Some(top), Some(nested)) = (top, nested)
+        && top != nested
+    {
+        return Err("Codex notification has contradictory turn IDs".into());
+    }
+    Ok(top.or(nested))
+}
+
 fn native_turn_id<'a>(
     params: &Value,
     thread_id: &str,
@@ -523,10 +544,7 @@ fn native_turn_id<'a>(
         return None;
     }
     let turn = active?;
-    let native_id = params
-        .get("turnId")
-        .and_then(Value::as_str)
-        .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))?;
+    let native_id = notification_turn_id(params).ok()??;
     (turn.native_id.as_deref() == Some(native_id)).then_some(turn.id.as_str())
 }
 
@@ -598,10 +616,7 @@ fn observe(
     let Some(turn) = active.as_mut() else {
         return Ok(());
     };
-    let native_id = params
-        .get("turnId")
-        .and_then(Value::as_str)
-        .or_else(|| params.pointer("/turn/id").and_then(Value::as_str));
+    let native_id = notification_turn_id(params)?;
     if let Some(id) = native_id
         && !turn.matches(id)
     {

@@ -981,3 +981,133 @@ fn codex_limits_unanswered_early_requests_before_start_response() {
         }
     }
 }
+
+#[test]
+fn codex_contradictory_completion_ids_cannot_succeed() {
+    for early in [false, true] {
+        for prompt in [
+            "conflicting-completion",
+            "conflicting-reverse",
+            "conflicting-answer",
+            "conflicting-usage",
+        ] {
+            let mut client = Client::new(early);
+            let session = client.open("codex", true, None);
+            let turn = client.start(&session, prompt);
+            let result = client.finished(&session, &turn);
+            assert_eq!(result["status"], "failed", "{prompt}: {result}");
+            assert_eq!(result["error"]["kind"], "protocol", "{result}");
+            assert!(
+                result["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("contradictory turn IDs")
+            );
+            assert_eq!(result["text"], "accepted answer");
+            assert_eq!(result["usage"]["input_tokens"], 10);
+            assert_eq!(result["usage"]["output_tokens"], 2);
+            let records = client.ok("session.read", json!({"session_id":session}));
+            let raw = records["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| {
+                    item["kind"] == "native"
+                        && item["data"]["params"]["turnId"].is_string()
+                        && item["data"]["params"]["turn"]["id"].is_string()
+                        && item["data"]["params"]["turnId"] != item["data"]["params"]["turn"]["id"]
+                })
+                .expect("contradictory native evidence retained");
+            assert!(raw["turn_id"].is_null(), "{raw}");
+            client.close(&session);
+            client.eof();
+        }
+    }
+}
+
+#[test]
+fn codex_consistent_completion_ids_preserve_normal_correlation() {
+    for early in [false, true] {
+        for prompt in [
+            "matching-completion",
+            "nested-completion",
+            "stale-completion",
+        ] {
+            let mut client = Client::new(early);
+            let session = client.open("codex", true, None);
+            let turn = client.start(&session, prompt);
+            let result = client.finished(&session, &turn);
+            assert_eq!(result["status"], "succeeded", "{prompt}: {result}");
+            assert_eq!(
+                result["text"],
+                if prompt == "stale-completion" {
+                    "after stale"
+                } else {
+                    "accepted answer"
+                }
+            );
+            client.close(&session);
+            client.eof();
+        }
+    }
+}
+
+#[test]
+fn codex_malformed_identity_values_preserve_accepted_evidence() {
+    for early in [false, true] {
+        for slot in ["top", "nested"] {
+            for value in ["number", "array", "object", "boolean", "null"] {
+                for event in ["answer", "usage", "completion"] {
+                    // Turn.id is required by the pinned typed completion contract.
+                    if value == "null" && (slot != "nested" || event != "completion") {
+                        continue;
+                    }
+                    let prompt = format!("identity-{slot}-{value}-{event}");
+                    let mut client = Client::new(early);
+                    let session = client.open("codex", true, None);
+                    let turn = client.start(&session, &prompt);
+                    let result = client.finished(&session, &turn);
+                    assert_eq!(result["status"], "failed", "{prompt}: {result}");
+                    assert_eq!(result["error"]["kind"], "protocol");
+                    assert_eq!(result["text"], "accepted answer", "{prompt}: {result}");
+                    assert_eq!(result["usage"]["input_tokens"], 10);
+                    let records = client.ok("session.read", json!({"session_id":session}));
+                    let raw = records["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|i| {
+                            i["kind"] == "native" && i["data"]["params"]["fixtureIdentity"] == true
+                        })
+                        .expect("raw malformed evidence");
+                    if value != "null" {
+                        assert!(raw["turn_id"].is_null(), "{raw}");
+                    }
+                    client.close(&session);
+                    client.eof();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn codex_nullable_optional_identity_and_unrelated_payloads_remain_usable() {
+    for early in [false, true] {
+        for prompt in [
+            "identity-top-null-completion",
+            "identity-nested-null-usage",
+            "identity-top-number-foreign-answer",
+            "identity-nested-object-foreign-usage",
+            "identity-top-number-unknown-answer",
+        ] {
+            let mut client = Client::new(early);
+            let session = client.open("codex", true, None);
+            let turn = client.start(&session, prompt);
+            let result = client.finished(&session, &turn);
+            assert_eq!(result["status"], "succeeded", "{prompt}: {result}");
+            client.close(&session);
+            client.eof();
+        }
+    }
+}

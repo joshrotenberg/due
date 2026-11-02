@@ -97,6 +97,49 @@ begin() {
           ;;
       esac
       ;;
+    *'"identity-'*)
+      notify item/completed '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"type":"agentMessage","id":"accepted","text":"accepted answer","phase":"final_answer"}}'
+      notify thread/tokenUsage/updated '{"threadId":"'"$native"'","turnId":"'"$turn"'","tokenUsage":{"last":{"inputTokens":10,"outputTokens":2}}}'
+      value=123
+      case "$line" in
+        *array*) value='[]' ;; *object*) value='{}' ;; *boolean*) value=false ;; *null*) value=null ;;
+      esac
+      top='"'"$turn"'"'; nested="$value"; thread="$native"
+      case "$line" in *-top-*) top="$value"; nested='"'"$turn"'"' ;; esac
+      case "$line" in *-foreign-*) thread=foreign-thread ;; esac
+      params='{"threadId":"'"$thread"'","turnId":'"$top"',"turn":{"id":'"$nested"'},"fixtureIdentity":true'
+      case "$line" in
+        *-unknown-*) notify fixture/unknown '{"opaque":{"turnId":123,"turn":{"id":[]}},"future":null}' ;;
+        *-usage*) notify thread/tokenUsage/updated "$params"',"tokenUsage":{"last":{"inputTokens":999}}}' ;;
+        *-completion*) notify turn/completed '{"threadId":"'"$thread"'","turnId":'"$top"',"fixtureIdentity":true,"turn":{"id":'"$nested"',"status":"completed","items":[]}}' ;;
+        *) notify item/completed "$params"',"item":{"type":"agentMessage","id":"bad","text":"untrusted answer","phase":"final_answer"}}' ;;
+      esac
+      finish completed 'final answer'
+      ;;
+    *'"conflicting-completion"'*|*'"conflicting-reverse"'*|*'"conflicting-answer"'*|*'"conflicting-usage"'*|*'"matching-completion"'*|*'"nested-completion"'*|*'"stale-completion"'*)
+      notify item/completed '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"type":"agentMessage","id":"accepted","text":"accepted answer","phase":"final_answer"}}'
+      notify thread/tokenUsage/updated '{"threadId":"'"$native"'","turnId":"'"$turn"'","tokenUsage":{"last":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}}'
+      top="$turn" nested="$turn"
+      case "$line" in
+        *'"conflicting-completion"'*|*'"conflicting-answer"'*|*'"conflicting-usage"'*) nested=foreign-turn ;;
+        *'"conflicting-reverse"'*) top=foreign-turn ;;
+        *'"stale-completion"'*) top=foreign-turn; nested=foreign-turn ;;
+      esac
+      ids='"turnId":"'"$top"'",'
+      case "$line" in *'"nested-completion"'*) ids='' ;; esac
+      case "$line" in
+        *'"conflicting-answer"'*)
+          notify item/completed '{"threadId":"'"$native"'",'"$ids"'"turn":{"id":"'"$nested"'"},"item":{"type":"agentMessage","id":"bad","text":"untrusted answer","phase":"final_answer"}}'
+          ;;
+        *'"conflicting-usage"'*)
+          notify thread/tokenUsage/updated '{"threadId":"'"$native"'",'"$ids"'"turn":{"id":"'"$nested"'"},"tokenUsage":{"last":{"inputTokens":999}}}'
+          ;;
+        *)
+          notify turn/completed '{"threadId":"'"$native"'",'"$ids"'"turn":{"id":"'"$nested"'","items":[],"status":"completed","error":null}}'
+          ;;
+      esac
+      case "$line" in *'"stale-completion"'*) finish completed 'after stale' ;; esac
+      ;;
     *'"fail"'*) finish failed 'partial answer' ;;
     *) finish completed "turn $count" ;;
   esac
