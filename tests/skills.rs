@@ -5,6 +5,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
+// Copying a new executable must not overlap a fork/exec in another test thread.
+// CLOEXEC closes an inherited writable handle at exec, not at fork; that brief
+// inheritance can make Linux reject execution of the copy with ETXTBSY.
+static COPY_OR_SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn capture(command: &mut Command) -> Output {
+    let child = {
+        let _guard = COPY_OR_SPAWN.lock().unwrap();
+        command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    // The spawn has completed exec before releasing the lock. Process execution
+    // and output collection can still proceed concurrently with other tests.
+    child.wait_with_output().unwrap()
+}
+
 const SKILLS: &[&str] = &[
     "overview",
     "profiles",
@@ -28,7 +47,10 @@ impl Standalone {
         let binary = root
             .path()
             .join(format!("relocated-due{}", std::env::consts::EXE_SUFFIX));
-        fs::copy(env!("CARGO_BIN_EXE_due"), &binary).unwrap();
+        {
+            let _guard = COPY_OR_SPAWN.lock().unwrap();
+            fs::copy(env!("CARGO_BIN_EXE_due"), &binary).unwrap();
+        }
         for directory in ["cwd", "tmp"] {
             fs::create_dir(root.path().join(directory)).unwrap();
         }
@@ -36,17 +58,17 @@ impl Standalone {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(&self.binary)
-            .args(args)
-            .current_dir(self.root.path().join("cwd"))
-            .env_clear()
-            .env("PATH", "")
-            .env("TMPDIR", self.root.path().join("tmp"))
-            .env("TMP", self.root.path().join("tmp"))
-            .env("TEMP", self.root.path().join("tmp"))
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+        capture(
+            Command::new(&self.binary)
+                .args(args)
+                .current_dir(self.root.path().join("cwd"))
+                .env_clear()
+                .env("PATH", "")
+                .env("TMPDIR", self.root.path().join("tmp"))
+                .env("TMP", self.root.path().join("tmp"))
+                .env("TEMP", self.root.path().join("tmp"))
+                .stdin(Stdio::null()),
+        )
     }
 
     fn assert_no_files_written(&self) {
@@ -298,15 +320,15 @@ fn short_and_long_help_are_distinct_offline_for_each_command() {
     }
     for command in commands {
         let invoke = |help: &str| {
-            Command::new(env!("CARGO_BIN_EXE_due"))
-                .args(&command)
-                .arg(help)
-                .current_dir(root.path())
-                .env_clear()
-                .env("PATH", "")
-                .stdin(Stdio::null())
-                .output()
-                .unwrap()
+            capture(
+                Command::new(env!("CARGO_BIN_EXE_due"))
+                    .args(&command)
+                    .arg(help)
+                    .current_dir(root.path())
+                    .env_clear()
+                    .env("PATH", "")
+                    .stdin(Stdio::null()),
+            )
         };
         let short = invoke("-h");
         let long = invoke("--help");
