@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use super::{EventSink, OpenOptions};
+use super::{EventSink, MAX_EVENT_BYTES, MAX_EVENTS, OpenOptions};
 use crate::{
     cli::Provider,
     result::{ErrorKind, RunError, RunResult, Usage},
@@ -307,8 +307,7 @@ async fn drive_turn(
                         }
                         sink.item("native", json!({"provider":"claude", "event":turn.result}), Some(&id));
                         sink.event(json!({"provider":"claude", "event":turn.result}));
-                        let mut result = normalize(turn.result);
-                        if interrupted { result = result.fail(RunError::new(ErrorKind::Cancelled, "Turn interrupted")); }
+                        let result = normalize_turn(turn.result, &turn.events, interrupted);
                         break TurnEnd::Complete(result);
                     }
                     Err(error) => {
@@ -453,6 +452,163 @@ fn respond(
     Ok(())
 }
 
+#[derive(Default)]
+struct PartialMessage<'a> {
+    id: Option<&'a str>,
+    last_text_block: Option<u64>,
+}
+
+/// Only used on the wrapper's completed, turn-local event list. Native events
+/// remain untouched, including when the bounded text fallback is exhausted.
+#[derive(Default)]
+struct PartialText<'a> {
+    messages: Vec<PartialMessage<'a>>,
+    blocks: BTreeMap<(usize, u64), String>,
+    stream: Option<usize>,
+    bytes: usize,
+}
+
+impl<'a> PartialText<'a> {
+    fn message(&mut self, id: Option<&'a str>) -> Option<usize> {
+        if let Some(id) = id
+            && let Some(index) = self
+                .messages
+                .iter()
+                .position(|message| message.id == Some(id))
+        {
+            return Some(index);
+        }
+        if self.messages.len() == MAX_EVENTS {
+            return None;
+        }
+        self.messages.push(PartialMessage {
+            id,
+            last_text_block: None,
+        });
+        Some(self.messages.len() - 1)
+    }
+
+    fn text(&mut self, message: usize, block: u64, text: &str, replace: bool) {
+        // Empty snapshots must not erase text already supplied by deltas.
+        if text.is_empty() {
+            return;
+        }
+        let key = (message, block);
+        if !self.blocks.contains_key(&key) && self.blocks.len() == MAX_EVENTS {
+            return;
+        }
+        let value = self.blocks.entry(key).or_default();
+        if replace {
+            self.bytes -= value.len();
+            *value = String::new();
+        }
+        let mut end = text.len().min(MAX_EVENT_BYTES - self.bytes);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.push_str(&text[..end]);
+        self.bytes += end;
+    }
+
+    fn observe(&mut self, value: &'a Value) {
+        // Subagent envelopes share the native stream but are not the root answer.
+        if value
+            .get("parent_tool_use_id")
+            .is_some_and(|id| !id.is_null())
+        {
+            return;
+        }
+        match value["type"].as_str() {
+            Some("stream_event") => {
+                let event = &value["event"];
+                if event["type"] == "message_start" {
+                    self.stream = self.message(event["message"]["id"].as_str());
+                    return;
+                }
+                if !matches!(
+                    event["type"].as_str(),
+                    Some("content_block_start" | "content_block_delta")
+                ) {
+                    return;
+                }
+                let Some(block) = event["index"].as_u64() else {
+                    return;
+                };
+                let message = match self.stream {
+                    Some(message) => message,
+                    None => {
+                        let Some(message) = self.message(None) else {
+                            return;
+                        };
+                        self.stream = Some(message);
+                        message
+                    }
+                };
+                let content = if event["type"] == "content_block_start" {
+                    &event["content_block"]
+                } else {
+                    &event["delta"]
+                };
+                if matches!(content["type"].as_str(), Some("text" | "text_delta"))
+                    && let Some(text) = content["text"].as_str()
+                {
+                    self.messages[message].last_text_block = Some(block);
+                    self.text(message, block, text, false);
+                }
+            }
+            Some("assistant") => {
+                let Some(content) = value["message"]["content"].as_array() else {
+                    return;
+                };
+                let id = value["message"]["id"].as_str();
+                let message = if let Some(stream) = self.stream
+                    && (id.is_none() || self.messages[stream].id.is_none())
+                {
+                    self.messages[stream].id = id.or(self.messages[stream].id);
+                    Some(stream)
+                } else {
+                    self.message(id)
+                };
+                let Some(message) = message else { return };
+                for (index, block) in content.iter().enumerate() {
+                    if block["type"] == "text"
+                        && let Some(text) = block["text"].as_str()
+                    {
+                        // Claude can snapshot a single completed block, or the
+                        // whole message. A streamed single block keeps its index.
+                        let index = if content.len() == 1 {
+                            self.messages[message].last_text_block.unwrap_or(0)
+                        } else {
+                            index as u64
+                        };
+                        self.text(message, index, text, true);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn partial_text(events: &[Value]) -> String {
+    let mut text = PartialText::default();
+    for event in events {
+        text.observe(event);
+    }
+    text.blocks.into_values().collect()
+}
+
+fn normalize_turn(native: Value, events: &[Value], interrupted: bool) -> RunResult {
+    let mut result = normalize(native);
+    if result.text.is_empty() && (interrupted || result.error.is_some()) {
+        result.text = partial_text(events);
+    }
+    if interrupted {
+        result = result.fail(RunError::new(ErrorKind::Cancelled, "Turn interrupted"));
+    }
+    result
+}
+
 fn normalize(native: Value) -> RunResult {
     let mut result = RunResult::new(Provider::Claude);
     result.text = native
@@ -507,6 +663,185 @@ fn normalize(native: Value) -> RunResult {
 mod tests {
     use super::*;
     use crate::result::Status;
+
+    fn stream(event: Value) -> Value {
+        json!({"type":"stream_event", "event":event})
+    }
+
+    fn start_message(id: &str) -> Value {
+        stream(json!({"type":"message_start", "message":{"id":id}}))
+    }
+
+    fn text_delta(index: u64, text: &str) -> Value {
+        stream(json!({"type":"content_block_delta", "index":index,
+            "delta":{"type":"text_delta", "text":text}}))
+    }
+
+    fn assistant(id: &str, content: Value) -> Value {
+        json!({"type":"assistant", "message":{"id":id, "content":content}})
+    }
+
+    #[test]
+    fn partial_text_excludes_subagents_without_disrupting_root_stream() {
+        let mut nested = [
+            start_message("nested"),
+            text_delta(0, "Nested delta"),
+            assistant("nested", json!([{"type":"text", "text":"Nested answer"}])),
+        ];
+        for event in &mut nested {
+            event["parent_tool_use_id"] = json!("tool-agent");
+        }
+        let mut events = vec![start_message("root"), text_delta(0, "Root ")];
+        events.extend(nested);
+        events.push(text_delta(0, "answer"));
+        let mut snapshot = assistant("root", json!([{"type":"text", "text":"Root answer"}]));
+        snapshot["parent_tool_use_id"] = Value::Null;
+        events.push(snapshot);
+        assert_eq!(partial_text(&events), "Root answer");
+    }
+
+    #[test]
+    fn turn_fallback_preserves_successful_empty_answers_and_terminal_precedence() {
+        let events = [assistant("one", json!([{"type":"text", "text":"Partial"}]))];
+        let success = json!({"type":"result", "subtype":"success", "is_error":false, "result":""});
+        assert_eq!(normalize_turn(success.clone(), &events, false).text, "");
+        let cancelled = normalize_turn(success.clone(), &events, true);
+        assert_eq!(cancelled.text, "Partial");
+        assert!(matches!(cancelled.status, Status::Cancelled));
+        let mut failed = success.clone();
+        failed["subtype"] = json!("error_during_execution");
+        failed["is_error"] = json!(true);
+        let failed = normalize_turn(failed, &events, false);
+        assert_eq!(failed.text, "Partial");
+        assert!(matches!(failed.status, Status::Failed));
+        let mut authoritative = success;
+        authoritative["result"] = json!("Final answer");
+        assert_eq!(
+            normalize_turn(authoritative, &events, true).text,
+            "Final answer"
+        );
+    }
+
+    #[test]
+    fn partial_text_keeps_all_assistant_messages_and_only_text_blocks() {
+        let events = [
+            assistant(
+                "one",
+                json!([
+                    {"type":"text", "text":"same "},
+                    {"type":"thinking", "thinking":"private", "text":"not text"},
+                    {"type":"tool_use", "input":{"text":"tool input"}},
+                    {"type":"text", "text":"same "}
+                ]),
+            ),
+            json!({"type":"user", "message":{"content":[
+                {"type":"tool_result", "content":"tool output"},
+                {"type":"text", "text":"user text"}
+            ]}}),
+            assistant("two", json!([{"type":"text", "text":"same "}])),
+        ];
+        assert_eq!(partial_text(&events), "same same same ");
+    }
+
+    #[test]
+    fn partial_text_single_block_snapshots_replace_only_their_deltas() {
+        let events = [
+            start_message("one"),
+            text_delta(0, "draft one"),
+            assistant("one", json!([{"type":"text", "text":"First. "}])),
+            // Replayed snapshots for this block must not duplicate its text.
+            assistant("one", json!([{"type":"text", "text":"First. "}])),
+            stream(json!({"type":"content_block_start", "index":1,
+                "content_block":{"type":"thinking", "thinking":"hidden"}})),
+            stream(json!({"type":"content_block_delta", "index":1,
+                "delta":{"type":"thinking_delta", "thinking":"hidden"}})),
+            text_delta(2, "draft two"),
+            assistant("one", json!([{"type":"text", "text":"Second. "}])),
+            text_delta(3, "Unfinished. "),
+            // A later empty snapshot must not discard available text.
+            assistant("one", json!([{"type":"text", "text":""}])),
+            start_message("two"),
+            text_delta(0, "Next message."),
+        ];
+        assert_eq!(
+            partial_text(&events),
+            "First. Second. Unfinished. Next message."
+        );
+    }
+
+    #[test]
+    fn partial_text_cumulative_snapshot_replaces_each_streamed_block() {
+        let events = [
+            start_message("one"),
+            text_delta(0, "draft one"),
+            text_delta(2, "draft two"),
+            assistant(
+                "one",
+                json!([
+                    {"type":"text", "text":"same "},
+                    {"type":"tool_use", "input":{"text":"not answer"}},
+                    {"type":"text", "text":"same "}
+                ]),
+            ),
+            start_message("two"),
+            text_delta(0, "draft three"),
+            assistant("two", json!([{"type":"text", "text":"same "}])),
+        ];
+        assert_eq!(partial_text(&events), "same same same ");
+    }
+
+    #[test]
+    fn partial_text_delta_only_includes_block_starts_and_ignores_nontext_deltas() {
+        let events = [
+            // A missing message_start is tolerated for an otherwise valid delta.
+            text_delta(0, "First. "),
+            start_message("two"),
+            stream(json!({"type":"content_block_start", "index":0,
+                "content_block":{"type":"text", "text":"Second"}})),
+            text_delta(0, ". "),
+            stream(json!({"type":"content_block_delta", "index":1,
+                "delta":{"type":"input_json_delta", "partial_json":"tool input"}})),
+            text_delta(2, "Third."),
+        ];
+        assert_eq!(partial_text(&events), "First. Second. Third.");
+    }
+
+    #[test]
+    fn partial_text_without_message_ids_still_replaces_streamed_text() {
+        let events = [
+            text_delta(0, "draft"),
+            json!({"type":"assistant", "aborted":true,
+                "message":{"content":[{"type":"text", "text":"Available."}]}}),
+        ];
+        assert_eq!(partial_text(&events), "Available.");
+    }
+
+    #[test]
+    fn partial_text_uses_session_byte_and_item_limits_at_utf8_boundaries() {
+        let prefix = "a".repeat(MAX_EVENT_BYTES - 1);
+        let mut events = vec![
+            start_message("one"),
+            text_delta(0, &prefix),
+            text_delta(0, "é"),
+        ];
+        assert_eq!(partial_text(&events), prefix);
+        events.push(assistant(
+            "one",
+            json!([
+                {"type":"text", "text":"é".repeat(MAX_EVENT_BYTES)}
+            ]),
+        ));
+        assert_eq!(partial_text(&events), "é".repeat(MAX_EVENT_BYTES / 2));
+
+        let blocks: Vec<_> = (0..MAX_EVENTS + 1)
+            .map(|index| text_delta(u64::MAX - index as u64, "x"))
+            .collect();
+        assert_eq!(partial_text(&blocks), "x".repeat(MAX_EVENTS));
+        let messages: Vec<_> = (0..MAX_EVENTS + 1)
+            .map(|index| assistant(&index.to_string(), json!([{"type":"text", "text":"x"}])))
+            .collect();
+        assert_eq!(partial_text(&messages), "x".repeat(MAX_EVENTS));
+    }
 
     #[test]
     fn native_failure_cannot_become_success_through_text_or_partial_data() {

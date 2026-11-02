@@ -357,6 +357,112 @@ fn full_native_items_stream_during_a_held_turn_and_replay_losslessly() {
 }
 
 #[test]
+fn claude_interrupted_partial_text_is_preserved_once_and_scoped_to_turn() {
+    check_claude_interrupted_partial_text(false);
+}
+
+#[test]
+fn claude_interrupted_partial_text_prefers_nonempty_terminal_answer() {
+    check_claude_interrupted_partial_text(true);
+}
+
+fn check_claude_interrupted_partial_text(terminal_answer: bool) {
+    let mut client = Client::new(false);
+    let session = client.open("claude", true, None);
+    let mut outcomes = Vec::new();
+    for number in 1..=2 {
+        let partial = format!("Partial answer for turn {number}.\nStill incomplete.");
+        let terminal = if terminal_answer {
+            format!("Authoritative terminal answer for turn {number}.")
+        } else {
+            String::new()
+        };
+        let turn = client.start(
+            &session,
+            if terminal_answer {
+                "interrupted-partial-terminal"
+            } else {
+                "interrupted-partial-empty"
+            },
+        );
+        // Synchronize on the final text delta, not a sleep or the turn/start reply.
+        client.pushed_until(|item| {
+            item["session_id"] == session
+                && item["turn_id"] == turn
+                && item["kind"] == "native"
+                && item["data"]["event"]["type"] == "stream_event"
+                && item["data"]["event"]["event"]["delta"]["text"] == "Still incomplete."
+        });
+        assert_eq!(
+            client.ok(
+                "turn.interrupt",
+                json!({"session_id":session,"turn_id":turn}),
+            )["interrupt_requested"],
+            true
+        );
+        let outcome = client.finished(&session, &turn);
+        assert_eq!(outcome["status"], "cancelled", "{outcome}");
+        assert_eq!(outcome["error"]["kind"], "cancelled");
+        assert_eq!(outcome["run_id"], turn);
+        assert_eq!(outcome["session_id"], "native-claude");
+        assert_eq!(outcome["usage"]["input_tokens"], 10);
+        assert_eq!(outcome["usage"]["output_tokens"], 0);
+        assert!(outcome["usage"]["total_tokens"].is_null());
+        assert_eq!(outcome["cost_usd"], 0.01);
+        let read = client.ok("turn.read", json!({"session_id":session,"turn_id":turn}));
+        assert_eq!(read["state"], "finished");
+        assert_eq!(read["result"], outcome);
+
+        let replay = client.ok("session.read", json!({"session_id":session}));
+        assert_eq!(replay["items_lost"], false);
+        let events: Vec<_> = replay["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["turn_id"] == turn && item["kind"] == "native")
+            .map(|item| &item["data"]["event"])
+            .collect();
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"]["delta"]["type"] == "text_delta")
+            .map(|event| event["event"]["delta"]["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas.concat(), partial);
+        let assistant = events
+            .iter()
+            .find(|event| event["type"] == "assistant")
+            .expect("aborted assistant snapshot must be retained");
+        assert_eq!(assistant["aborted"], true);
+        assert_eq!(assistant["message"]["content"][0]["type"], "thinking");
+        assert_eq!(assistant["message"]["content"][1]["type"], "tool_use");
+        assert_eq!(assistant["message"]["content"][2]["text"], partial);
+        let native_result = events
+            .iter()
+            .find(|event| event["type"] == "result")
+            .expect("native terminal result must be retained");
+        assert_eq!(native_result["subtype"], "success");
+        assert_eq!(native_result["is_error"], false);
+        assert_eq!(native_result["terminal_reason"], "aborted_streaming");
+        assert_eq!(native_result["usage"]["output_tokens"], 0);
+        assert_eq!(native_result["result"], terminal);
+        outcomes.push((outcome, if terminal_answer { terminal } else { partial }));
+    }
+    let next = client.start(&session, "ordinary");
+    let completed = client.finished(&session, &next);
+    assert_eq!(completed["status"], "succeeded");
+    assert_eq!(completed["text"], "turn 3");
+    client.close(&session);
+    client.eof();
+
+    // Exercise the follow-up and cleanup even on the unfixed adapter. Exact text
+    // rejects duplicated deltas/snapshots, tool/thinking text and prior-turn text.
+    for (outcome, expected) in outcomes {
+        assert_eq!(outcome["text"], expected, "{outcome}");
+    }
+}
+
+#[test]
 fn pending_long_poll_does_not_block_interrupt_or_its_response() {
     for provider in ["claude", "codex"] {
         let mut client = Client::new(false);

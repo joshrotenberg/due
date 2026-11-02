@@ -24,6 +24,7 @@ interrupt_id=
 held_ack=
 held_ack_error=0
 late_mode=
+claude_partial_mode=
 native="native-$provider"
 turn=turn-0
 
@@ -52,16 +53,46 @@ finish() {
   fi
 }
 
+finish_claude_partial() {
+  active=0
+  pending=0
+  local text=''
+  if [ "$claude_partial_mode" = terminal ]; then text="Authoritative terminal answer for turn $count."; fi
+  emit '{"type":"assistant","session_id":"'"$native"'","aborted":true,"message":{"id":"message-'"$count"'","role":"assistant","content":[{"type":"thinking","thinking":"thinking must not leak"},{"type":"tool_use","id":"tool-partial","name":"Read","input":{"text":"tool input must not leak"}},{"type":"text","text":"Partial answer for turn '"$count"'.\nStill incomplete."}]}}'
+  emit '{"type":"result","subtype":"success","is_error":false,"result":"'"$text"'","terminal_reason":"aborted_streaming","session_id":"'"$native"'","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":0}}'
+}
+
 begin() {
   count=$((count + 1))
   turn="turn-$count"
   active=1
   startup_permission=0
   late_mode=
+  claude_partial_mode=
   case "$line" in *'"late-ack"'*) late_mode=success ;; *'"late-error"'*) late_mode=error ;; esac
   case "$line" in *'"startup-ask"'*) startup_permission=1 ;; esac
   if [ "$provider" = claude ]; then
     emit '{"type":"system","subtype":"init","session_id":"'"$native"'","fixtureInit":{"tools":["Read"],"unknown":true}}'
+    case "$line" in
+      *'"interrupted-partial-empty"'*) claude_partial_mode=empty ;;
+      *'"interrupted-partial-terminal"'*) claude_partial_mode=terminal ;;
+    esac
+    if [ -n "$claude_partial_mode" ]; then
+      if [ "$partial_messages" = 1 ]; then
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"message_start","message":{"id":"message-'"$count"'","role":"assistant","content":[]}}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thinking must not leak"}}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_stop","index":0}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool-partial","name":"Read","input":{}}}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"text\":\"tool input must not leak\"}"}}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_stop","index":1}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Partial answer for turn '"$count"'.\n"}}}'
+        emit '{"type":"stream_event","session_id":"'"$native"'","event":{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Still incomplete."}}}'
+      fi
+      # Leave the text block open; only an RPC interrupt emits the snapshot/result.
+      return
+    fi
     emit '{"type":"assistant","session_id":"'"$native"'","message":{"role":"assistant","content":[{"type":"text","text":"working"},{"type":"tool_use","id":"tool-fixture","name":"Read","input":{"file_path":"fixture.txt"}}]},"fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}'
   else
     start_response='{"turn":{"id":"'"$turn"'","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null},"fixtureResponse":{"unknown":[1,{"keep":true}]}}'
@@ -204,7 +235,10 @@ while IFS= read -r line; do
         [[ "$line" =~ $request_re ]]
         request_id="${BASH_REMATCH[1]}"
         emit '{"type":"control_response","response":{"subtype":"success","request_id":"'"$request_id"'","response":{}}}'
-        if [ "$active" = 1 ]; then finish interrupted 'interrupted'; fi
+        if [ "$active" = 1 ]; then
+          if [ -n "$claude_partial_mode" ]; then finish_claude_partial
+          else finish interrupted 'interrupted'; fi
+        fi
         ;;
       *'"type":"control_response"'*)
         if [ "$pending" = 1 ]; then
