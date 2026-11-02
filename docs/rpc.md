@@ -229,6 +229,30 @@ Claude wrapper retains native turn events without a configurable byte cap.
 Pending native requests are capped at 32. Claude's native cost is a session
 total, including spend restored on resume; Codex cost remains absent.
 
+## Rust host and language client
+
+The current split has two responsibilities:
+
+- The Rust session host owns native provider processes, turn admission,
+  permission-request correlation, normalized results, bounded journals and
+  provider cleanup. The RPC adapter adds framing, request dispatch and pushed
+  session items. Codex notification turn IDs must agree before a payload can
+  update a turn; rejected payloads remain observable as unattributed native
+  evidence.
+- The language client owns the Due child, request IDs, stream consumption,
+  recovery, caller callbacks, caller wait policy and saved receipts. It must
+  propagate session failures even between turns, stop starting permission
+  callbacks after failure, and preserve evidence through cleanup. Parsed values
+  also inherit that language's representation limits.
+
+The Node example is a small standalone client of this contract. An eventual
+embedded JavaScript or Lua client could use the same session operations through
+stdio or an in-process binding to the Rust host. The session host should remain
+the authority for provider lifecycle and turn state in either arrangement.
+Embedding, a public Rust library and a packaged client are future choices; this
+spike does not implement them or choose a language engine. Workflow composition
+can remain ordinary caller code over the session API.
+
 ## Checking the spike
 
 ```sh
@@ -353,3 +377,57 @@ Offline checks separately exercised short finite waits, delayed turns with
 waiting disabled, and cancellation. All 146 client tests passed, and both
 README JavaScript examples passed syntax checks. These observations establish
 the public caller workflow on local macOS; they are not a timing benchmark.
+
+## Backlog and edge-case work (2026-11-02)
+
+The RPC-only snapshot `f08d093` ran two resident coding conversations on macOS:
+Claude Code 2.1.316 (`sonnet`) and Codex CLI 0.165.0 (`gpt-6-astra`), both with
+requested medium effort. Each completed four turns through one Due process and
+one native session, using the committed Node client with `turnWaitMs: null`.
+Three Claude turns exceeded five minutes while the caller actively monitored
+work and permission requests. These were different assignments, not a provider
+performance comparison.
+
+Backlog triage confirmed that the reported fixes for [#29](https://github.com/joshrotenberg/due/issues/29),
+[#30](https://github.com/joshrotenberg/due/issues/30) and
+[#31](https://github.com/joshrotenberg/due/issues/31) were already in the checkout.
+The workers used those failure themes to investigate the resident host and client:
+
+- Codex reproduced contradictory native turn IDs producing a successful result.
+  The host now rejects conflicting or malformed supplied IDs before they update
+  accepted answer/usage state. Raw rejected evidence remains available without
+  being attributed to the active turn. Missing and optional null identities,
+  normal early delivery, and unrelated threads retain their intended behavior.
+- Claude reproduced invalid UTF-8 being silently replaced and permission
+  callbacks starting after a fatal client error. Strict decoding now rejects
+  corrupted frames; failed/closing sessions do not start new decisions, while
+  item draining preserves cleanup evidence.
+- An independent actual-Due/fake-native probe showed that a `session_failed`
+  between turns could be ignored by the client. It now fails the scope and keeps
+  the failure receipt without rewriting an earlier successful turn.
+- Large JSON integers exposed a language representation limit: parsed JavaScript
+  values can round native numbers. The client now retains bounded original
+  `stdout.bin` bytes before decoding, alongside its parsed convenience views.
+  A real 64 MiB capture-overflow regression verifies failure and cleanup.
+- Codex's client review and an independent caller probe found descriptor leaks
+  when an artifact already existed. Prelaunch resource acquisition now closes
+  descriptors opened by that attempt if a later open or synchronous spawn fails.
+  Existing evidence remains unchanged.
+
+The caller captured 3276 Claude items and 1907 Codex items, with continuous
+cursors, zero reported push drops, no omitted items and both final
+`session_closed` records. Claude received 15 explicit permission replies:
+14 allowed and one denied; after the denial it revised the proposed edit in the
+same turn. Codex inherited native settings and asked for no permission replies;
+its thread response reported `approvalPolicy: never` and `dangerFullAccess`.
+This run does not establish equivalence between provider permission policies.
+Both Due processes exited 0 without forced kills, body errors or cleanup errors.
+Neither client polled `turn.read` or `session.read`.
+
+Live coding used the original `f08d093` transport/client; the discovered defects
+and final repairs were exercised with deterministic fake peers. Final local
+checks passed 177 default Rust tests, 220 RPC-enabled Rust tests and 104 Node
+client tests, plus formatting, clippy, Rust 1.90 checks and release builds.
+Independent review corrected malformed-ID handling and strengthened request-log
+and split-Unicode assertions. These observations cover local macOS behavior;
+no hosted or other-platform acceptance is implied.
