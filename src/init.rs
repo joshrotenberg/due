@@ -32,7 +32,8 @@ pub enum Host {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  due init --dry-run\n  due init --host codex\n  due init --host claude --install-dir /path/to/due-plugin\n  due init --dry-run --output json\n\nEmbeds the delegate skill for one-shot or supervised assignments and registers a local marketplace.\nThe skill discovers commands and guidance from the installed Due binary.\nDry-run starts no host process and writes no files. Apply starts no model work.\nKeep due on PATH; init does not copy the binary, change permissions, or manage auth.\nAfter installation or updates, reload plugins or start a fresh host session."
+    after_help = crate::help::SHORT,
+    after_long_help = crate::help::INIT
 )]
 pub struct InitArgs {
     /// Preview files and native commands without writing or starting a host.

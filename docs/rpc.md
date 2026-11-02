@@ -1,5 +1,8 @@
 # JSON-RPC stdio
 
+The installed reference is available offline with `due skills show rpc`.
+Use `due -h` for available commands and `due COMMAND --help` for detailed examples.
+
 Normal Due builds include the resident RPC interface. Launch it as a child process:
 
 ```sh

@@ -1,5 +1,6 @@
 mod cli;
 mod contracts;
+mod help;
 mod init;
 mod providers;
 mod request;

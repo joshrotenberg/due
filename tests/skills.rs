@@ -6,9 +6,13 @@ use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
 const SKILLS: &[&str] = &[
+    "overview",
+    "profiles",
     "run",
     "contracts",
     "observe",
+    #[cfg(feature = "rpc")]
+    "rpc",
     #[cfg(feature = "harness")]
     "supervise",
 ];
@@ -249,21 +253,18 @@ fn help_exposes_run_and_skills_routes_without_a_provider() {
 }
 
 #[test]
-fn standalone_run_guide_profile_matches_the_example() {
+fn standalone_profile_guide_matches_the_workspace_example() {
     let standalone = Standalone::new();
-    let output = standalone.run(&["skills", "show", "run"]);
+    let output = standalone.run(&["skills", "show", "profiles"]);
     success(&output);
     let guide = String::from_utf8(output.stdout).unwrap();
-    let profile_section = guide
-        .split_once("For persistent unattended Codex work, save this exact JSON as")
-        .expect("run guide must teach the persistent profile")
-        .1;
-    let profile_json = profile_section
-        .split_once("```json\n")
-        .and_then(|(_, rest)| rest.split_once("\n```"))
-        .expect("run guide must include standalone profile JSON")
-        .0;
-    let embedded: Value = serde_json::from_str(profile_json).unwrap();
+    let embedded: Value = guide
+        .split("```json\n")
+        .skip(1)
+        .filter_map(|block| block.split_once("\n```").map(|(json, _)| json))
+        .filter_map(|json| serde_json::from_str::<Value>(json).ok())
+        .find(|value| value["provider"] == "codex" && value["native_args"].is_array())
+        .expect("profile guide must ship the full workspace profile");
     let example: Value = serde_json::from_slice(
         &fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/codex-workspace-profile.json"),
@@ -273,4 +274,49 @@ fn standalone_run_guide_profile_matches_the_example() {
     .unwrap();
     assert_eq!(embedded, example);
     standalone.assert_no_files_written();
+}
+
+#[test]
+fn short_and_long_help_are_distinct_offline_for_each_command() {
+    let root = tempfile::tempdir().unwrap();
+    let mut commands: Vec<Vec<&str>> = vec![
+        vec![],
+        vec!["run"],
+        vec!["init"],
+        vec!["skills"],
+        vec!["skills", "list"],
+        vec!["skills", "show"],
+        vec!["schema"],
+        vec!["trace"],
+        vec!["trace", "summarize"],
+    ];
+    if cfg!(feature = "rpc") {
+        commands.push(vec!["rpc"]);
+    }
+    if cfg!(feature = "harness") {
+        commands.push(vec!["script"]);
+    }
+    for command in commands {
+        let invoke = |help: &str| {
+            Command::new(env!("CARGO_BIN_EXE_due"))
+                .args(&command)
+                .arg(help)
+                .current_dir(root.path())
+                .env_clear()
+                .env("PATH", "")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let short = invoke("-h");
+        let long = invoke("--help");
+        success(&short);
+        success(&long);
+        assert!(
+            long.stdout.len() > short.stdout.len(),
+            "long help adds no detail for {command:?}"
+        );
+        assert_ne!(short.stdout, long.stdout, "identical help for {command:?}");
+    }
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }

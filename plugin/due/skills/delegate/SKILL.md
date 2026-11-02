@@ -1,42 +1,39 @@
 ---
 name: delegate
-description: Delegate bounded coding work to Claude Code or Codex through Due, using a one-shot run or a supervised resident assignment when the user requests delegation or an independent worker would help authorized work.
+description: Delegate bounded, authorized coding work to Claude Code or Codex through the installed Due CLI, as an independent super-subagent whose result the caller verifies.
 ---
 
 # Delegate with Due
 
-This plugin is an entry point to Due's built-in guidance. The `due` executable
-must be installed on PATH; the selected provider CLI must also be available.
+Due runs a separate Claude Code or Codex session on a bounded assignment and
+returns its result. Treat it as a super-subagent: it works independently inside
+the scope you give it, and you review the outcome. This plugin only points to the
+installed `due` executable; the executable's help and guides are the source of
+truth for that version.
 
-1. Check `due --version` and `due --help`. If Due is unavailable, report the
-   missing prerequisite. Use the installed binary's commands and guidance.
-2. Run `due skills` to discover the installed guides. Read `run` for one bounded
-   turn or CLI resume, and `supervise` for a resident assignment with streaming,
-   permission decisions, interruption, or independent verify/revise steps.
-   Read `contracts` for one-shot result/answer semantics and `observe` for run traces.
-3. Check `due run --help` or `due script --help` for the chosen interface. Normal
-   builds embed JavaScript; no Node runtime is needed. A custom client may use
-   `due rpc` directly. Use only commands exposed by the installed version.
-4. Honor the user's provider choice. Prepare a self-contained assignment with
-   its workspace, deliverables, constraints and acceptance criteria. Carry its
-   exact scope and authorization into every turn; delegation does not grant
-   external actions or recursive delegation. Use JSON input and result contracts.
-5. For a script, choose caller-owned verifier commands and a new evidence directory.
-   Await operations and cancellation cleanup. Native profile permissions do not
-   sandbox the script's host commands. Keep permission decisions explicit.
-6. Inspect results and independently verify the relevant diff, artifacts and checks
-   before reporting completion. A worker's success report is evidence to review,
-   not proof that the requested work is correct or external effects occurred.
+You own the scope and the acceptance. Honor the provider the user chose. State the
+workspace, deliverables, constraints and stopping condition, and carry the user's
+existing authorization into the task without widening it. Delegation does not
+grant external actions or recursive delegation. A worker's success report is
+evidence to check against the actual diff, artifacts and tests, not proof.
 
-Keep detailed procedures in the binary's guides. Use native passthrough only
-for a provider option needed by this assignment and supported by its CLI.
+Discover what this build offers, progressively and only as needed:
 
-Report reproducible Due defects or confusing behavior using
-the [issue-reporting guide](https://github.com/joshrotenberg/due/blob/main/docs/dogfooding.md).
-Preserve the exit status, Due/provider versions, available source commit, and a
-minimal sanitized reproduction. Submit an issue when the user's scope authorizes
-issue filing; otherwise provide a draft. Inspect partial effects before any
-follow-up. Do not include credentials, private task content, or raw provider logs.
+```sh
+due -h                          # Short help: commands available in this build
+due --help                      # Long help: examples and cross-references
+due COMMAND --help              # Options for run, script, rpc, skills, ...
+due skills list --output json   # Guides installed with this binary
+due skills show NAME            # One guide; start with: due skills show overview
+```
 
-The former mandatory source-trial and A/B workflow is retired. This skill does not
-require Due-only delegation, periodic comparisons, or reports for every call.
+Read only the guide the task needs. `due skills show overview` helps choose
+between a one-shot run and a resident session. Commands or guides that do not
+appear in `due -h` or `due skills` are not part of the installed build; do not
+assume them or invent flags.
+
+If `due` is not on PATH, report the missing prerequisite. The selected provider
+CLI must also be installed and authenticated by the user.
+
+For setup, troubleshooting or reporting a Due problem, read the installed
+`overview` guide.
