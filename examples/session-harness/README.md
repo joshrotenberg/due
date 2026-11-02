@@ -71,6 +71,56 @@ bounded shutdown. A finite client wait expiring fails the scope and starts
 cleanup; it does not automatically retry or resume. This option is not sent to
 the provider and does not change `due run`.
 
+An unlimited wait relies on active monitoring and cancellation if a healthy
+native turn stays running. Native or transport failures, and a native
+`profile.timeout`, can still settle the turn. A finite `turnWaitMs` is not an
+interrupt-and-continue operation: when it expires, the scope ends and waits for
+cleanup. The client does not restart or resume that session automatically.
+
+A monitored two-turn Claude conversation in one scope, with
+`onItem` receiving every full observed item (also saved in `items.jsonl`):
+save this as an `.mjs` file beside `session.mjs`, replace the project/artifact
+paths, and run it from the repository root.
+
+```js
+import { withSession } from './session.mjs';
+
+const controller = new AbortController();
+const stop = () => controller.abort();
+process.once('SIGINT', stop);
+try {
+  const results = await withSession({
+    backend: 'rpc',
+    dueBinary: './target/release/due',
+    profile: { provider: 'claude', cwd: '/path/to/project' },
+    artifactDir: '/path/to/fresh-session',
+    maxTurns: 2,
+    turnWaitMs: null, // Unlimited client wait; the caller monitors and can abort.
+    signal: controller.signal,
+    onItem: record => { console.log(JSON.stringify(record)); },
+    onInteraction: async (record, signal) => {
+      signal.throwIfAborted();
+      // Conservative: deny every approval request. This is not a sandbox and does
+      // not restrict native tools that are already allowed.
+      return { behavior: 'deny', message: 'Not approved by this caller.' };
+    },
+  }, async agent => {
+    const first = await agent.turn({ id: 'first', prompt: 'Inspect the project and summarize it.' });
+    if (first.status !== 'succeeded') return [first];
+    const second = await agent.turn({ id: 'second', prompt: 'Now list the three riskiest files.' });
+    return [first, second];
+  });
+  for (const result of results) {
+    if (result.status !== 'succeeded') {
+      throw new Error(result.error?.message ?? `Claude turn ${result.status}`);
+    }
+    console.error(`Claude turn ${result.status}`); // Keep stdout as JSON items.
+  }
+} finally {
+  process.off('SIGINT', stop);
+}
+```
+
 ## What changes between backends
 
 | | `resume` | `resident` | `rpc` |

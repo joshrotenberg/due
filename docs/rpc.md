@@ -262,3 +262,26 @@ and the pre-fix client; the final example changes were verified offline. These
 are local macOS observations, not a performance comparison or evidence of other
 platforms' native process behavior. At that point the checked-in example still
 used a fixed terminal wait; that trial did not change it.
+
+## Committed-client acceptance (2026-11-02)
+
+The client at `b146fd6` completed two real Claude coding turns using the
+repository's unmodified `withSession`, `turnWaitMs: null`, and `onInteraction`.
+Claude Code 2.1.316 (`sonnet`, medium effort) reviewed the wait change, ran the
+two delayed-turn acceptance tests, and added a monitored-caller documentation
+example in a disposable checkout. One Due process and one native Claude session
+ID covered both turns. Both succeeded; close exited 0 with no forced kill,
+restart, resume, body error or cleanup error.
+
+The caller retained 663 items with continuous cursors, zero reported push drops,
+no omitted items or native loss markers, and the final session-closed item.
+It sent one `session.open`, two `turn.start`, five `interaction.reply` requests
+and one `session.close`, with no polling. Permissions used the committed
+callback API; no private client or transport patch was loaded.
+
+The receipt recorded `turn_wait_ms: null`. The turns took about 203 and 196
+seconds, respectively, so neither exceeded the previous five-minute default.
+Offline checks separately exercised short finite waits, delayed turns with
+waiting disabled, and cancellation. All 146 client tests passed, and both
+README JavaScript examples passed syntax checks. These observations establish
+the public caller workflow on local macOS; they are not a timing benchmark.
