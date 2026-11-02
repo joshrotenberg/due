@@ -142,6 +142,7 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
     if (!closing && !fatal) fail(new Error(`Due ${label} exited ${code ?? term}`));
     exited.resolve();
   });
+  const getReceipt = () => ({ processes: [{ ...record }], native_session_id: nativeId ?? null, execution_error: fatal });
   async function close() {
     if (closePromise) return closePromise;
     closing = true;
@@ -163,9 +164,8 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
         jsonFile(join(artifactDir, 'resident-exit.json'), { ...record, error: (cleanupError ?? fatal)?.message ?? null });
       }
       if (cleanupError) throw cleanupError;
-      if (fatal) throw fatal;
       if (record.exit_code !== 0 || record.signal) throw new Error(`Due ${label} exited ${record.exit_code ?? record.signal}`);
-      return { processes: [{ ...record }], native_session_id: nativeId ?? null };
+      return getReceipt();
     })();
     return closePromise;
   }
@@ -200,6 +200,7 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
       } finally { active = null; }
     },
     close,
+    getReceipt,
   };
   try {
     if (transport === 'mcp') {
@@ -217,6 +218,7 @@ async function openPersistent({ dueBinary, profile, artifactDir, onItem = () => 
   } catch (error) {
     fail(error);
     try { await close(); } catch (cleanup) { if (cleanup !== error) error.cleanup = cleanup.message; }
+    error.sessionReceipt = getReceipt();
     throw error;
   }
 }

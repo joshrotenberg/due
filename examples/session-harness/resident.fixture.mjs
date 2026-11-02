@@ -62,7 +62,7 @@ input.on('line', line => {
 });
 function finish() {
   if (directory) writeFileSync(join(directory, 'fixture-exited'), 'closed\n');
-  process.stdout.end(() => process.exit(0));
+  process.stdout.end(() => process.exit(mode === 'cleanup-failure' ? 7 : 0));
 }
 input.on('close', finish);
 process.on('SIGINT', finish);

@@ -46,6 +46,15 @@ export async function withSession(options, body) {
     events: { count: 0, bytes: 0 }, processes: [], body_error: null, cleanup_error: null };
   let backend, pending, closed = false, value, failure, nativeId;
   const used = new Set();
+  function retain(snapshot, cleanupError) {
+    if (!snapshot) return;
+    receipt.processes = snapshot.processes;
+    nativeId ??= snapshot.native_session_id;
+    if (!failure && snapshot.execution_error && snapshot.execution_error !== cleanupError) {
+      failure = asError(snapshot.execution_error);
+      receipt.body_error = describe(failure);
+    }
+  }
   function item(record) {
     const line = Buffer.from(`${JSON.stringify(record)}\n`);
     if (receipt.events.bytes + line.length > 64 * 1024 * 1024) throw new Error('session transcript exceeds 64 MiB');
@@ -113,14 +122,17 @@ export async function withSession(options, body) {
   } catch (error) {
     failure = asError(error);
     receipt.body_error = describe(error);
+    retain(error?.sessionReceipt);
+    if (error?.cleanup) receipt.cleanup_error = error.cleanup;
   } finally {
     closed = true;
     if (failure || pending) controller.abort(failure ?? new Error('scope closed'));
     if (pending) await pending.catch(() => {});
     const closing = performance.now();
     try {
-      if (backend) receipt.processes = (await backend.close()).processes;
+      if (backend) retain(await backend.close());
     } catch (error) {
+      retain(backend?.getReceipt?.(), error);
       receipt.cleanup_error = describe(error);
       failure = failure ? new AggregateError([failure, asError(error)], 'session body and cleanup failed') : asError(error);
     }

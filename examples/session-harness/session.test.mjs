@@ -180,3 +180,37 @@ test('comparison CLI accepts all transports and RPC example consumes complete it
     [null, 7, { keep: true }]);
   assert.match(example.stderr, /Validated both turns/);
 });
+
+for (const backend of ['resident', 'rpc']) {
+  for (const mode of ['observer', 'malformed', 'cleanup-failure']) {
+    test(`${backend} retains failed scope evidence: ${mode}`, async t => {
+      const original = new Error('observer exploded');
+      const { options, receipt } = await setup(t, { backend });
+      options.profile.model = mode;
+      await copyFile(fileURLToPath(new URL('./resident.fixture.mjs', import.meta.url)), options.dueBinary);
+      options.onItem = record => {
+        if (mode !== 'malformed' && record.data.kind === 'turn_started') throw original;
+      };
+      await assert.rejects(withSession(options, agent => agent.turn({ id: 'first', prompt: 'test' })), error => {
+        if (mode === 'observer') assert.equal(error, original);
+        if (mode === 'cleanup-failure') {
+          assert.ok(error instanceof AggregateError);
+          assert.equal(error.errors[0], original);
+          assert.match(error.errors[1].message, /exited 7/);
+        }
+        return true;
+      });
+      const evidence = await receipt();
+      const exit = JSON.parse(await readFile(join(options.artifactDir, 'resident-exit.json'), 'utf8'));
+      assert.equal(evidence.native_session_id, 'native-one');
+      assert.equal(evidence.processes.length, 1);
+      assert.ok(evidence.processes[0].pid > 0);
+      assert.equal(evidence.processes[0].pid, exit.pid);
+      assert.equal(evidence.processes[0].exit_code, mode === 'cleanup-failure' ? 7 : 0);
+      assert.equal(evidence.processes[0].signal, null);
+      assert.ok(evidence.body_error);
+      if (mode === 'cleanup-failure') assert.match(evidence.cleanup_error, /exited 7/);
+      else assert.equal(evidence.cleanup_error, null);
+    });
+  }
+}

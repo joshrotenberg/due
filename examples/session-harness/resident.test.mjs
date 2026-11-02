@@ -54,7 +54,7 @@ for (const [mode, pattern] of [['lost', /journal lost/], ['malformed', /JSON/], 
   test(`${transport}: ${mode} errors stay explicit and the process is settled`, async t => {
     const { backend, artifactDir } = await setup(t, mode);
     await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), pattern);
-    await assert.rejects(backend.close(), pattern);
+    assert.match((await backend.close()).execution_error.message, pattern);
     assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
     assert.equal(JSON.parse(await readFile(join(artifactDir, 'resident-exit.json'))).exit_code, 0);
   });
@@ -66,7 +66,7 @@ test(`${transport}: abort cancels the active turn and waits for process cleanup 
   while (!items.some(i => i.data.kind === 'turn_started')) await new Promise(resolve => setTimeout(resolve, 5));
   control.abort();
   await assert.rejects(turn, /cancelled/);
-  await assert.rejects(backend.close(), /cancelled/);
+  assert.match((await backend.close()).execution_error.message, /cancelled/);
   assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
 });
 
@@ -74,7 +74,7 @@ for (const [mode, pattern] of [['unknown-status', /Invalid Due turn result/], ['
   test(`${transport}: malformed normalized result (${mode}) preserves evidence and fails`, async t => {
     const { backend, artifactDir } = await setup(t, mode);
     await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), pattern);
-    await assert.rejects(backend.close(), pattern);
+    assert.match((await backend.close()).execution_error.message, pattern);
     assert.equal(JSON.parse(await readFile(join(artifactDir, 'first/result.json'))).text, 'turn 1');
     assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
   });
@@ -91,7 +91,7 @@ if (transport === 'rpc') {
   test('rpc: direct error responses are surfaced and cleanup still runs', async t => {
     const { backend, artifactDir } = await setup(t, 'rpc-error');
     await assert.rejects(backend.turn({ id: 'first', prompt: 'one' }), /-32000.*Fixture request rejected/);
-    await assert.rejects(backend.close(), /Fixture request rejected/);
+    assert.match((await backend.close()).execution_error.message, /Fixture request rejected/);
     assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
   });
   test('rpc: unsupported protocol version fails before starting turns', async t => {
