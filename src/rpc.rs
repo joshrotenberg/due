@@ -94,7 +94,7 @@ struct ReadInput {
     turn_id: String,
     #[serde(default)]
     after: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "wait_ms")]
     wait_ms: u64,
 }
 #[derive(Deserialize)]
@@ -103,11 +103,34 @@ struct SessionReadInput {
     session_id: String,
     #[serde(default)]
     after: u64,
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_limit", deserialize_with = "read_limit")]
     limit: usize,
 }
 fn default_limit() -> usize {
     64
+}
+
+const MAX_WAIT_MS: u64 = 10_000;
+const MAX_READ_LIMIT: u64 = 256;
+
+fn wait_ms<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    if value > MAX_WAIT_MS {
+        return Err(serde::de::Error::custom(format!(
+            "wait_ms must be at most {MAX_WAIT_MS}"
+        )));
+    }
+    Ok(value)
+}
+
+fn read_limit<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    if !(1..=MAX_READ_LIMIT).contains(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "limit must be between 1 and {MAX_READ_LIMIT}"
+        )));
+    }
+    Ok(value as usize)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
