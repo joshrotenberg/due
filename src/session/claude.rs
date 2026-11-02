@@ -124,6 +124,9 @@ impl Backend {
         if options.ephemeral {
             opts = opts.no_session_persistence();
         }
+        for argument in &options.native_args {
+            opts = opts.arg(argument);
+        }
         let session = DuplexSession::spawn(&client, opts)
             .await
             .map_err(|e| e.to_string())?;

@@ -1,32 +1,13 @@
 // A caller-owned, scoped conversation. Node 22+ built-ins only.
-import { mkdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { closeSync, openSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { openResume } from './resume.mjs';
 import { normalizeTurnWaitMs, openRpc } from './resident.mjs';
+import { sessionProfile } from './profile.mjs';
 
-const allowed = new Set(['provider', 'cwd', 'model', 'effort', 'timeout']);
 const describe = error => String(error?.message ?? error);
 const asError = error => error instanceof Error ? error : new Error(describe(error));
-
-async function profileFor(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('profile must be an object');
-  for (const key of Object.keys(input)) {
-    if (!allowed.has(key)) throw new Error(`unsupported shared profile field: ${key}`);
-  }
-  if (!['claude', 'codex'].includes(input.provider)) throw new Error('provider must be claude or codex');
-  for (const key of ['cwd', 'model', 'effort', 'timeout']) {
-    if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
-      throw new Error(`${key} must be a nonempty string`);
-    }
-  }
-  if (input.effort !== undefined && !['low', 'medium', 'high'].includes(input.effort)) {
-    throw new Error('effort must be low, medium or high');
-  }
-  const cwd = await realpath(input.cwd ?? '.');
-  if (!(await stat(cwd)).isDirectory()) throw new Error('cwd must be a directory');
-  return Object.freeze({ ...input, cwd });
-}
 
 /** All backends preserve conversation context; the RPC backend provides native items. */
 export async function withSession(options, body) {
@@ -38,7 +19,7 @@ export async function withSession(options, body) {
   if (onInteraction && mode === 'resume') throw new Error('onInteraction is unsupported by the resume backend; use rpc');
   if (turnWaitMs !== undefined && mode === 'resume') throw new Error('turnWaitMs is unsupported by the resume backend; use rpc');
   const waitMs = mode === 'resume' ? undefined : normalizeTurnWaitMs(turnWaitMs);
-  const profile = await profileFor(options.profile);
+  const profile = await sessionProfile(options.profile, mode);
   signal?.throwIfAborted();
   await mkdir(artifactDir, { mode: 0o700 }); // Exclusive, including failed earlier attempts.
   const eventFile = openSync(join(artifactDir, 'items.jsonl'), 'wx', 0o600);
@@ -47,13 +28,14 @@ export async function withSession(options, body) {
   signal?.addEventListener('abort', stop, { once: true });
   if (signal?.aborted) stop();
   const receipt = { backend: mode, profile, started_at: new Date().toISOString(), turns: [],
-    events: { count: 0, bytes: 0 }, processes: [], body_error: null, cleanup_error: null };
+    events: { count: 0, bytes: 0 }, processes: [], controls: [], body_error: null, cleanup_error: null };
   if (mode !== 'resume') receipt.turn_wait_ms = waitMs;
-  let backend, pending, closed = false, value, failure, nativeId;
-  const used = new Set();
+  let backend, pending, pendingId, closed = false, value, failure, nativeId;
+  const used = new Set(), controls = new Set(), interruptedTurns = new Set();
   function retain(snapshot, cleanupError) {
     if (!snapshot) return;
     receipt.processes = snapshot.processes;
+    if (mode === 'rpc') receipt.resolved_options = snapshot.resolved_options ?? null;
     nativeId ??= snapshot.native_session_id;
     if (!failure && snapshot.execution_error && snapshot.execution_error !== cleanupError) {
       failure = asError(snapshot.execution_error);
@@ -80,11 +62,33 @@ export async function withSession(options, body) {
     const opening = performance.now();
     backend = await ({ resume: openResume, rpc: openRpc }[mode])({
       dueBinary, profile, artifactDir, onItem: item, onInteraction, signal: controller.signal, turnWaitMs: waitMs,
+      onFailure: error => controller.abort(error),
     });
     receipt.open_duration_ms = Math.round(performance.now() - opening);
     receipt.capabilities = backend.capabilities;
+    if (mode === 'rpc') receipt.resolved_options = backend.getReceipt().resolved_options;
     const agent = Object.freeze({
       capabilities: Object.freeze({ ...backend.capabilities }),
+      signal: controller.signal,
+      interrupt({ id } = {}) {
+        if (closed) return Promise.reject(new Error('session scope is closed'));
+        if (!backend.capabilities.interrupt) return Promise.reject(new Error('interrupt is unsupported by this backend; use rpc'));
+        if (!pending || pendingId !== id) return Promise.reject(new Error('no active turn with that caller ID'));
+        if (controller.signal.aborted) return Promise.reject(controller.signal.reason);
+        if (controls.size) return Promise.reject(new Error('an interruption is already pending'));
+        if (interruptedTurns.has(id)) return Promise.reject(new Error('interruption already requested for this turn'));
+        interruptedTurns.add(id);
+        const started = performance.now();
+        const record = { method: 'turn.interrupt', id, started_at: new Date().toISOString() };
+        receipt.controls.push(record);
+        const operation = backend.interrupt({ id }).then(result => {
+          record.result = result; return result;
+        }, error => { record.error = describe(error); throw error; }).finally(() => {
+          record.duration_ms = Math.round(performance.now() - started); controls.delete(operation);
+        });
+        controls.add(operation); operation.catch(() => {});
+        return operation;
+      },
       turn({ id, prompt }) {
         if (closed) return Promise.reject(new Error('session scope is closed'));
         if (pending) return Promise.reject(new Error('one turn at a time; await the current turn'));
@@ -98,6 +102,7 @@ export async function withSession(options, body) {
         const started = performance.now();
         const turnReceipt = { id, started_at: new Date().toISOString() };
         receipt.turns.push(turnReceipt);
+        pendingId = id;
         pending = (async () => {
           try {
             const turn = await backend.turn({ id, prompt });
@@ -113,7 +118,7 @@ export async function withSession(options, body) {
             throw error;
           } finally {
             turnReceipt.duration_ms = Math.round(performance.now() - started);
-            pending = null;
+            pending = null; pendingId = undefined;
           }
         })();
         // Scope cleanup observes abandoned rejections even when user code forgets await.
@@ -124,6 +129,7 @@ export async function withSession(options, body) {
     value = await body(agent);
     controller.signal.throwIfAborted();
     if (pending) throw new Error('session scope returned with an active turn; await all work');
+    if (controls.size) throw new Error('session scope returned with an active control; await all work');
   } catch (error) {
     failure = asError(error);
     receipt.body_error = describe(error);
@@ -131,7 +137,7 @@ export async function withSession(options, body) {
     if (error?.cleanup) receipt.cleanup_error = error.cleanup;
   } finally {
     closed = true;
-    if (failure || pending) controller.abort(failure ?? new Error('scope closed'));
+    if (failure || pending || controls.size) controller.abort(failure ?? new Error('scope closed'));
     if (pending) await pending.catch(() => {});
     const closing = performance.now();
     try {
@@ -141,6 +147,8 @@ export async function withSession(options, body) {
       receipt.cleanup_error = describe(error);
       failure = failure ? new AggregateError([failure, asError(error)], 'session body and cleanup failed') : asError(error);
     }
+    await Promise.allSettled([...controls]);
+    controller.abort(failure ?? new Error('session scope is closed'));
     receipt.close_duration_ms = Math.round(performance.now() - closing);
     signal?.removeEventListener('abort', stop);
     closeSync(eventFile);

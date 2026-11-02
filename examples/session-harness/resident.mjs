@@ -38,9 +38,10 @@ const STDOUT_CAPTURE_LIMIT = 64 * 1024 * 1024;
 // onItem saw (`record.data` is the complete interaction item, so the exact session_id, turn_id and
 // data.request_id come from it). `signal` aborts when the turn finishes, the session fails or is
 // cancelled, or the scope closes; a result returned after that is discarded and never sent.
-export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => {}, onInteraction, signal, turnWaitMs }) {
+export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => {}, onInteraction, onFailure, signal, turnWaitMs }) {
   const waitMs = normalizeTurnWaitMs(turnWaitMs);
   if (onInteraction !== undefined && typeof onInteraction !== 'function') throw new Error('onInteraction must be a function');
+  if (onFailure !== undefined && typeof onFailure !== 'function') throw new Error('onFailure must be a function');
   const notification = 'session.item';
   if (signal?.aborted) throw new Error('Session cancelled before launch');
   // Descriptors and the child are acquired together; a failure before launch completes releases only these.
@@ -55,7 +56,8 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
     throw error;
   }
   const exited = deferred(), pending = new Map(), turnIds = new Map(), decisions = new Map(), finishedTurns = new Set(), resolvedKeys = new Set();
-  let sequence = 0, cursor = 0, sessionId, nativeId, active, fatal, closePromise, spawned = false;
+  let sequence = 0, cursor = 0, sessionId, nativeId, active, fatal, closePromise, interruptPending, spawned = false;
+  let provider = profile.provider, resolvedOptions = null;
   let closing = false, closed = false, buffer = Buffer.alloc(0), tail = Promise.resolve();
   let rawBytes = 0, rawOpen = true, queued = 0, queuedBytes = 0, wireBytes = 0, stderrBytes = 0, interrupted = false, wireOpen = true;
   const record = { pid: null, exit_code: null, signal: null, launch_error: null, forced_kill: false };
@@ -64,10 +66,23 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
     for (const entry of decisions.values()) if (turn === undefined || entry.turn === turn) entry.control.abort(reason);
   }
   function fail(error) {
+    const first = !fatal;
     fatal ??= error instanceof Error ? error : new Error(String(error));
     abortDecisions(fatal);
     for (const entry of pending.values()) { entry.collateral = true; entry.reject(fatal); }
-    pending.clear(); active?.done.reject(fatal); stop();
+    pending.clear(); active?.ready.reject(fatal); active?.done.reject(fatal); stop();
+    // The scope uses this to cancel cooperative caller work, including an idle verifier.
+    // A failure observer cannot replace the original transport/provider failure.
+    if (first) { try { onFailure?.(fatal); } catch {} }
+  }
+  function rememberTurn(dueId, callerId) {
+    turnIds.set(dueId, callerId);
+    // Late events retain recent caller attribution without growing a direct client's map forever.
+    while (turnIds.size > 64) {
+      const retired = turnIds.keys().next().value;
+      turnIds.delete(retired); finishedTurns.delete(retired);
+      for (const key of resolvedKeys) if (JSON.parse(key)[0] === retired) resolvedKeys.delete(key);
+    }
   }
   const abort = () => fail(new Error('Session cancelled'));
   signal?.addEventListener('abort', abort, { once: true });
@@ -114,8 +129,11 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
     // Lifecycle and reply routing use this private copy; onItem may mutate the object it receives.
     const item = structuredClone(wire);
     if (item.kind === 'turn_started' && active && !active.dueId) {
-      active.dueId = item.turn_id; turnIds.set(item.turn_id, active.id);
+      active.dueId = item.turn_id; rememberTurn(item.turn_id, active.id);
+      active.ready.resolve(item.turn_id);
     }
+    // Observers may request interruption; the terminal item must retire that option first.
+    if (item.kind === 'turn_finished' && active?.dueId === item.turn_id) active.finished = true;
     // Only Claude's root system/init identifies the native session; nested or other payload IDs are ignored.
     let identityError;
     const root = item.data?.event;
@@ -240,11 +258,13 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
     if (!closing && !fatal) fail(new Error(`Due RPC exited ${code ?? term}`));
     exited.resolve();
   });
-  const getReceipt = () => ({ processes: [{ ...record }], native_session_id: nativeId ?? null, execution_error: fatal });
+  const getReceipt = () => ({ processes: [{ ...record }], native_session_id: nativeId ?? null,
+    resolved_options: structuredClone(resolvedOptions), execution_error: fatal });
   async function close() {
     if (closePromise) return closePromise;
     closing = true;
     abortDecisions(new Error('Session closing')); // Do not wait for, or honor, a pending decision.
+    active?.ready.reject(new Error('Session closed before the turn started'));
     // Release a turn waiting on a terminal item; this is not a session failure.
     active?.done.reject(Object.assign(new Error('Session closed before the turn finished'), { closedByCaller: true }));
     closePromise = (async () => {
@@ -264,6 +284,11 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
         cleanupError ??= error; record.forced_kill = true; child.kill('SIGKILL');
         await bounded(exited.promise, 5_000, 'Due RPC could not be reaped');
       } finally {
+        // Child exit rejects any outstanding native control response. Join its local owner too.
+        if (interruptPending) {
+          if (!closed) fail(cleanupError ?? new Error('Session cleanup could not settle the control'));
+          await interruptPending.operation.catch(() => {});
+        }
         try { await bounded(tail, 5_000, 'Resident item drain timed out'); }
         catch (error) { cleanupError ??= error; fail(error); }
         signal?.removeEventListener('abort', abort);
@@ -277,7 +302,33 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
     return closePromise;
   }
   const backend = {
-    capabilities: { nativeItems: true, interactionReply: Boolean(onInteraction), interrupt: false },
+    capabilities: { nativeItems: true, interactionReply: Boolean(onInteraction), interrupt: true },
+    interrupt({ id } = {}) {
+      if (fatal) return Promise.reject(fatal);
+      if (closing || closed) return Promise.reject(new Error('Session is closed'));
+      const target = active;
+      if (!target || target.id !== id || target.finished) return Promise.reject(new Error('No active turn with that caller ID'));
+      if (interruptPending) return Promise.reject(new Error('An interruption is already pending'));
+      if (target.interruptRequested) return Promise.reject(new Error('Interruption already requested for this turn'));
+      target.interruptRequested = true;
+      const entry = { target, operation: null };
+      interruptPending = entry;
+      entry.operation = (async () => {
+        // Capture the exact turn now; startup and native acknowledgements can cross turn boundaries.
+        const dueId = target.dueId ?? await target.ready.promise;
+        if (fatal) throw fatal;
+        if (closing || closed) throw new Error('Session is closed');
+        if (target.finished || active !== target) throw new Error('Turn finished before interruption was sent');
+        const acknowledged = await rpc('turn.interrupt', { session_id: sessionId, turn_id: dueId }, true);
+        if (acknowledged?.interrupt_requested !== true || acknowledged.turn_id !== dueId) {
+          const error = new Error('Interruption acknowledgement has an invalid turn identity');
+          fail(error); throw error;
+        }
+        return acknowledged;
+      })().finally(() => { if (interruptPending === entry) interruptPending = null; });
+      entry.operation.catch(() => {});
+      return entry.operation;
+    },
     async turn({ id, prompt }) {
       if (fatal) throw fatal; // The recorded failure is more truthful than "closed" after a child exit.
       if (closing || closed) throw new Error('Session is closed');
@@ -285,15 +336,16 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(id)) throw new Error('Invalid turn ID');
       const dir = join(artifactDir, id); mkdirSync(dir, { mode: 0o700 });
       jsonFile(join(dir, 'request.json'), { id, prompt });
-      active = { id, dueId: null, done: deferred() };
+      active = { id, dueId: null, done: deferred(), ready: deferred(), finished: false, interruptRequested: false };
+      const target = active;
       try {
         const started = await rpc('turn.start', { session_id: sessionId, prompt });
         if (active.dueId && active.dueId !== started.turn_id) throw new Error('Turn identity changed');
-        active.dueId = started.turn_id; turnIds.set(started.turn_id, id);
+        active.dueId = started.turn_id; rememberTurn(started.turn_id, id); active.ready.resolve(started.turn_id);
         const result = await (waitMs === null ? active.done.promise
           : bounded(active.done.promise, waitMs, 'Resident turn timed out waiting for its terminal item'));
         jsonFile(join(dir, 'result.json'), result);
-        if (!result || result.schema_version !== 1 || result.provider !== profile.provider
+        if (!result || result.schema_version !== 1 || result.provider !== provider
           || !['succeeded', 'failed', 'timed_out', 'cancelled'].includes(result.status)
           || (result.status === 'succeeded' && result.error !== null)) throw new Error('Invalid Due turn result');
         if (result.run_id != null && result.run_id !== started.turn_id) throw new Error('Due turn result identity changed');
@@ -305,16 +357,31 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
         return { result, process: null, native_session_id: nativeId ?? null };
       } catch (error) {
         jsonFile(join(dir, 'error.json'), { message: error.message }); if (!error.closedByCaller) fail(error); throw error;
-      } finally { active = null; }
+      } finally { target.ready.reject(new Error('Turn settled before startup')); active = null; }
     },
     close,
     getReceipt,
   };
   try {
-    const opened = await rpc('session.open', { ...profile, ephemeral: false, stream: true });
+    const opened = await rpc('session.open', { ...profile, stream: true });
     if (opened.protocol_version !== 1 || opened.stream?.enabled !== true
       || opened.stream?.method !== notification) throw new Error('Unsupported Due RPC session protocol');
     sessionId = opened.session_id;
+    if (opened.provider !== undefined) {
+      if (!['claude', 'codex'].includes(opened.provider) || (provider !== undefined && opened.provider !== provider)) {
+        throw new Error('Resolved provider differs from session.open options');
+      }
+      provider = opened.provider;
+    }
+    if (!['claude', 'codex'].includes(provider)) throw new Error('Session open did not identify the resolved provider');
+    if (opened.resolved_options !== undefined) {
+      const options = opened.resolved_options;
+      if (!options || typeof options !== 'object' || Array.isArray(options) || options.provider !== provider
+        || options.stream !== true || typeof options.cwd !== 'string' || !options.cwd.trim()
+        || typeof options.ephemeral !== 'boolean' || !Array.isArray(options.native_args)
+        || !options.native_args.every(value => typeof value === 'string')) throw new Error('Invalid resolved session options');
+      resolvedOptions = structuredClone(options);
+    } else if (profile.request !== undefined) throw new Error('RPC server did not report resolved options for the request profile');
     if (opened.native_session_id) {
       if (nativeId && nativeId !== opened.native_session_id) throw new Error('Native session identity changed');
       nativeId = opened.native_session_id;

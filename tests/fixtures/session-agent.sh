@@ -5,6 +5,9 @@
 # duplex parser/permission tests. IDs, counters and answer text are synthetic.
 set -eu
 
+printf '%s\0' "$@" > "$DUE_SESSION_FIXTURE_DIR/argv"
+pwd -P > "$DUE_SESSION_FIXTURE_DIR/native-cwd"
+
 provider=claude
 partial_messages=0
 for arg in "$@"; do
@@ -240,7 +243,7 @@ while IFS= read -r line; do
         interrupt_id=
         finish interrupted ''
       else
-        case "$line" in *'"decision":"cancel"'*) finish completed 'permission denied' ;; *) finish completed 'permission allowed' ;; esac
+        case "$line" in *'"decision":"cancel"'*|*'"decision":"decline"'*) finish completed 'permission denied' ;; *) finish completed 'permission allowed' ;; esac
       fi
     fi
   fi

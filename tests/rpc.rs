@@ -21,6 +21,8 @@ use tempfile::TempDir;
 mod bounds_review;
 #[path = "rpc/close_review.rs"]
 mod close_review;
+#[path = "rpc/profiles.rs"]
+mod profiles;
 #[path = "rpc/transport_review.rs"]
 mod transport_review;
 

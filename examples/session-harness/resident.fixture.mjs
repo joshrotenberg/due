@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 if (process.argv[2] !== 'rpc') throw new Error('Unknown transport');
-let directory, mode, count = 0, cursor = 0, journal = [], current, held;
+let directory, mode, count = 0, cursor = 0, journal = [], current, held, interruption;
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const result = (id, value) => send({ jsonrpc: '2.0', id, result: value });
 const item = (kind, data, turn_id = null, push = true) => {
@@ -17,6 +17,7 @@ const outcome = turn => ({ schema_version: 1, provider: 'codex', run_id: mode ==
   session_id: mode === 'missing-id' ? null : mode.startsWith('init') ? 'claude-native' : 'native-one', status: mode === 'unknown-status' ? 'finished' : mode === 'failed' ? 'failed' : 'succeeded',
   text: `turn ${count}`, error: ['failed', 'false-success'].includes(mode) ? { kind: 'provider', message: 'synthetic failure' } : null });
 const failedOutcome = turn => ({ ...outcome(turn), status: 'failed', error: { kind: 'protocol', message: 'native exited' } });
+const cancelledOutcome = turn => ({ ...outcome(turn), status: 'cancelled', error: { kind: 'cancelled', message: 'interrupted' } });
 const reject = (id, message) => send({ jsonrpc: '2.0', id, error: { code: -32000, message } });
 const finishTurn = () => item('turn_finished', outcome(current), current);
 const input = createInterface({ input: process.stdin });
@@ -42,6 +43,25 @@ input.on('line', line => {
     }
     current = `native-turn-${++count}`;
     item('turn_started', { prompt: args.prompt }, current);
+    if (mode.startsWith('interrupt-')) {
+      const turn = current;
+      if (count > 1) {
+        if (interruption && ['interrupt-late', 'interrupt-late-error'].includes(mode)) {
+          if (mode === 'interrupt-late-error') reject(interruption.id, 'native rejected original interruption');
+          else result(interruption.id, { interrupt_requested: true, turn_id: interruption.turn });
+          interruption = null;
+        }
+        item('turn_finished', outcome(turn), turn);
+        result(request.id, { turn_id: turn });
+      } else if (mode === 'interrupt-finished-start') {
+        item('turn_finished', outcome(turn), turn);
+        setTimeout(() => result(request.id, { turn_id: turn }), 40);
+      } else {
+        // Delayed turn.start acknowledgement exercises controls bound from an earlier turn_started item.
+        setTimeout(() => result(request.id, { turn_id: turn }), 40);
+      }
+      return;
+    }
     if (mode.startsWith('init')) {
       const claude = event => item('native_summary', { provider: 'claude', event }, current);
       // Ignored: nested IDs, non-init system events and non-Claude providers.
@@ -104,6 +124,22 @@ input.on('line', line => {
     if (mode === 'idle-failed') setTimeout(() => item('session_failed', { message: 'native exited between turns' }), 60);
     // Native stream and terminal deliberately precede turn.start response.
     result(request.id, { turn_id: current });
+  }
+  if (name === 'turn.interrupt') {
+    if (args.session_id !== 'due-session' || args.turn_id !== current) return reject(request.id, 'unknown or finished turn');
+    if (mode === 'interrupt-hold') {
+      interruption = { id: request.id, turn: current };
+      item('native', { provider: 'codex', method: 'fixture/control-waiting', params: {} }, current);
+      return;
+    }
+    if (['interrupt-late', 'interrupt-late-error', 'interrupt-on-close'].includes(mode)) {
+      interruption = { id: request.id, turn: current };
+      item('turn_finished', cancelledOutcome(current), current);
+      return;
+    }
+    result(request.id, { interrupt_requested: true, turn_id: current });
+    item('turn_finished', cancelledOutcome(current), current);
+    return;
   }
   if (name === 'interaction.reply') {
     if (mode === 'interaction-reject') return reject(request.id, 'Fixture rejected reply');

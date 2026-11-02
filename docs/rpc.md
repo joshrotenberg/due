@@ -36,7 +36,7 @@ on failure; use requests for session mutations whose outcome matters.
 
 | Method | Parameters | Result |
 | --- | --- | --- |
-| `session.open` | `provider`; optional `model`, `effort`, `cwd`, `binary`, `resume`, `ephemeral`, `timeout`, `stream` | Protocol version, Due handle, available native ID, capabilities |
+| `session.open` | `provider` or `request` supplying it; optional `model`, `effort`, `cwd`, `binary`, `resume`, `ephemeral`, `timeout`, `stream`, `native_args` | Protocol version, Due handle, available native ID, capabilities, `resolved_options` |
 | `turn.start` | `session_id`, `prompt` | Due turn ID immediately |
 | `turn.read` | `session_id`, `turn_id`; optional `after`, `wait_ms` | Turn state, native event window, pending interactions, final result |
 | `session.read` | `session_id`; optional `after`, `limit` | Session items across turns, cursor and loss indicators |
@@ -44,10 +44,9 @@ on failure; use requests for session mutations whose outcome matters.
 | `interaction.reply` | `session_id`, `turn_id`, `request_id`, `response` | Native reply accepted for delivery |
 | `session.close` | `session_id` | Awaited native shutdown, last native ID and first session failure, if any |
 
-Parameters are JSON objects, with a deliberately smaller schema than a
-`due run --request` file. Pass them directly through RPC; there is no request-file
-loader. Unknown fields are rejected. `schema`, `native_args`, trace settings and
-Due request-file inheritance are not exposed. `effort` is low/medium/high;
+Parameters are JSON objects. Unknown fields are rejected. `schema` and trace
+settings are not exposed. `request` loads an existing Due JSON profile; direct
+parameters override its defaults as described below. `effort` is low/medium/high;
 `timeout` is a per-turn duration such as `2m`, with no default deadline.
 `ephemeral` defaults to false and conflicts with `resume`. Paths resolve from
 the server's working directory; `binary` selects a local provider executable.
@@ -65,6 +64,59 @@ parameters `-32602`, session operation failure `-32000`, concurrency limit
 `-32001`. An ordinary failed model turn is a successful RPC operation containing
 a Due result with `status: "failed"`; inspect the result status, not merely the
 absence of an RPC error. There are no automatic retries.
+
+## Reusing JSON profiles
+
+Profiles configure the worker when its session opens. The caller supplies the
+assignment through `turn.start` and owns verification, checkpoints and follow-ups.
+The same version-1 JSON files used by `due run --request` can supply session
+defaults without another schema, registry or configuration format:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"session.open","params":{"request":"/caller-owned/codex-workspace-profile.json","cwd":"/path/to/project","stream":true}}
+```
+
+Due uses the existing strict request decoder: unknown/duplicate keys, wrong
+types and unsupported schema versions fail before overlay, even if overridden.
+Semantic checks apply to the merged settings. Direct parameters replace file
+values; omission inherits, `ephemeral: false` overrides true, and null clears
+`model`, `effort`, `cwd`, `timeout` or `resume`. `native_args` replaces the whole
+list; `[]` explicitly clears it. Switching providers retains the inherited list
+and validates it for the selected provider. Unsupported options are never
+silently discarded.
+
+The file must be regular UTF-8 JSON, at most 1 MiB. `request: "-"` is rejected
+because stdin carries RPC. File paths and `cwd` resolve from Due's starting
+directory, not the profile's directory. The profile is read once per open; later
+file edits do not change a resident session. A profile containing `prompt` or a
+non-null answer `schema` is rejected: prompts belong to turns, and resident
+answer schemas are not implemented.
+
+Resident `native_args` deliberately supports a narrower set than `due run`:
+
+- Codex: `-c` / `--config` with one native TOML assignment per value. Supported
+  keys are `sandbox_mode`, `approval_policy`, `agents.enabled`,
+  `features.multi_agent_v2`, `features.multi_agent`, and
+  `sandbox_workspace_write.{network_access,writable_roots,exclude_slash_tmp,exclude_tmpdir_env_var}`.
+  This includes every restriction in the checked-in
+  [workspace profile](../examples/codex-workspace-profile.json). This is Codex's
+  existing argument syntax; the Due profile remains JSON.
+- Claude: `--allowedTools` / `--allowed-tools`, `--disallowedTools` /
+  `--disallowed-tools`, and `--permission-mode`, each with one argument value.
+  Use a comma-separated value for multiple tool patterns. Supported modes are
+  `default`, `acceptEdits`, `plan`, `dontAsk` and `bypassPermissions`.
+
+Other flags/config keys, including transport and session-routing overrides,
+fail before provider launch. This validation protects the resident transport;
+native policy remains provider-specific. Explicit policy is forwarded, not
+automatically weakened or replaced. Keep policy files caller-owned, as for
+`due run`.
+
+Successful open and its `session_opened` item include `resolved_options`, the
+merged Due options including canonical cwd and the complete native-argument
+list. Retain this in receipts. It records requested configuration, not an audit
+of every inherited native setting or the provider's effective permissions.
+The Node, Lua and JavaScript clients all use this same raw RPC operation.
 
 ## A conversation
 
@@ -298,13 +350,39 @@ The current split has two responsibilities:
   callbacks after failure, and preserve evidence through cleanup. Parsed values
   also inherit that language's representation limits.
 
-The Node example is a small standalone client of this contract. An eventual
-embedded JavaScript or Lua client could use the same session operations through
-stdio or an in-process binding to the Rust host. The session host should remain
-the authority for provider lifecycle and turn state in either arrangement.
-Embedding, a public Rust library and a packaged client are future choices; this
-spike does not implement them or choose a language engine. Workflow composition
-can remain ordinary caller code over the session API.
+The Node example is a small standalone client of this contract. The optional
+[embedded comparison](rpc-languages.md) uses Lua and JavaScript clients over the
+same stdio operations. The session host remains the authority for provider
+lifecycle and turn state. A public Rust library, packaged client and choice of
+embedded engine remain future decisions.
+
+## A supervised subagent
+
+A bounded assignment can span several turns. The native CLI owns tool execution
+within a turn; the caller owns the next assignment, acceptance criteria and the
+session's lifetime. These workflows compose without a server-side agent loop:
+
+| Workflow | Existing mechanism / caller responsibility |
+| --- | --- |
+| Implement, verify, revise | Multiple turns; caller independently checks artifacts and decides whether to request another revision |
+| Investigation checkpoints | Caller examines each result before submitting the next prompt |
+| Evolving review / related issues | Reuse one session for the bounded workstream; supply changed diffs and new evidence explicitly |
+| Monitor, approve, redirect | Stream items and answer interactions; interrupt an exact turn, await settlement, then send the next prompt |
+| Independent implementer and reviewer | Caller owns separate Due processes, workspaces and explicit evidence handoffs |
+
+The [supervised workflow example](../examples/session-harness/SUPERVISED.md)
+implements a bounded correction loop with separate verification receipts. The
+Node scope exposes `agent.interrupt({id})` and a cooperative `agent.signal` for
+caller-owned verification or checkpoint work. Full items remain in evidence;
+the parent can consume summaries without putting the whole transcript into its
+model context.
+
+The embedded comparison still uses synchronous callbacks and a cooperative
+pump. It has no host command/file API for an independent verifier and no owned
+Promise/coroutine scheduler. The async Node example demonstrates the workflow;
+an embedded async bridge remains a separate design and comparison step. A
+session is also process-local: durable reconnection or replay after process loss
+is not provided by the bounded journal.
 
 ## Checking the spike
 

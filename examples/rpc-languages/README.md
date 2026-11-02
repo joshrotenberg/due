@@ -51,6 +51,14 @@ provider independently of the language. JSON args accept `profile`, `marker`,
 `first_prompt`, `second_prompt` and optional `turn_timeout_ms`; profile is passed to `session.open` with
 streaming enabled. There is no TOML or new request configuration format.
 
+The profile object may instead reference an existing Due JSON file, for example
+`{"profile":{"request":"/caller-owned/worker.json","cwd":"/path/to/project"}}`.
+Rust loads and validates it once at open; explicit fields override file defaults.
+`open` returns the provider and `resolved_options`, so permission handlers can use
+the resolved provider even when it was supplied only by the file. Both embedded
+clients use the [same profile rules](../../docs/rpc.md#reusing-json-profiles) as raw
+RPC and the Node client; they do not parse configuration files themselves.
+
 ## Client and bridge boundary
 
 Both clients expose `open`, `start`, `wait`, `turn`, `interrupt`, `reply`,

@@ -14,7 +14,7 @@ use tokio::{
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
-use crate::session::{Manager, OpenOptions, PushQueue};
+use crate::session::{Manager, PushQueue, profile::OpenInput};
 
 const MAX_INPUT: usize = 1024 * 1024;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
@@ -143,7 +143,11 @@ fn describe_item(value: &mut Value) {
 async fn dispatch(manager: &Manager, method: &str, input: Value) -> Result<Value, RpcError> {
     let result = match method {
         "session.open" => {
-            let mut result = manager.open(params::<OpenOptions>(input)?).await;
+            let options = params::<OpenInput>(input)?
+                .resolve()
+                .await
+                .map_err(|error| RpcError(-32602, format!("Invalid params: {error}")))?;
+            let mut result = manager.open(options).await;
             if let Ok(value) = &mut result {
                 describe_open(value);
             }

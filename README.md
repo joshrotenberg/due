@@ -199,6 +199,12 @@ behavior are unchanged. Set `stream: true` on `session.open` for native items;
 [JavaScript harness example](examples/session-harness/README.md) compares CLI
 resume and resident RPC behind one scoped conversation API.
 
+RPC supports the existing JSON profiles through `session.open`'s `request`
+parameter, including the supported native policy options in the Codex workspace
+profile. The [supervised workflow](examples/session-harness/SUPERVISED.md) keeps
+one worker across implementation, independent verification and bounded revision,
+with caller checkpoints, interruption and separate acceptance evidence.
+
 The separate [MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
 is preserved on `codex/due-mcp-spike`. This branch contains only the RPC adapter.
 

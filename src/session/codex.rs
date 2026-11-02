@@ -261,6 +261,9 @@ impl Backend {
         if let Some(cwd) = &options.cwd {
             builder = builder.working_dir(cwd);
         }
+        for argument in &options.native_args {
+            builder = builder.arg(argument);
+        }
         let client = builder.build().map_err(|e| e.to_string())?;
         let server = AppServer::builder(&client)
             .client_info("due", env!("CARGO_PKG_VERSION"))

@@ -12,24 +12,24 @@ use crate::{
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Request {
+pub(crate) struct Request {
     schema_version: u32,
     // Missing is allowed for a partial profile, but explicit null is a bad type.
     // Keep strings until after overlay so replaced semantic values are not used.
     #[serde(default, deserialize_with = "present_string")]
-    provider: Option<String>,
+    pub(crate) provider: Option<String>,
     #[serde(default, deserialize_with = "present_string")]
-    prompt: Option<String>,
-    model: Option<String>,
-    effort: Option<String>,
-    cwd: Option<PathBuf>,
-    timeout: Option<String>,
-    schema: Option<PathBuf>,
-    resume: Option<String>,
+    pub(crate) prompt: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) timeout: Option<String>,
+    pub(crate) schema: Option<PathBuf>,
+    pub(crate) resume: Option<String>,
     #[serde(default)]
-    ephemeral: bool,
+    pub(crate) ephemeral: bool,
     #[serde(default)]
-    native_args: Vec<String>,
+    pub(crate) native_args: Vec<String>,
 }
 
 fn present_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
@@ -53,7 +53,12 @@ fn read_request(input: &RunCommand) -> Result<Request, RunError> {
         std::fs::read_to_string(path)
     }
     .map_err(|error| RunError::invalid(format!("cannot read --request: {error}")))?;
-    let request: Request = serde_json::from_str(&source)
+    decode(&source)
+}
+
+/// Parse the existing versioned profile before any caller-specific overlay.
+pub(crate) fn decode(source: &str) -> Result<Request, RunError> {
+    let request: Request = serde_json::from_str(source)
         .map_err(|error| RunError::invalid(format!("invalid --request JSON: {error}")))?;
     if request.schema_version != 1 {
         return Err(RunError::invalid(format!(

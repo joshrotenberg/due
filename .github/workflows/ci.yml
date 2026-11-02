@@ -74,8 +74,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - run: cargo clippy --locked --all-targets --features rpc -- -D warnings
       - run: cargo test --locked --features rpc
+      - run: node --test examples/session-harness/native.test.mjs
+        env:
+          DUE_RPC_BINARY: ${{ github.workspace }}/target/debug/due
+      - run: cargo test --locked --manifest-path examples/rpc-languages/Cargo.toml
+      - run: cargo test --locked --manifest-path examples/rpc-languages/Cargo.toml --test native -- --ignored
+        env:
+          DUE_RPC_BINARY: ${{ github.workspace }}/target/debug/due
   msrv:
     runs-on: ubuntu-latest
     steps:

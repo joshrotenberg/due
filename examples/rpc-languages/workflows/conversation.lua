@@ -5,6 +5,7 @@ assert(type(args) == 'table' and type(args.profile) == 'table', 'profile require
 local marker = args.marker or 'due-marker-7391'
 local turnTimeout = args.turn_timeout_ms or 300000
 assert(type(marker) == 'string' and #marker > 0, 'marker must be nonempty')
+local provider
 local client = DueClient.new({
   onItem = function(item)
     -- Some decoded native numbers cannot pass outbound JSON validation. The
@@ -16,13 +17,17 @@ local client = DueClient.new({
   end,
   onInteraction = function(item)
     bridge.log('Denying unexpected permission request')
-    if args.profile.provider == 'claude' then
+    if provider == 'claude' then
       return json.object({behavior='deny', message='Unexpected permission in conversation example'})
     end
+    local request = item.data and item.data.request
+    assert(provider == 'codex' and request and type(request.method) == 'string' and
+      request.method:match('requestApproval$'), 'Unexpected interaction with no known denial shape')
     return json.object({decision='decline'})
   end,
 })
-client:open(args.profile)
+local opened = client:open(args.profile)
+provider = opened.provider
 local ok, failure = pcall(function()
   local first = client:turn(args.first_prompt or ('Remember this marker: ' .. marker .. '. Do not use tools or access files. Reply with only the word stored.'), turnTimeout)
   assert(first.status == 'succeeded', 'First turn failed')

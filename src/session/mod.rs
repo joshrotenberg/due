@@ -3,6 +3,7 @@
 mod claude;
 mod codex;
 mod items;
+pub(crate) mod profile;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -46,6 +47,9 @@ pub struct OpenOptions {
     pub stream: bool,
     /// Per-turn deadline, such as "5m". Omitted means no deadline.
     pub timeout: Option<String>,
+    /// Audited provider options, applied once to the resident native process.
+    #[serde(default)]
+    pub native_args: Vec<String>,
 }
 
 impl OpenOptions {
@@ -58,6 +62,7 @@ impl OpenOptions {
 
     fn validate(&mut self) -> Result<(), String> {
         self.timeout_duration()?;
+        profile::validate_native_args(self.provider, &self.native_args)?;
         for (name, value) in [("model", &self.model), ("resume", &self.resume)] {
             if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
                 return Err(format!("{name} must not be empty"));
@@ -400,6 +405,13 @@ impl Manager {
             "native_session_id": sink.state.lock().unwrap().native_session_id,
             "capabilities": {"multi_turn":true,"interrupt":true,"interaction_reply":true,"steer":false,"session_read":true,"session_stream":options.stream},
             "stream": {"enabled":options.stream},
+            "resolved_options": {
+                "provider":options.provider, "model":options.model,
+                "effort":options.effort.map(|effort| effort.as_str()),
+                "cwd":options.cwd, "binary":options.binary, "resume":options.resume,
+                "ephemeral":options.ephemeral, "stream":options.stream,
+                "timeout":options.timeout, "native_args":options.native_args,
+            },
         });
         sink.item("session_opened", response.clone(), None);
         *self.read_session.lock().unwrap() = Some(ReadSession {

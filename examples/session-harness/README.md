@@ -48,11 +48,23 @@ rejects new turns. `maxTurns` is 1 through 64, default 4. This is a sequential
 conversation primitive, not a general workflow scheduler or security sandbox.
 
 The caller owns `profile`. The shared subset is `provider`, `cwd`, `model`,
-`effort`, and `timeout`. Unknown fields are rejected before launch. In particular,
-this experiment cannot silently import the older harness's `native_args`,
-schema-validation or sandbox profiles into the resident backend. Authentication
-and native permission policies are inherited; no permission bypass or global
-configuration change is added. Persistence is enabled to allow CLI resume.
+`effort`, and `timeout`. The resume backend keeps that subset and enables
+persistence for CLI resume. RPC additionally accepts `request`, `binary`,
+`resume`, `ephemeral` and the supported `native_args`. For an existing Due JSON
+profile, use `profile: {request: '/caller-owned/worker.json', cwd: '/path/to/project'}`.
+The provider may come entirely from that file.
+
+Rust owns strict file parsing and native-policy validation; the Node client does
+not load or loosely project the JSON itself. Omitted options inherit file values,
+explicit false/null overrides are preserved, and RPC does not force persistence
+over a profile's `ephemeral` choice. Unsupported fields/options fail explicitly.
+See the [profile rules and supported native options](../../docs/rpc.md#reusing-json-profiles).
+`session.json` retains both the supplied `profile` and the server's
+`resolved_options` (also in `session-open.json`); these are requested options,
+not an audit of inherited native settings.
+
+The [supervised assignment example](SUPERVISED.md) composes this API into
+implementation, independent verification, checkpoints and bounded revision.
 
 ### Caller turn waits
 
@@ -150,7 +162,34 @@ try {
 schemas or comparable event counts. The RPC backend recovers cursor gaps
 with `session.read`, fails when retention is insufficient, and does
 not use `turn.read` polling. Native permission requests fail explicitly unless the
-caller supplies `onInteraction` (below); no mid-turn interruption API is exposed yet.
+caller supplies `onInteraction` (below).
+
+### Interrupting and redirecting a worker
+
+The RPC scope advertises `agent.capabilities.interrupt` and exposes an exact-turn
+operation using the same caller ID passed to `turn`:
+
+```js
+const running = agent.turn({id: 'investigate', prompt: 'Investigate the failing test.'});
+// After observing progress or receiving a new decision from the parent:
+await agent.interrupt({id: 'investigate'});
+const interrupted = await running;
+const followup = await agent.turn({id: 'redirect', prompt: 'Focus on the parser instead.'});
+```
+
+Interruption acknowledgement and turn completion are separate; await both. An
+interrupt admitted before the Due turn ID arrives waits for that exact ID. Late
+acknowledgements never target a later turn. Stale IDs, duplicate attempts and a
+second outstanding interruption are rejected locally. A remote rejection is
+catchable without making the session unusable. The scope records control
+outcomes and joins outstanding controls during cleanup. The resume backend
+rejects this operation.
+
+`agent.signal` is available to cooperative caller-owned checks and checkpoints.
+It aborts on parent cancellation, native/transport failure and scope exit.
+Graceful turn interruption leaves it usable for the follow-up. Caller callbacks
+must observe it and bound/join their own work; the scope cannot preempt arbitrary
+JavaScript or clean up detached verifier processes.
 
 ### Answering native permission requests
 
@@ -211,8 +250,9 @@ Malformed transport evidence makes the session unavailable.
 ## Evidence and limits
 
 Every session reserves a fresh artifact directory. `session.json` records turns,
-native identity, open/close durations, process receipts and separate body/cleanup
-errors. `items.jsonl` saves observed records as they arrive, with a 64 MiB limit.
+control operations, requested/resolved options, native identity, open/close
+durations, process receipts and separate body/cleanup errors. `items.jsonl`
+saves observed records as they arrive, with a 64 MiB limit.
 Per-turn directories preserve requests and results. Resume also captures each
 process's raw stdout, stderr and exit; resident saves its protocol JSONL,
 diagnostics, open response and final process receipt. Files use mode 0600 and
@@ -237,15 +277,15 @@ configuration should be inspected independently where the providers expose it.
 ## Plain JSON-RPC
 
 `resident.mjs` owns the process, streaming, cursor recovery and cleanup. It starts
-`due rpc` and calls `session.open`, `turn.start`, `session.read`,
+`due rpc` and calls `session.open`, `turn.start`, `turn.interrupt`, `session.read`,
 `interaction.reply`, and `session.close` directly. It consumes `session.item`
 notifications, validates `protocol_version: 1` in the open result, and requires
 the advertised stream.
 
 The client needs no discovery or SDK. Native turn failure is result data;
 transport and RPC errors throw. Native permission replies are exposed through
-`onInteraction`. The client does not yet expose the mid-turn interrupts supported
-by the Due server.
+`onInteraction`; `agent.interrupt({id})` exposes a graceful mid-turn stop without
+closing the session.
 
 For a small two-turn RPC client that writes every observed native item to stdout:
 

@@ -24,11 +24,12 @@ fn both_clients_use_both_native_adapters() {
             fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
             let script = if language == "js" {
                 r#"
-                const p=JSON.parse(bridge.args); let count=0, approvals=0;
+                const p=JSON.parse(bridge.args); let count=0, approvals=0, provider;
                 const c=new DueClient({onItem(i){count++;},onInteraction(i){approvals++;
-                    return p.provider==='claude'?{behavior:'deny',message:'fixture'}:{decision:'cancel'};}});
+                    return provider==='claude'?{behavior:'deny',message:'fixture'}:{decision:'cancel'};}});
                 function check(v){if(!v)throw Error('native adapter assertion');}
-                c.open(p);
+                const opened=c.open(p); provider=opened.provider;
+                check(opened.resolved_options.model==='fixture-profile');
                 check(c.turn('first').status==='succeeded');
                 check(c.turn('ask').text==='permission denied'); check(approvals===1);
                 const t=c.start('hold'), id=c.interrupt(t); c.wait(t); c.await(id);
@@ -37,12 +38,13 @@ fn both_clients_use_both_native_adapters() {
             "#
             } else {
                 r#"
-                local p=json.decode(bridge.args); local count,approvals=0,0
+                local p=json.decode(bridge.args); local count,approvals=0,0; local provider
                 local c=DueClient.new({onItem=function(i) count=count+1 end,
                     onInteraction=function(i) approvals=approvals+1
-                        if p.provider=='claude' then return {behavior='deny',message='fixture'} end
+                        if provider=='claude' then return {behavior='deny',message='fixture'} end
                         return {decision='cancel'} end})
-                c:open(p)
+                local opened=c:open(p); provider=opened.provider
+                assert(opened.resolved_options.model=='fixture-profile')
                 assert(c:turn('first').status=='succeeded')
                 assert(c:turn('ask').text=='permission denied'); assert(approvals==1)
                 local t=c:start('hold'); local id=c:interrupt(t); c:wait(t); c:await(id)
@@ -52,7 +54,17 @@ fn both_clients_use_both_native_adapters() {
             };
             let workflow = dir.path().join("workflow");
             fs::write(&workflow, script).unwrap();
-            let profile = serde_json::json!({"provider":provider,"binary":native,"cwd":dir.path(),"timeout":"10s"});
+            let request = dir.path().join("profile.json");
+            fs::write(
+                &request,
+                serde_json::to_vec(&serde_json::json!({
+                    "schema_version":1,"provider":provider,"model":"fixture-profile",
+                    "ephemeral":true,"native_args":[],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let profile = serde_json::json!({"request":request,"binary":native,"cwd":dir.path(),"timeout":"10s"});
             let output = Command::new(env!("CARGO_BIN_EXE_due-rpc-languages"))
                 .arg(language)
                 .arg(&workflow)

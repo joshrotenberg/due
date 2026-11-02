@@ -75,6 +75,15 @@ test('overlap, duplicate IDs and turn budget do not admit extra processes', asyn
   });
   assert.equal((await receipt()).processes.length, 2);
 });
+test('resume: scoped interruption is explicitly unsupported without launching a turn', async t => {
+  const { options, receipt } = await setup(t);
+  await withSession(options, async agent => {
+    assert.equal(agent.capabilities.interrupt, false);
+    await assert.rejects(agent.interrupt({ id: 'anything' }), /unsupported.*use rpc/);
+  });
+  assert.equal((await receipt()).processes.length, 0);
+  assert.deepEqual((await receipt()).controls, []);
+});
 
 test('returning with live work fails the scope and joins that process', { timeout: 10000 }, async t => {
   const { dir, options, receipt } = await setup(t);
@@ -264,6 +273,57 @@ test('an undefined turn wait keeps the resume backend and its receipt unchanged'
     await copyFile(fileURLToPath(new URL('./resident.fixture.mjs', import.meta.url)), ctx.options.dueBinary);
     return ctx;
   }
+  test('rpc: scope interruption preserves the worker for a follow-up and records controls', { timeout: 5000 }, async t => {
+    const { options, receipt } = await interactive(t, 'interrupt-early');
+    let escaped;
+    await withSession(options, async agent => {
+      escaped = agent;
+      assert.equal(agent.capabilities.interrupt, true);
+      assert.equal(agent.signal.aborted, false);
+      const turn = agent.turn({ id: 'inspect', prompt: 'hold' });
+      await agent.interrupt({ id: 'inspect' });
+      assert.equal((await turn).status, 'cancelled');
+      assert.equal(agent.signal.aborted, false, 'a graceful turn stop must not cancel the scope');
+      assert.equal((await agent.turn({ id: 'redirect', prompt: 'continue' })).status, 'succeeded');
+    });
+    await assert.rejects(escaped.interrupt({ id: 'inspect' }), /scope is closed/);
+    assert.equal(escaped.signal.aborted, true);
+    const saved = await receipt();
+    assert.deepEqual(saved.turns.map(turn => turn.status), ['cancelled', 'succeeded']);
+    assert.equal(saved.controls.length, 1);
+    assert.equal(saved.controls[0].id, 'inspect');
+    assert.equal(saved.controls[0].result.turn_id, 'native-turn-1');
+    assert.equal(saved.processes.length, 1);
+    assert.equal(saved.body_error, null);
+  });
+  test('rpc: scope return with an unfinished control fails and joins it', { timeout: 5000 }, async t => {
+    const { options, receipt } = await interactive(t, 'interrupt-on-close');
+    await assert.rejects(withSession(options, async agent => {
+      const turn = agent.turn({ id: 'first', prompt: 'hold' });
+      agent.interrupt({ id: 'first' });
+      await turn;
+    }), /active control/);
+    const saved = await receipt();
+    assert.match(saved.body_error, /active control/);
+    assert.match(saved.controls[0].error, /Session cancelled/);
+    assert.equal(saved.processes[0].exit_code, 0);
+    assert.equal(saved.processes[0].forced_kill, false);
+  });
+  test('rpc: idle native failure aborts cooperative caller work with the original reason', { timeout: 5000 }, async t => {
+    const { options, receipt } = await interactive(t, 'idle-failed');
+    let observed;
+    await assert.rejects(withSession(options, async agent => {
+      await agent.turn({ id: 'first', prompt: 'work' });
+      observed = agent.signal;
+      await new Promise((resolve, reject) => {
+        agent.signal.throwIfAborted();
+        agent.signal.addEventListener('abort', () => reject(agent.signal.reason), { once: true });
+      });
+    }), /native exited between turns/);
+    assert.equal(observed.aborted, true);
+    assert.match(observed.reason.message, /native exited between turns/);
+    assert.match((await receipt()).body_error, /native exited between turns/);
+  });
   test(`${backend}: turn wait defaults and supported integer bounds are recorded without native forwarding`, async t => {
     for (const [extra, expected] of [[{}, 300_000], [{ turnWaitMs: undefined }, 300_000], [{ turnWaitMs: 1 }, 1], [{ turnWaitMs: 2 ** 31 - 1 }, 2 ** 31 - 1]]) {
       const { dir, options, receipt } = await interactive(t, 'early', extra);

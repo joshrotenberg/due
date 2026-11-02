@@ -79,6 +79,80 @@ for (const [mode, pattern] of [['lost', /journal lost/], ['malformed', /JSON/], 
   });
 }
 const allInputs = async artifactDir => (await readFile(join(artifactDir, 'fixture-input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+test('rpc: immediate interruption binds the submitted turn and permits redirection', { timeout: 5000 }, async t => {
+  const { backend, artifactDir } = await setup(t, 'interrupt-early');
+  assert.equal(backend.capabilities.interrupt, true);
+  const first = backend.turn({ id: 'inspect', prompt: 'hold' });
+  const stopping = backend.interrupt({ id: 'inspect' });
+  await assert.rejects(backend.interrupt({ id: 'inspect' }), /already pending/);
+  await assert.rejects(backend.interrupt({ id: 'other' }), /No active turn/);
+  assert.deepEqual(await stopping, { interrupt_requested: true, turn_id: 'native-turn-1' });
+  assert.equal((await first).result.status, 'cancelled');
+  await assert.rejects(backend.interrupt({ id: 'inspect' }), /No active turn/);
+  assert.equal((await backend.turn({ id: 'redirect', prompt: 'new direction' })).result.status, 'succeeded');
+  assert.equal((await backend.close()).execution_error, undefined);
+  const requests = await allInputs(artifactDir);
+  assert.deepEqual(requests.filter(row => row.method === 'turn.interrupt').map(row => row.params),
+    [{ session_id: 'due-session', turn_id: 'native-turn-1' }]);
+});
+for (const mode of ['interrupt-late', 'interrupt-late-error']) {
+  test(`rpc: ${mode} settles only its original control after the next turn starts`, { timeout: 5000 }, async t => {
+    const { backend, artifactDir } = await setup(t, mode);
+    const first = backend.turn({ id: 'first', prompt: 'hold' });
+    const stopping = backend.interrupt({ id: 'first' });
+    assert.equal((await first).result.status, 'cancelled');
+    const next = backend.turn({ id: 'next', prompt: 'continue' });
+    await assert.rejects(backend.interrupt({ id: 'next' }), /already pending/);
+    if (mode.endsWith('error')) await assert.rejects(stopping, /native rejected original interruption/);
+    else assert.equal((await stopping).turn_id, 'native-turn-1');
+    assert.equal((await next).result.status, 'succeeded');
+    assert.equal((await backend.close()).execution_error, undefined);
+    assert.equal((await allInputs(artifactDir)).filter(row => row.method === 'turn.interrupt').length, 1);
+  });
+}
+test('rpc: terminal observers cannot interrupt a completed turn before the start response', { timeout: 5000 }, async t => {
+  let backend, stopping;
+  const opened = await setup(t, 'interrupt-finished-start', undefined, {
+    onItem: record => {
+      if (record.data.kind === 'turn_finished') {
+        stopping = backend.interrupt({ id: 'first' }); stopping.catch(() => {});
+      }
+    },
+  });
+  backend = opened.backend;
+  const turn = backend.turn({ id: 'first', prompt: 'finish immediately' });
+  const result = await turn;
+  await assert.rejects(stopping, /No active turn/);
+  assert.equal(result.result.status, 'succeeded');
+  await backend.close();
+  assert.equal((await allInputs(opened.artifactDir)).filter(row => row.method === 'turn.interrupt').length, 0);
+});
+test('rpc: caller cancellation settles an in-flight interruption and turn', { timeout: 5000 }, async t => {
+  const controller = new AbortController();
+  let ready;
+  const waiting = new Promise(resolve => { ready = resolve; });
+  const { backend, artifactDir } = await setup(t, 'interrupt-hold', controller.signal, {
+    onItem: record => { if (record.data.data?.method === 'fixture/control-waiting') ready(); },
+  });
+  const turn = backend.turn({ id: 'first', prompt: 'hold' });
+  const stopped = backend.interrupt({ id: 'first' });
+  const turnFailure = assert.rejects(turn, /Session cancelled/);
+  const controlFailure = assert.rejects(stopped, /Session cancelled/);
+  await waiting;
+  controller.abort();
+  await Promise.all([turnFailure, controlFailure]);
+  assert.equal((await backend.close()).processes[0].exit_code, 0);
+  assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
+});
+test('rpc: close joins a control whose native acknowledgement never arrived', { timeout: 5000 }, async t => {
+  const { backend } = await setup(t, 'interrupt-on-close');
+  const turn = backend.turn({ id: 'first', prompt: 'hold' });
+  const stopped = backend.interrupt({ id: 'first' });
+  const rejection = assert.rejects(stopped, /closed before its response/);
+  assert.equal((await turn).result.status, 'cancelled');
+  assert.equal((await backend.close()).processes[0].exit_code, 0);
+  await rejection;
+});
 const inputs = async artifactDir => (await allInputs(artifactDir))
   .map(row => ({ name: row.method, args: row.params }))
   .filter(row => row.name === 'interaction.reply');
@@ -94,6 +168,21 @@ test(`rpc: interactionReply is advertised only with a callback`, async t => {
   assert.equal((await setup(t)).backend.capabilities.interactionReply, false);
   assert.equal((await interactive(t, 'early', () => ({}))).backend.capabilities.interactionReply, true);
   await assert.rejects(openRpc({ dueBinary, artifactDir: '/nonexistent', profile: {}, onInteraction: 'yes' }), /must be a function/);
+});
+test('rpc: graceful interruption retires a pending permission without sending its late decision', { timeout: 5000 }, async t => {
+  let ready, observed;
+  const waiting = new Promise(resolve => { ready = resolve; });
+  const { backend, artifactDir } = await interactive(t, 'interaction', (_record, signal) => {
+    observed = signal; ready();
+    return new Promise(resolve => signal.addEventListener('abort', () => resolve({ decision: 'accept' }), { once: true }));
+  });
+  const turn = backend.turn({ id: 'first', prompt: 'ask' });
+  await waiting;
+  await backend.interrupt({ id: 'first' });
+  assert.equal((await turn).result.status, 'cancelled');
+  assert.equal(observed.aborted, true);
+  assert.equal((await backend.close()).execution_error, undefined);
+  assert.deepEqual(await inputs(artifactDir), []);
 });
 for (const response of [{ decision: 'decline' }, { decision: 'accept' }]) {
   test(`rpc: async ${response.decision} is routed with exact IDs while items keep flowing`, async t => {

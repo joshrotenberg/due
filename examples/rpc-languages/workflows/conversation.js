@@ -15,6 +15,7 @@ var conversationResult = (function () {
     throw new Error('bridge.args must be a JSON object with a "profile" object');
   }
   var profile = input.profile;
+  var provider;
   var marker = typeof input.marker === 'string' && input.marker ? input.marker : 'due-marker-7391';
   var first = typeof input.first_prompt === 'string' ? input.first_prompt :
     'Remember this marker: ' + marker + '. Do not use tools or access files. Reply with only the word stored.';
@@ -28,7 +29,6 @@ var conversationResult = (function () {
 
   // Explicit denial in the provider's native shape. Nothing is ever approved.
   function onInteraction(item) {
-    var provider = profile.provider;
     var request = item.data && item.data.request;
     var response;
     if (provider === 'claude') {
@@ -55,6 +55,7 @@ var conversationResult = (function () {
   var summary;
   try {
     var opened = client.open(profile);
+    provider = opened.provider;
     bridge.log('opened session ' + opened.session_id);
     var r1 = checked(client.turn(first, turnTimeout), 'first');
     var r2 = checked(client.turn(second, turnTimeout), 'second');
