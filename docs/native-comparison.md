@@ -1,5 +1,9 @@
 # Due and native subagents
 
+This historical comparison describes the one-shot CLI before the resident RPC
+and JavaScript harness. For current supervision behavior use [harness](harness.md)
+and [RPC](rpc.md); the feature-freeze decisions below are not current policy.
+
 Snapshot: 2026-10-11, Due 0.1.0 source trial, Claude Code 2.1.296 and Codex
 0.162.0. Native documentation can describe newer behavior; this is a design
 comparison, not a claim that every native feature was exercised in these runs.
@@ -58,7 +62,7 @@ same provider and available native session storage. Turning off ephemeral mode
 later cannot recover a session that was never persisted. A native child-agent
 ID is not interchangeable with Due's top-level session ID.
 
-## Decisions during the feature freeze
+## Historical decisions during the feature freeze
 
 Update guidance and examples now: monitored runs without arbitrary deadlines,
 explicit context handoff, native permission/configuration inheritance, delegation

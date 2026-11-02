@@ -5,6 +5,11 @@ description: Observe a Due run through content-limited progress traces while pre
 
 # Observe execution
 
+This guide describes `due run` progress traces. For resident assignments,
+`due script` provides streamed session items and process/command evidence;
+read `due skills show supervise` in a harness-enabled build. These full items
+can contain task content and are not the content-limited trace format below.
+
 Enable tracing when live session, process, activity, or waiting information helps.
 Tracing changes observation, not the task's authorization or native permissions.
 For a prepared prompt in `task.txt`, choose a new log path and run:

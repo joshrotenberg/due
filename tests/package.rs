@@ -63,6 +63,10 @@ fn plugin_identity_version_and_entry_skill_match_the_source_package() {
         cargo["package"]["version"].as_str()
     );
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        manifest["$schema"],
+        "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+    );
     nonempty(&manifest, "description");
     nonempty(&manifest["author"], "name");
     let interface = &manifest["extensions"]["com.openai"]["interface"];
@@ -75,6 +79,14 @@ fn plugin_identity_version_and_entry_skill_match_the_source_package() {
     ] {
         nonempty(interface, field);
     }
+    assert!(
+        interface["shortDescription"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 30
+    );
 
     let skill = document(&plugin_root, "skills/delegate/SKILL.md");
     let (frontmatter, body) = skill
@@ -173,9 +185,16 @@ fn source_distribution_has_its_docs_contracts_and_no_plugin_services() {
         "docs/install.md",
         "docs/cli.md",
         "docs/dogfooding.md",
+        "docs/harness.md",
+        "docs/rpc.md",
         "embedded-skills/run/SKILL.md",
         "embedded-skills/contracts/SKILL.md",
         "embedded-skills/observe/SKILL.md",
+        "embedded-skills/supervise/SKILL.md",
+        "crates/due-harness/Cargo.toml",
+        "crates/due-harness/src/lib.rs",
+        "crates/due-harness/clients/async.js",
+        "examples/harness/supervision.js",
     ] {
         document(&root, path);
     }
@@ -184,6 +203,7 @@ fn source_distribution_has_its_docs_contracts_and_no_plugin_services() {
         "schemas/run-result.schema.json",
         "schemas/trace.schema.json",
         "schemas/trace-summary.schema.json",
+        "schemas/script-result.schema.json",
     ] {
         let schema = json(&root, path);
         assert!(schema.is_object());

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Due JavaScript workflow result",
+  "description": "One script result emitted after owned work and cleanup settle. Workflow success is distinct from the caller's acceptance verdict. Evidence paths describe the attempted run and may not exist when setup failed.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": 1 },
+    "cli_version": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["succeeded", "failed"] },
+    "result": {},
+    "error": { "type": ["string", "null"] },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "evidence": {
+      "description": "Null when the invocation directory is unavailable or the evidence path cannot be represented as UTF-8 JSON.",
+      "type": ["object", "null"],
+      "properties": {
+        "directory": { "type": "string", "minLength": 1 },
+        "stdout": { "type": "string", "minLength": 1 },
+        "process": { "type": "string", "minLength": 1 },
+        "commands": { "type": "string", "minLength": 1 },
+        "workflow": { "type": "string", "minLength": 1 }
+      },
+      "required": ["directory", "stdout", "process", "commands", "workflow"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["schema_version", "cli_version", "status", "result", "error", "duration_ms", "evidence"],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "succeeded" } } },
+      "then": { "properties": { "error": { "type": "null" } } },
+      "else": { "properties": { "result": { "type": "null" }, "error": { "type": "string", "minLength": 1 } } }
+    }
+  ]
+}

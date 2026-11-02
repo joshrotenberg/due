@@ -7,6 +7,8 @@ mod result;
 #[cfg(feature = "rpc")]
 mod rpc;
 mod schema;
+#[cfg(feature = "harness")]
+mod script;
 #[cfg(feature = "rpc")]
 mod session;
 mod skills;
@@ -30,6 +32,8 @@ async fn main() -> ExitCode {
     match Cli::parse().command {
         #[cfg(feature = "rpc")]
         Command::Rpc => rpc::execute().await,
+        #[cfg(feature = "harness")]
+        Command::Script(args) => script::execute(args).await,
         Command::Run(run) => run_command(*run).await,
         Command::Init(args) => init::execute(args).await,
         Command::Skills(args) => skills::execute(&args),

@@ -1,4 +1,4 @@
-//! Opt-in newline-delimited JSON-RPC session adapter.
+//! Newline-delimited JSON-RPC session adapter.
 
 mod stdio;
 

@@ -5,17 +5,20 @@ edition = "2024"
 rust-version = "1.90"
 publish = false
 
+# Historical comparison remains a separate build while reusing the shipped runtime.
+[workspace]
+resolver = "3"
+
 [features]
 default = ["lua", "js"]
 lua = ["dep:mlua"]
-js = ["dep:rquickjs"]
+js = ["due-harness/js"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "sync", "time", "macros", "signal"] }
+due-harness = { path = "../../crates/due-harness", default-features = false }
 mlua = { version = "=0.12.2", optional = true, default-features = false, features = ["lua54", "vendored", "serde"] }
-rquickjs = { version = "=0.14.0", optional = true, default-features = false, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

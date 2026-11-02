@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[command(
     version,
     about = "One CLI for Claude Code and Codex",
-    after_help = "Start with `due run --help` for execution options.\nInstall the bundled plugin with `due init`; preview with `due init --dry-run`.\nAgents can discover bundled guidance with `due skills`."
+    after_help = "Use `due run --help` for one turn or a resumed conversation.\nWhen available, `due script --help` supervises a resident session with embedded JavaScript.\nInstall the bundled plugin with `due init`; preview with `due init --dry-run`.\nAgents can discover bundled guidance with `due skills`."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -19,9 +19,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Experimental resident sessions over JSON-RPC stdio (one session per process).
+    /// Resident sessions over JSON-RPC stdio (one session per process).
     #[cfg(feature = "rpc")]
     Rpc,
+    /// Supervise a bounded assignment with embedded JavaScript; no Node required.
+    #[cfg(feature = "harness")]
+    Script(crate::script::ScriptArgs),
     /// Run one noninteractive turn, optionally continuing an existing session.
     Run(Box<RunCommand>),
     /// Install the bundled delegate plugin locally; no model work is started.

@@ -1,17 +1,25 @@
 [package]
 name = "due"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 description = "One command-line interface for Claude Code and Codex"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[workspace]
+members = [".", "crates/due-harness"]
+default-members = [".", "crates/due-harness"]
+exclude = ["examples/rpc-languages"]
+resolver = "3"
+
 [features]
-default = []
+default = ["harness"]
+harness = ["rpc", "dep:due-harness"]
 rpc = ["codex-wrapper/app-server", "dep:tokio-util", "dep:futures-util", "tokio/io-std", "tokio/net", "tokio/sync"]
 
 [dependencies]
+due-harness = { path = "crates/due-harness", default-features = false, features = ["js"], optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
 claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }

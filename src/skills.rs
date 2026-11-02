@@ -34,6 +34,12 @@ const SKILLS: &[Skill] = &[
         description: "Observe a Due run through content-limited progress traces while preserving final results and detecting trace loss.",
         content: include_str!("../embedded-skills/observe/SKILL.md"),
     },
+    #[cfg(feature = "harness")]
+    Skill {
+        name: "supervise",
+        description: "Supervise a resident Claude Code or Codex assignment with embedded JavaScript, streamed items, explicit permissions and independent verification.",
+        content: include_str!("../embedded-skills/supervise/SKILL.md"),
+    },
 ];
 
 pub fn execute(args: &SkillsArgs) -> ExitCode {

@@ -4,7 +4,8 @@ Detailed operating rules for `due run`, request profiles, structured answers,
 tracing, native passthrough, and results. Start with the [README](../README.md)
 for the overview and quickstart. The installed binary is the authority for its
 own version: `due run --help`, `due skills show NAME`, and `due schema NAME`
-describe exactly what that build accepts.
+describe exactly what that build accepts. For resident sessions see the
+[JavaScript harness](harness.md) and [raw RPC](rpc.md) references.
 
 Each `due run` invocation owns one foreground provider run; the caller and operating
 system own concurrency, scheduling, and any later retry.
@@ -22,11 +23,13 @@ due skills list --output json      # Versioned catalog for automated selection
 due skills show run                # Scope, execution, and verifying effects
 due skills show contracts          # Structured answers and result semantics
 due skills show observe            # Progress, trace loss, and cancellation
+due skills show supervise          # Resident JavaScript assignments
 due skills show contracts --output json
 due schema request                # Installed input contract as JSON Schema
 due schema result                 # Installed result envelope contract
 due schema trace                  # Installed progress record contract
 due schema trace-summary          # Installed offline summary contract
+due schema script-result          # Installed JavaScript result contract
 due trace summarize run.jsonl --output json
 ```
 
@@ -838,8 +841,8 @@ The CI checks are:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
 ```
 
 Tests launch fake provider executables, not models. They exercise actual argv,
@@ -847,18 +850,19 @@ stdin, cwd, native passthrough, resume/ephemeral mapping, dry-run, final-answer
 normalization, failures, and Unix timeout/SIGINT/SIGTERM/SIGHUP descendant cleanup. Tracing tests
 also hold a gated fake provider mid-run to verify early event delivery, heartbeat
 behavior, content omission, sink handling, and cleanup with a blocked trace
-consumer. Protocol fixtures follow the wrappers' recorded CLI shapes. The unit of
-execution remains one noninteractive turn; no interactive UI, response streaming,
-scheduler, or provider authentication flow is included.
+consumer. Protocol fixtures follow the wrappers' recorded CLI shapes. These
+`due run` paths remain one noninteractive turn. Separate RPC and harness tests
+cover resident sessions, streamed items, async supervision and process settlement.
 
 The implementation uses Clap, one shared request/result contract, and separate
-provider adapters over the existing wrappers' cancellable execution APIs. Its
-scope is one invocation, one provider run, one result, and optional observation.
+provider adapters over the existing wrappers' cancellable execution APIs. The
+`due run` scope is one invocation, one provider run, one result, and optional observation.
 Shared features translate provider differences or improve execution reliability;
 agent lifetimes, queues, automatic retries, context catalogs, configuration
 hierarchies, and repository management belong to the caller.
 
-The CLI, plugin, and embedded skills use the same foreground operation; they add
-no MCP server, queue, scheduler, or retained agent runtime. Request input describes
-one execution. Artifacts and external effects still need the caller's independent
+The plugin and embedded skills select the installed one-shot or supervised
+interface. `due script` adds a foreground JavaScript workflow above resident RPC;
+it does not add an MCP server, background daemon or persistent queue. A run request
+still describes one execution. Artifacts and external effects still need the caller's independent
 verification; Due does not collect verified effect receipts.

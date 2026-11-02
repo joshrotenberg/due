@@ -1,31 +1,31 @@
-# Contributing during the feature freeze
+# Contributing
 
-This is a private source-install trial. Limit changes to defects, documentation,
-packaging, and tests that protect existing behavior. The explicitly scoped `due init` command
-is the packaging exception: it installs the existing delegate plugin without
-starting agent work. Other new commands, configuration layers, automatic retries,
-schedulers and MCP servers remain outside the freeze. The explicitly requested
-resident-session spike is isolated behind the opt-in `rpc` feature;
-it must preserve `due run` behavior and existing wrapper revisions. See the
-[plain RPC guide](docs/rpc.md). The MCP experiment lives separately on
-`codex/due-mcp-spike`. The explicitly requested embedded-client comparison is
-isolated in a separate private crate under `examples/rpc-languages`; it uses the
-same RPC bridge for Lua and JavaScript and must not change default Due dependencies
-or `due run`.
-That comparison includes explicitly scoped async supervision: Promises and
-managed coroutines over the same bounded Rust verifier bridge. It does not
-unfreeze unrelated features or enable the earlier source-trial workflow.
+Due is open for development. The supported direction is one-shot execution,
+resident JSON-RPC sessions, and a JavaScript harness that composes bounded
+assignments above that protocol. Preserve existing `due run` behavior and versioned
+contracts. Rust owns provider/process lifecycle and limits; caller scripts own
+assignment composition and independent acceptance checks. Do not move a policy
+loop into the RPC server.
+
+Normal builds ship RPC and the JavaScript harness. The `rpc` and `harness`
+features also permit explicit reduced builds; test the feature combinations
+when changing gated code. Lua remains in the separate historical comparison.
+The MCP experiment stays on `codex/due-mcp-spike` and is not part of this direction.
+
+The earlier source-trial requirements are retired. Development does not require
+Due-only delegation, reporting every successful call, or periodic A/B runs.
+Follow the current task's authorized tools, provider choices and reporting scope.
 
 Use [installation](docs/install.md) for local setup and
 [dogfooding](docs/dogfooding.md) for issue reports. Keep changes small and include
 a reproduction or explanation of the behavior they protect.
 Use [troubleshooting](docs/troubleshooting.md) for layer-specific recovery and
-repairing an existing frozen checkout build without updating the installation.
+repairing an existing checkout build without updating the installation.
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
 cargo +1.90 check --locked
 cargo build --release --locked
 ```
@@ -33,8 +33,8 @@ cargo build --release --locked
 Tests use fake providers and do not need model credentials. Real provider runs
 consume the caller's account resources and can mutate files; use them only for an
 authorized, bounded task in a disposable workspace and retain the result/trace.
-One Due invocation owns one foreground run. The caller owns orchestration and
-independent verification.
+Each `due run` invocation owns one foreground turn; each RPC or script process
+owns its resident session. The caller owns orchestration and independent verification.
 
 The optional [JavaScript session comparison](examples/session-harness/README.md)
 uses one scoped API over CLI resume and resident RPC. Its offline tests use
@@ -73,7 +73,7 @@ no runtime dependency, command, feature or workflow engine.
 The [native control audit](docs/native-control-audit.md) and
 [trace evidence](docs/native-trace-evidence.md) retain historical, versioned
 caller observations. Extracting them onto this stable branch does not revalidate
-them on current provider versions or authorize updating an installed frozen build.
+them on current provider versions or replace an installed build automatically.
 
 Keep Cargo.lock committed and preserve the exact wrapper Git revisions. Review
 dependency updates separately. The crate has `publish = false`; source readiness
@@ -82,13 +82,14 @@ does not authorize a crates.io release or wrapper release.
 Runtime help, README/reference docs, exported schemas and embedded skills should
 agree. Changes to embedded guides or schemas require rebuilding the binary.
 The plugin entry skill should remain short and route into installed guidance.
-Keep plugin and crate versions aligned; source trial reports also need the Git
-commit because the version alone does not distinguish local builds.
+Keep plugin and crate versions aligned. Source reports also need the Git commit
+because the version alone does not distinguish local builds.
 
 CI covers macOS/Linux and checks Rust 1.90. Any untested platform or native CLI
 behavior should be identified in the report rather than inferred from a green
 fake-provider test.
 
-The [embedded Lua/JavaScript clients](examples/rpc-languages/README.md) have their
-own lockfile and fixture tests. Validate their nested manifest separately; they
-are not included in root Cargo commands.
+The [historical Lua/JavaScript comparison](examples/rpc-languages/README.md) has
+its own lockfile and fixtures. It shares the production Rust/JavaScript runtime;
+validate its nested manifest separately when changing that boundary. New product
+examples and guidance should target `due script`, not the comparison runner.

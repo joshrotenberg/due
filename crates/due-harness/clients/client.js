@@ -1,4 +1,4 @@
-// Embedded Due RPC guest client (JavaScript), first slice.
+// Validated embedded Due RPC transport used by the managed JavaScript scope.
 //
 // Runs inside a host interpreter that provides only `bridge` (send, recv, now_ms, log, args).
 // No imports, filesystem, network, timers or Promises are used. Everything is SYNCHRONOUS and
@@ -640,6 +640,12 @@ var DueClient = (function () {
     });
   };
 
+  // The scope uses the same strict JSON contract for its caller-facing result.
+  Object.defineProperty(DueClientImpl, '_encodeResult', { value: function (value) {
+    var encoded = encode(value === undefined ? null : value, 'result', []);
+    if (utf8Length(encoded) > 1024 * 1024) throw new Error('workflow result exceeds 1 MiB');
+    return encoded;
+  } });
   var g = typeof globalThis !== 'undefined' ? globalThis : undefined;
   if (g) { g.DueError = DueError; }
   return DueClientImpl;

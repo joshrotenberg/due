@@ -1,14 +1,17 @@
 # Due delegate plugin
 
-This skills-only plugin helps an agent run one bounded task through the local
+This skills-only plugin helps an agent run a bounded assignment through the local
 Due CLI, using Claude Code or Codex, and independently verify the result and
-workspace changes. Its `delegate` skill points to `due --help` and the guides
+workspace changes. Choose a one-shot `due run`, a resident JavaScript `due script`,
+or an independent raw RPC client. Its `delegate` skill points to `due --help` and the guides
 embedded in the installed executable.
 
 Keep `due` and the selected provider CLI on PATH. Provider authentication and
 permissions remain the host's responsibility. The package contains no MCP server,
 hooks or background process. Installing it starts no model work and does not
-enable the optional Due source-trial policy.
+enable a global delegation/reporting policy. The former source-trial and A/B
+requirements are retired. JavaScript is embedded in normal Due builds, so the
+harness needs no Node installation.
 
 Use `due init --dry-run`, then `due init` to install for both hosts, or select
 `--host claude` or `--host codex`. Reload plugins or start a fresh host session

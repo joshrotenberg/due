@@ -17,6 +17,43 @@ fn exported(name: &str) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+#[cfg(feature = "harness")]
+#[test]
+fn script_result_contract_covers_success_and_input_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("result.js");
+    std::fs::write(
+        &script,
+        "Due.run(async scope => ({accepted:false, checks:[]}));",
+    )
+    .unwrap();
+    let schema = exported("script-result");
+    for (name, args, code) in [("ok", "{}", 0), ("bad", "not-json", 2)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_due"))
+            .arg("script")
+            .arg(&script)
+            .arg("--evidence")
+            .arg(root.path().join(name))
+            .args(["--args", args])
+            .env("PATH", "")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(matches(&schema, &value, &schema), "{value}");
+        if code == 0 {
+            // Successful execution does not reinterpret a caller's verdict.
+            assert_eq!(value["result"]["accepted"], false);
+        } else {
+            let mut invalid = value.clone();
+            invalid["result"] = json!({"accepted":true});
+            assert!(!matches(&schema, &invalid, &schema));
+            assert!(!root.path().join(name).exists());
+        }
+    }
+}
+
 // Check the exported schema's structural assertions against actual CLI output.
 // This test helper is deliberately not an independent model-answer validator.
 fn matches(schema: &Value, value: &Value, root: &Value) -> bool {
@@ -155,6 +192,11 @@ fn schema_exports_are_offline_embedded_documents() {
         (
             "trace-summary",
             include_str!("../schemas/trace-summary.schema.json"),
+        ),
+        #[cfg(feature = "harness")]
+        (
+            "script-result",
+            include_str!("../schemas/script-result.schema.json"),
         ),
     ] {
         let schema = exported(name);

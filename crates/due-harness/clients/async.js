@@ -1,4 +1,4 @@
-// Optional Promise supervision over the synchronous client's validated protocol.
+// Managed JavaScript supervision over the transport's validated RPC protocol.
 // Rust advances QuickJS jobs and calls __dueTick; callbacks never block that pump.
 var Due = (function () {
   'use strict';
@@ -8,6 +8,9 @@ var Due = (function () {
   let client, worker, bodyDone = false, shutting = false, shutdownAt = 0;
   let opening = false, active = null, starting = false, interrupted = null;
   let options = {}, sessionController;
+  let resultJson = 'null';
+  const encodeResult = DueClient._encodeResult;
+  const log = bridge.log;
   const message = e => e && typeof e.message === 'string' ? e.message : String(e);
   const error = e => e instanceof Error ? e : new Error(message(e));
   const copy = value => client ? client._cloneItem(value) : value;
@@ -255,17 +258,26 @@ var Due = (function () {
     }
   }
   const api = Object.freeze({
+    args: JSON.parse(bridge.args),
+    log(text) {
+      if (typeof text !== 'string') throw new Error('Due.log requires a string');
+      log(text);
+    },
     run(body) {
       if (state.started) throw new Error('Due.run may be called once');
       if (typeof body !== 'function') throw new Error('Due.run requires a function');
       state.started = true; sessionController = controller();
       const scope = Object.freeze({ signal: sessionController.signal, open, exec, sleep, cancel: fail });
-      Promise.resolve().then(() => body(scope)).then(() => { bodyDone = true; }, e => { fail(e); bodyDone = true; });
+      Promise.resolve().then(() => body(scope)).then(value => {
+        try { resultJson = encodeResult(value); } catch (e) { fail(e); }
+        bodyDone = true;
+      }, e => { fail(e); bodyDone = true; });
     },
   });
   globalThis.__dueTick = tick;
   globalThis.__dueState = () => JSON.stringify({ started: state.started, done: state.done,
     error: state.error ? message(state.error) : null });
   globalThis.__dueFail = value => { fail(value); bodyDone = true; };
+  globalThis.__dueResult = () => resultJson;
   return api;
 })();

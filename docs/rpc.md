@@ -1,24 +1,25 @@
-# Plain JSON-RPC stdio spike
+# JSON-RPC stdio
 
-Build only the RPC adapter, then launch it as a child process:
+Normal Due builds include the resident RPC interface. Launch it as a child process:
 
 ```sh
-cargo build --locked --release --features rpc
-./target/release/due rpc
+due rpc
 ```
 
-This opt-in interface hosts a resident Claude `DuplexSession` or Codex
-`AppServer`, with one session per Due process and one active turn at a time.
-The separate [MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
-lives on `codex/due-mcp-spike`; this branch contains only the RPC adapter.
-Default builds and `due run` behavior remain unchanged; wrapper revisions stay
-pinned. There is no model loop, scheduler, config loader or new configuration
-format. Native authentication, settings and permissions remain inherited.
+The interface hosts a resident Claude `DuplexSession` or Codex `AppServer`, with
+one session per Due process and one active turn at a time. Native authentication,
+settings and permissions remain inherited. The RPC server owns sessions and
+transport, not an assignment/verification loop. Existing JSON profiles supply
+configuration; there is no new configuration format.
 
-The optional [embedded-client comparison](../examples/rpc-languages/README.md)
-runs Lua and QuickJS over one Rust raw-frame bridge. Each language implements
-its own client above this wire contract; external callers can implement the
-same operations without embedding either runtime.
+The supported [JavaScript harness](harness.md), `due script`, composes workflows
+above this wire contract with the same Rust process ownership used in the
+[language comparison](rpc-languages.md). External clients can implement the same
+operations without embedding JavaScript or using the bundled client. `due run`
+keeps its one-shot behavior. Reduced source builds can select only `--features rpc`
+with `--no-default-features`. The separate
+[MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
+remains outside this implementation.
 
 ## Wire contract
 
@@ -350,11 +351,13 @@ The current split has two responsibilities:
   callbacks after failure, and preserve evidence through cleanup. Parsed values
   also inherit that language's representation limits.
 
-The Node example is a small standalone client of this contract. The optional
-[embedded comparison](rpc-languages.md) uses Lua and JavaScript clients over the
-same stdio operations. The session host remains the authority for provider
-lifecycle and turn state. A public Rust library, packaged client and choice of
-embedded engine remain future decisions.
+The Node example is a standalone client of this contract. The supported
+[embedded JavaScript harness](harness.md) uses the same stdio operations; its
+Rust bridge owns the Due child and verifier processes, while JavaScript owns
+request routing, callbacks and workflow composition. The session host remains
+the authority for provider lifecycle and turn state. The private shared Rust
+harness crate is an implementation detail, not a published Rust API. Lua remains
+in the [historical comparison](rpc-languages.md).
 
 ## A supervised subagent
 
@@ -377,17 +380,15 @@ caller-owned verification or checkpoint work. Full items remain in evidence;
 the parent can consume summaries without putting the whole transcript into its
 model context.
 
-The [embedded comparison](../examples/rpc-languages/README.md#async-supervision)
-now offers an opt-in `--async` mode with the same supervised assignment in Lua
-and QuickJS. Both clients keep consuming items while a permission check or
-independent verifier awaits the shared Rust command runner. The caller scope
-owns cancellation, joins managed work and closes the session; Rust owns command
-limits, process settlement and evidence. JSON profiles work unchanged. This is
-still a private comparison, not a shipped harness command. A session remains
+The supported [embedded harness](harness.md) performs the same supervision through
+`due script`, without Node. It keeps consuming items while a permission check or
+independent verifier awaits the Rust command runner. The caller scope owns
+cancellation, joins managed work and closes the session; Rust owns command limits,
+process settlement and evidence. JSON profiles work unchanged. A session remains
 process-local: durable reconnection or replay after process loss is not provided
 by the bounded journal.
 
-## Checking the spike
+## Checking the interface
 
 ```sh
 cargo test --locked --features rpc --test rpc
@@ -414,10 +415,10 @@ node examples/session-harness/compare.mjs --due ./target/release/due \
   --artifacts /path/to/fresh-comparison --backend all
 ```
 
-RPC keeps the external wire exchange small; callers still handle lifecycle,
-permissions and recovery. Embedded Lua/JavaScript bindings could call the
-session host directly without a wire protocol. This spike does not implement
-those bindings.
+RPC keeps the external wire exchange small; independently written clients still
+handle lifecycle, permissions and recovery. The supported JavaScript harness
+uses that same protocol rather than a second direct provider API. A published
+Rust client or direct session-host binding remains a separate packaging decision.
 
 The observations below were recorded before the transport branches split.
 Their commit IDs, binaries and test counts refer to those historical snapshots.

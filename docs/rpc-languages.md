@@ -1,5 +1,11 @@
 # Embedded clients on the RPC boundary
 
+Decision: JavaScript is the supported harness language in Due 0.2.0. Use
+[`due script`](harness.md) for product workflows. The report below records the
+comparison that informed this choice; its test counts, versions and live evidence
+are historical observations, not the current release validation summary. The
+comparison runner now shares the production Rust/JavaScript implementation.
+
 The current split is useful: Rust owns native sessions and the wire contract;
 an optional language client gives scripts session operations and item callbacks.
 A user can also implement the raw newline-delimited JSON-RPC protocol directly.
@@ -8,8 +14,10 @@ Due's choice of scripting language.
 
 The [comparison runner](../examples/rpc-languages/README.md) implements that
 boundary with embedded Lua and QuickJS on the same Rust process/I/O bridge.
-It is a separate private crate, with no changes to default Due dependencies,
-`due run`, wrapper revisions or the separate MCP branch. Inputs remain JSON.
+The comparison was isolated in a separate private crate before the language
+decision. Production now includes JavaScript and RPC in normal builds, while
+`due run` semantics, wrapper revisions and the separate MCP branch are preserved.
+Inputs remain JSON.
 
 ## What was compared
 
@@ -169,21 +177,18 @@ managed coroutines make ownership easier to enumerate, at the cost of an explici
 JSON adapter and suspension hidden inside method calls. Both pass the same
 supervision contract. Neither result measures agent authoring quality or speed.
 
-## Proposed path to a supported harness
+## Selected harness
 
-Choose one supported embedded language after reviewing the paired workflows;
-JavaScript is the current recommendation. Keep the Rust provider lifecycle and
-raw RPC contract independently usable. The language layer should own assignment
-composition, callbacks and acceptance policy, with the Rust bridge owning its
-processes and bounds. Preserve JSON profiles and existing `due run` semantics.
+JavaScript is selected. [`due script`](harness.md) is the supported command, with
+versioned JSON results, existing JSON profiles and embedded `supervise` guidance.
+Normal builds include it and raw RPC; the delegate plugin routes callers to the
+installed one-shot or supervision guidance. The shared private Rust harness
+crate owns the processes and limits beneath both the product and comparison tests.
 
-The next implementation slice should define the shipped command, supported client
-API and evidence contract, then integrate that one runtime into packaging. Update
-help, examples, delegate guidance and plugin features together so callers can
-choose one-shot work or a supervised resident assignment. Unfreeze that scope
-explicitly; it does not reinstate the old mandatory source-trial/reporting workflow.
-Review and merge the RPC/harness work with those interfaces in place, then use it
-on ordinary development projects and collect concrete failures and friction.
+The feature freeze is lifted. Caller-facing assignment composition belongs in
+JavaScript, while Rust retains provider lifecycle and raw RPC ownership. Use Due
+on ordinary development projects and improve it from concrete failures and
+friction. The former mandatory source-trial/reporting and A/B workflow is retired.
 
 Other explicit limits remain: these clients fail on item gaps instead of
 implementing cursor replay; interpreter deadlines are cooperative, including
@@ -192,6 +197,6 @@ not an untrusted-code sandbox. Each scope owns one session; parallel workers
 require separate scopes/processes, not a new server-side agent loop. Host verifier
 commands are not constrained by native profile sandboxes. Unix descendants that
 escape their owned process group are outside supervision; non-Unix group cleanup
-is not implemented. The local async evidence is macOS-only; Linux CI must also
-pass before promoting this as supported behavior. A public Rust RPC crate or
+is not implemented. The initial local async comparison evidence was macOS-only; current supported
+builds require the repository's macOS/Linux CI checks. A public Rust RPC crate or
 standalone client remains a packaging decision after the contract stabilizes.

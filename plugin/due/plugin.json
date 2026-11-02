@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "due",
-  "version": "0.1.0",
-  "description": "Delegate bounded coding tasks through the local Due CLI for Claude Code and Codex.",
+  "version": "0.2.0",
+  "description": "Delegate bounded coding assignments through Due, with one-shot runs or supervised resident Claude Code and Codex sessions.",
   "author": {
     "name": "Josh Rotenberg"
   },
@@ -11,7 +11,7 @@
       "interface": {
         "displayName": "Due",
         "shortDescription": "Delegate with Claude or Codex",
-        "longDescription": "Run one bounded task through the locally installed Due CLI. Discover the installed help and embedded skills, preserve result contracts, and verify the actual changes.",
+        "longDescription": "Use the locally installed Due CLI for one-shot tasks or supervised JavaScript assignments across resident Claude Code or Codex turns. Discover installed guidance, preserve results and evidence, and independently verify changes.",
         "developerName": "Josh Rotenberg",
         "category": "Developer Tools",
         "defaultPrompt": "Use Due to delegate a bounded task and verify the resulting changes."

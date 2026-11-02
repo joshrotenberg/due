@@ -90,11 +90,12 @@ A verification result arriving after cancellation cannot accept the assignment
 or start another turn. Gracefully interrupting a worker turn is distinct from
 cancelling the whole session.
 
-This example runs in Node. The separate [embedded Lua and QuickJS comparison](../rpc-languages/README.md#async-supervision)
-now implements the same bounded assignment with `--async`: Promises or managed
-coroutines over a shared Rust command supervisor. That owner provides command
-deadlines, output bounds, cancellation and settlement without a Node runtime.
-The raw RPC interface remains available to independently written clients.
+This example runs in Node as an independently implemented caller. The supported
+[embedded JavaScript harness](../../docs/harness.md) now ships as `due script`,
+with a [matching assignment example](../harness/supervision.js). Its Rust owner
+provides command deadlines, output bounds, cancellation and settlement without
+a Node runtime. The raw RPC interface remains available to custom clients; the
+[Lua comparison](../rpc-languages/README.md) is historical, not a product runtime.
 
 Run the deterministic examples without providers or credentials:
 

@@ -26,7 +26,16 @@ const MAX_CAPTURE: usize = 64 * 1024 * 1024;
 const MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_QUEUE_FRAMES: usize = 256;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+// The pinned RPC implementation may finish an open while holding its manager
+// lock: Codex initialize + thread/start each allow 30 seconds. Then allow native
+// EOF/termination (10s), stderr settlement (0.5s), request drain (2s), RPC output
+// drain (5s) and portable stdio output drain (5s): 82.5s plus scheduling margin.
+// This grace must be reviewed when those server/wrapper bounds change. Killing
+// Due sooner can strand a native child that its owner was still settling.
+const RPC_SHUTDOWN_GRACE: Duration = Duration::from_secs(90);
+const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(2);
+const FORCED_TERMINATION: &str =
+    "Due RPC child required forced termination; native process settlement is unconfirmed";
 
 struct State {
     failure: watch::Sender<Option<String>>,
@@ -64,6 +73,7 @@ pub struct Bridge {
     state: Arc<State>,
     evidence: PathBuf,
     pid: u32,
+    shutdown_grace: Duration,
     finished: Option<Result<(), String>>,
 }
 
@@ -124,6 +134,7 @@ impl Bridge {
             state,
             evidence: evidence.to_owned(),
             pid,
+            shutdown_grace: RPC_SHUTDOWN_GRACE,
             finished: None,
         })
     }
@@ -223,12 +234,12 @@ impl Bridge {
         let mut forced_kill = false;
         let mut status = None;
         self.runtime.block_on(async {
-            match timeout(SHUTDOWN_TIMEOUT, self.child.wait()).await {
+            match timeout(self.shutdown_grace, self.child.wait()).await {
                 Ok(Ok(exit)) => status = Some(exit),
                 Ok(Err(error)) => self.state.fail(format!("wait for Due child: {error}")),
                 Err(_) => {
                     self.state
-                        .fail("Due child did not exit after stdin closed; forced kill");
+                        .fail("Due child did not exit within its RPC shutdown grace after stdin closed; forced kill");
                 }
             }
             // Also attempt settlement after an unexpected wait error.
@@ -237,14 +248,14 @@ impl Bridge {
                 if let Err(error) = self.child.start_kill() {
                     self.state.fail(format!("kill Due child: {error}"));
                 }
-                match timeout(SHUTDOWN_TIMEOUT, self.child.wait()).await {
+                match timeout(SETTLEMENT_TIMEOUT, self.child.wait()).await {
                     Ok(Ok(exit)) => status = Some(exit),
                     Ok(Err(error)) => self.state.fail(format!("reap Due child: {error}")),
                     Err(_) => self.state.fail("Due child did not settle after kill"),
                 }
             }
             if let Some(mut reader) = self.reader.take() {
-                match timeout(SHUTDOWN_TIMEOUT, &mut reader).await {
+                match timeout(SETTLEMENT_TIMEOUT, &mut reader).await {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => self
                         .state
@@ -274,6 +285,8 @@ impl Bridge {
             "exit_signal": status.and_then(exit_signal),
             "settled": status.is_some(),
             "forced_kill": forced_kill,
+            "rpc_shutdown_confirmed": !forced_kill && status.is_some_and(|s| s.success()),
+            "cleanup_error": forced_kill.then_some(FORCED_TERMINATION),
             "transport_error": self.error(),
             "raw_bytes": fs::metadata(self.evidence.join("stdout.bin")).map(|m| m.len()).unwrap_or(self.state.captured_bytes.load(Ordering::Acquire) as u64),
         });
@@ -282,7 +295,14 @@ impl Bridge {
         {
             self.state.fail(format!("write bridge receipt: {error}"));
         }
-        let result = self.check();
+        // A sticky earlier transport error must not hide loss of native cleanup
+        // ownership when Due itself had to be killed. `settled` only names Due.
+        let result = match (self.check(), forced_kill) {
+            (Ok(()), false) => Ok(()),
+            (Err(error), false) => Err(error),
+            (Ok(()), true) => Err(FORCED_TERMINATION.into()),
+            (Err(error), true) => Err(format!("{error}; {FORCED_TERMINATION}")),
+        };
         self.finished = Some(result.clone());
         result
     }
@@ -643,10 +663,50 @@ mod tests {
     fn refusing_eof_is_killed_and_reaped_with_failure_receipt() {
         let fixture = Fixture::new("while :; do :; done");
         let mut bridge = fixture.spawn();
-        assert!(bridge.finish().unwrap_err().contains("forced kill"));
+        // The production grace accounts for the real native RPC owners. This
+        // deliberately uncooperative stand-in needs only a short unit-test wait.
+        bridge.shutdown_grace = Duration::from_millis(20);
+        let error = bridge.finish().unwrap_err();
+        assert!(error.contains("forced kill"), "{error}");
+        assert!(
+            error.contains("native process settlement is unconfirmed"),
+            "{error}"
+        );
         assert_eq!(fixture.receipt()["forced_kill"], true);
         assert_eq!(fixture.receipt()["settled"], true);
+        assert_eq!(fixture.receipt()["rpc_shutdown_confirmed"], false);
+        assert_eq!(fixture.receipt()["cleanup_error"], FORCED_TERMINATION);
         assert_eq!(fixture.receipt()["exit_signal"], 9);
+    }
+
+    #[test]
+    fn eof_grace_allows_the_owned_rpc_server_to_finish_native_cleanup() {
+        let fixture = Fixture::new(
+            "while IFS= read -r line; do :; done; sleep 3; printf 'native-cleanup-finished\\n'",
+        );
+        let mut bridge = fixture.spawn();
+        bridge.finish().unwrap();
+        assert_eq!(fixture.raw(), b"native-cleanup-finished\n");
+        assert_eq!(fixture.receipt()["forced_kill"], false);
+        assert_eq!(fixture.receipt()["rpc_shutdown_confirmed"], true);
+        assert!(fixture.receipt()["cleanup_error"].is_null());
+    }
+
+    #[test]
+    fn forced_termination_remains_explicit_after_an_earlier_transport_failure() {
+        let fixture = Fixture::new("while :; do :; done");
+        let mut bridge = fixture.spawn();
+        bridge.shutdown_grace = Duration::from_millis(20);
+        bridge.state.fail("original transport failure");
+        let error = bridge.finish().unwrap_err();
+        assert!(error.starts_with("original transport failure"), "{error}");
+        assert!(error.contains(FORCED_TERMINATION), "{error}");
+        assert_eq!(
+            fixture.receipt()["transport_error"],
+            "original transport failure"
+        );
+        assert_eq!(fixture.receipt()["cleanup_error"], FORCED_TERMINATION);
+        assert_eq!(fixture.receipt()["rpc_shutdown_confirmed"], false);
     }
 
     #[test]

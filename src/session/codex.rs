@@ -222,9 +222,7 @@ impl Active {
             .unwrap_or_default();
         if result.text.len() > MAX_ANSWER {
             result.text.clear();
-            return result.fail(RunError::protocol(
-                "Codex answer exceeded the 4 MiB spike limit",
-            ));
+            return result.fail(RunError::protocol("Codex answer exceeded the 4 MiB limit"));
         }
         if let Some(error) = error {
             return result.fail(error);
@@ -807,7 +805,7 @@ fn observe(
         && message.is_final_answer()
     {
         if message.text.len() > MAX_ANSWER {
-            return Err("Codex answer exceeded the 4 MiB spike limit".into());
+            return Err("Codex answer exceeded the 4 MiB limit".into());
         }
         turn.answer = Some(message.text);
     }

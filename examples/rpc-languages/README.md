@@ -1,9 +1,11 @@
 # Embedded RPC client comparison
 
-This private experiment embeds Lua 5.4 (`mlua =0.12.2`) and QuickJS
-(`rquickjs =0.14.0`) in the same small Rust runner. It connects to the existing
-`due rpc` process. It adds no command, dependency or behavior to default Due
-builds, and does not select the eventual embedding language.
+JavaScript is now the supported Due harness language. Use
+[`due script`](../../docs/harness.md) for product workflows. This private comparison
+runner preserves the Lua 5.4 (`mlua =0.12.2`) and QuickJS (`rquickjs =0.14.0`)
+experiments and their regression fixtures. It connects to `due rpc` and shares
+the production Rust/JavaScript implementation in `crates/due-harness`; Lua is
+not a shipped `due script` language.
 
 ```text
 Lua workflow -> Lua RPC client --\
@@ -22,10 +24,10 @@ is required to use the raw protocol from another language or process.
 
 ## Run the same conversation
 
-Build Due with RPC support, then build the separate runner:
+Normal Due builds include RPC. Build Due, then the separate comparison runner:
 
 ```sh
-cargo build --locked --release --features rpc
+cargo build --locked --release
 cargo build --locked --release --manifest-path examples/rpc-languages/Cargo.toml
 ```
 
@@ -216,9 +218,9 @@ Decoded logs are conveniences and must not replace the raw capture.
 Each interpreter has a 32 MiB heap limit. `--timeout-ms` defaults to 300000 for
 the entire workflow, including waits. SIGINT/SIGTERM/SIGHUP and deadline errors
 are sticky, including when caught by a script. Cleanup closes stdin and awaits
-the Due child, with bounded escalation and a receipt. Graceful child wait,
-forced-kill wait and stdout settlement each have a two-second bound. These
-controls are cooperative: Lua library C calls are not universally preemptible
+the Due child, allowing its native cleanup to complete before bounded escalation
+and a receipt. Cleanup can extend beyond the workflow deadline. These controls
+are cooperative: Lua library C calls are not universally preemptible
 by an instruction hook. This runner is not an untrusted-code sandbox and does
 not guarantee settlement of arbitrary detached descendants.
 
@@ -241,4 +243,6 @@ fixture suite exercises both clients against identical wire sequences. Tests
 require Python 3 on Unix; no model authentication is used.
 
 See the [comparison report](../../docs/rpc-languages.md) for the observed
-results and remaining decision points.
+historical results and the JavaScript decision. New scripts should use the
+supported `Due.args`, `Due.log` and `Due.run` API rather than this runner's
+comparison-only `bridge` API.

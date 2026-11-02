@@ -20,6 +20,8 @@ pub enum Contract {
     Result,
     Trace,
     TraceSummary,
+    #[cfg(feature = "harness")]
+    ScriptResult,
 }
 
 impl Contract {
@@ -29,6 +31,8 @@ impl Contract {
             Self::Result => include_str!("../schemas/run-result.schema.json"),
             Self::Trace => include_str!("../schemas/trace.schema.json"),
             Self::TraceSummary => include_str!("../schemas/trace-summary.schema.json"),
+            #[cfg(feature = "harness")]
+            Self::ScriptResult => include_str!("../schemas/script-result.schema.json"),
         }
     }
 }

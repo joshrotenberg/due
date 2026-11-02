@@ -81,6 +81,9 @@ impl Spec {
         if !cwd.is_dir() {
             return Err("exec cwd must be a directory".into());
         }
+        if cwd.to_str().is_none() {
+            return Err("exec cwd must have a UTF-8 path".into());
+        }
         let number = |key: &str, default, maximum| -> Result<u64, String> {
             match object.get(key) {
                 None => Ok(default),
@@ -500,7 +503,7 @@ async fn execute(
         }
     }
     let mut cleanup_errors = Vec::new();
-    if let Err(problem) = custody.signal(libc_signal(false), &mut child) {
+    if let Err(problem) = custody.signal(libc_signal(false), &mut child).await {
         cleanup_errors.push(problem);
     }
     let grace = Instant::now() + GRACE;
@@ -522,7 +525,7 @@ async fn execute(
     }
     // The leader stays unreaped until the final group signal. Its PID/PGID
     // cannot be recycled, including when a descendant holds an output pipe.
-    if let Err(problem) = custody.signal(libc_signal(true), &mut child) {
+    if let Err(problem) = custody.signal(libc_signal(true), &mut child).await {
         cleanup_errors.push(problem);
     }
     custody.disarm();
@@ -598,7 +601,30 @@ impl Custody {
     fn disarm(&mut self) {
         self.armed = false;
     }
-    fn signal(&mut self, signal: i32, child: &mut Child) -> Result<(), String> {
+    async fn signal(&mut self, signal: i32, child: &mut Child) -> Result<(), String> {
+        let deadline = Instant::now() + GRACE;
+        loop {
+            match self.signal_once(signal, child) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if darwin_group_may_be_settling(self.pid, &error) && Instant::now() < deadline {
+                        // Terminated descendants can remain briefly visible until
+                        // their new parent reaps them. Retain leader custody and
+                        // retry within the existing cleanup budget; never ignore
+                        // a still-populated group or a real permission failure.
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                    return Err(format!(
+                        "signal exec group {} with {signal}: {error}",
+                        self.pid
+                    ));
+                }
+            }
+        }
+    }
+
+    fn signal_once(&mut self, signal: i32, child: &mut Child) -> std::io::Result<()> {
         if !self.armed {
             return Ok(());
         }
@@ -612,10 +638,7 @@ impl Custody {
                     return Ok(());
                 }
                 if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(format!(
-                        "signal exec group {} with {signal}: {error}",
-                        self.pid
-                    ));
+                    return Err(error);
                 }
             }
             Ok(())
@@ -623,10 +646,20 @@ impl Custody {
         #[cfg(not(unix))]
         {
             let _ = signal;
-            child
-                .start_kill()
-                .map_err(|e| format!("kill exec child: {e}"))
+            child.start_kill()
         }
+    }
+}
+
+fn darwin_group_may_be_settling(pid: u32, error: &std::io::Error) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        error.raw_os_error() == Some(libc::EPERM) && matches!(exited_unreaped(pid), Ok(true))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, error);
+        false
     }
 }
 
@@ -778,6 +811,31 @@ mod tests {
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
+        );
+    }
+
+    // macOS rejects non-UTF-8 directory entries at mkdir; Linux permits them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canonical_command_cwd_rejects_non_utf8_before_recording_or_spawning() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        let (_runtime, directory, mut supervisor) = setup();
+        let target = directory
+            .path()
+            .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, directory.path().join("alias")).unwrap();
+        let error = supervisor
+            .start(r#"{"program":"/bin/echo","cwd":"alias"}"#)
+            .unwrap_err();
+        assert!(error.contains("UTF-8 path"), "{error}");
+        assert!(supervisor.jobs.is_empty());
+        supervisor.finish().unwrap();
+        assert_eq!(
+            fs::metadata(directory.path().join("exec.jsonl"))
+                .unwrap()
+                .len(),
+            0
         );
     }
 
@@ -1086,6 +1144,36 @@ mod tests {
                 .unwrap_err()
                 .contains("receipt exceeded")
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_cancelled_shell_descendants_settle_without_false_permission_failure() {
+        // Exercise the scheduling window where SIGTERM has exited both the
+        // shell and its descendant, but Darwin still lists both group members.
+        for _ in 0..16 {
+            let (_runtime, directory, mut supervisor) = setup();
+            let id = shell(
+                &mut supervisor,
+                "sleep 30 & echo $! > descendant; echo $$ > leader; wait",
+                json!({}),
+            );
+            let leader = wait_file(&directory.path().join("leader"))
+                .trim()
+                .parse()
+                .unwrap();
+            let descendant = wait_file(&directory.path().join("descendant"))
+                .trim()
+                .parse()
+                .unwrap();
+            supervisor.cancel(id).unwrap();
+            let result = settle(&mut supervisor, id);
+            assert_eq!(result["status"], "cancelled", "{result}");
+            assert!(result["error"].is_null(), "{result}");
+            assert_reaped(leader);
+            assert_reaped(descendant);
+            supervisor.finish().unwrap();
+        }
     }
 
     #[cfg(target_os = "macos")]
