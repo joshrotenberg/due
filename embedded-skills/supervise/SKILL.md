@@ -86,9 +86,10 @@ Use the exact Due turn ID, not a native provider ID. `worker.close()` closes ear
 normal scope exit closes automatically. `scope.cancel(reason)` fails the scope
 even if the script catches the cancellation error.
 
-The runtime keeps consuming session items while managed work awaits. Interaction
-retirement cancels its signal and suppresses late decisions. Already-sent replies
-still consume acknowledgements; genuine reply/callback failures remain failures.
+The runtime keeps consuming session items while managed work awaits. Retirement
+of a pending interaction cancels its signal and suppresses late decisions.
+Already-sent replies still consume acknowledgements; genuine reply/callback
+failures remain failures.
 Native session failure cancels verification between turns. Returning with an
 unfinished turn or unjoined work fails; Rust still settles owned processes if
 JavaScript cleanup fails. This does not roll back edits or other effects.

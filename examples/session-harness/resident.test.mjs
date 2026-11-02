@@ -332,13 +332,21 @@ test(`rpc: a matching interaction_resolved aborts the pending decision and nothi
   assert.deepEqual(await inputs(artifactDir), []);
   assert.equal((await backend.close()).execution_error, undefined);
 });
-test(`rpc: an unrelated request's resolution leaves the decision alive`, async t => {
-  let observed;
+test(`rpc: an unrelated request's resolution leaves the decision alive`, { timeout: 5000 }, async t => {
+  let resolved, observed;
+  const unrelatedResolution = new Promise(resolve => { resolved = resolve; });
   const { backend, artifactDir } = await interactive(t, 'interaction-unrelated', async (record, signal) => {
-    observed = signal; await new Promise(resolve => setTimeout(resolve, 50)); return { decision: 'decline' };
+    observed = signal;
+    await unrelatedResolution;
+    assert.equal(signal.aborted, false); // The unrelated item was consumed while this decision was pending.
+    return { decision: 'decline' };
+  }, undefined, record => {
+    if (record.data.kind === 'interaction_resolved' && record.data.data.request_id === 'other') resolved();
   });
   assert.equal((await backend.turn({ id: 'first', prompt: 'one' })).result.status, 'succeeded');
-  assert.equal(observed.aborted, true); // Aborted only afterwards, by the turn finishing.
+  assert.ok(observed);
+  // Its reply acknowledgement may settle and remove the decision before the
+  // queued terminal item runs. The signal's state after settlement is immaterial.
   assert.equal((await inputs(artifactDir)).length, 1);
   assert.equal((await backend.close()).execution_error, undefined);
 });

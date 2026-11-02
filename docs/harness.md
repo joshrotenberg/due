@@ -134,9 +134,11 @@ async function onInteraction(item, signal) {
 ```
 
 Here `scope`, the checker and decision policy belong to the surrounding caller
-workflow. Retirement, turn completion or session closure aborts that interaction's
-signal, cancels its managed checker and prevents a late decision. A reply already
-sent retains its acknowledgement ownership. Only an exact known stale-reply
+workflow. While a decision or its reply is pending, retirement, turn completion
+or session closure aborts that interaction's signal, cancels its managed checker
+and prevents a late decision. Once the callback and reply settle, their signal
+is no longer tracked. A reply already sent retains its acknowledgement ownership.
+Only an exact known stale-reply
 error after matching retirement is ignored; a distinct callback or reply failure
 still fails the workflow.
 

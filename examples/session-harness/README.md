@@ -208,11 +208,12 @@ nothing is approved by default.
   `onItem` runs, so an observer mutating its record cannot redirect a reply.
   `onItem` still observes the complete raw item synchronously, and stdout parsing
   and later items continue while the decision is pending.
-- `signal` aborts when the interaction resolves, the turn finishes, the session
-  fails or is cancelled, or the scope closes. A result returned after that is
-  discarded and never sent;
-  close does not wait for the callback. Rejecting with `signal.reason` (or an
+- While the decision or its reply is pending, `signal` aborts when the interaction
+  resolves, the turn finishes, the session fails or is cancelled, or the scope
+  closes. A result returned after that is discarded and never sent. Close does
+  not wait for the callback. Rejecting with `signal.reason` (or an
   `AbortError`) after an abort is treated as cooperative cancellation.
+  Once the callback and reply settle, their signal is no longer tracked.
 - A thrown/rejected callback or a non-object response fails the session with
   that error; process receipts are preserved. The same applies to a callback
   error that arrives after the turn finished but before scope settlement.
