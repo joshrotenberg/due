@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,7 +78,8 @@ for (const [mode, pattern] of [['lost', /journal lost/], ['malformed', /JSON/], 
     assert.equal(JSON.parse(await readFile(join(artifactDir, 'resident-exit.json'))).exit_code, 0);
   });
 }
-const inputs = async artifactDir => (await readFile(join(artifactDir, 'fixture-input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+const allInputs = async artifactDir => (await readFile(join(artifactDir, 'fixture-input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+const inputs = async artifactDir => (await allInputs(artifactDir))
   .map(row => ({ name: row.method, args: row.params }))
   .filter(row => row.name === 'interaction.reply');
 async function interactive(t, model, onInteraction, signal, observe = () => {}) {
@@ -338,4 +339,120 @@ test('rpc: direct error responses are surfaced and cleanup still runs', async t 
 });
 test('rpc: unsupported protocol version fails before starting turns', async t => {
   await assert.rejects(setup(t, 'wrong-version'), /Unsupported Due RPC session protocol/);
+});
+test(`rpc: invalid UTF-8 in a frame is a protocol failure, not silently replaced`, async t => {
+  const { backend, items } = await setup(t, 'invalid-utf8');
+  const outcome = await backend.turn({ id: 'bytes', prompt: 'go' }).then(() => 'succeeded', error => error.message);
+  const altered = items.filter(i => JSON.stringify(i.data.data ?? '').includes('\uFFFD'));
+  assert.deepEqual(altered, [], 'onItem received text altered by U+FFFD replacement');
+  assert.notEqual(outcome, 'succeeded');
+  await backend.close().catch(() => {});
+});
+test(`rpc: no onInteraction launch once the session failed; draining and cleanup still run`, async t => {
+  let asked = 0;
+  const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-'));
+  t.after(() => rm(artifactDir, { recursive: true, force: true }));
+  const backend = await openRpc({ dueBinary, artifactDir, profile: { provider: 'codex', cwd: artifactDir, model: 'interaction' },
+    onItem: item => { if (item.data.kind === 'turn_started') throw new Error('observer broke'); },
+    onInteraction: async () => { asked += 1; return { decision: 'deny' }; } });
+  t.after(async () => { try { await backend.close(); } catch {} });
+  await assert.rejects(backend.turn({ id: 'x', prompt: 'go' }), /observer broke/);
+  await backend.close().catch(() => {});
+  assert.equal(asked, 0, 'the approval callback must not run for a session that already failed');
+  const receipt = await backend.close().catch(() => null);
+  assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
+  assert.ok(receipt === null || receipt.execution_error);
+});
+test(`rpc: valid Unicode, a real U+FFFD and multi-byte data split across chunks are accepted`, async t => {
+  const { backend, items } = await setup(t, 'valid-utf8');
+  await backend.turn({ id: 'unicode', prompt: 'go' });
+  assert.equal(items.find(i => i.data.kind === 'native').data.data.text, 'é€😀\uFFFD');
+  await backend.close();
+});
+test(`rpc: session_failed while idle keeps the item, fails the session and rejects follow-ups locally`, async t => {
+  const { backend, items, artifactDir } = await setup(t, 'idle-failed');
+  const first = await backend.turn({ id: 'one', prompt: 'a' });
+  assert.equal(first.result.status, 'succeeded');
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.ok(items.some(i => i.data.kind === 'session_failed'));
+  await assert.rejects(backend.turn({ id: 'two', prompt: 'b' }), /native exited between turns/);
+  const receipt = await backend.close();
+  assert.match(receipt.execution_error.message, /native exited between turns/);
+  assert.equal(receipt.native_session_id, 'native-one');
+  assert.equal(receipt.processes[0].exit_code, 0);
+  const requests = await allInputs(artifactDir);
+  assert.deepEqual(requests.filter(m => m.method === 'turn.start').map(m => m.params.prompt), ['a']);
+  assert.equal(requests.filter(m => m.method === 'session.close').length, 0);
+});
+test(`rpc: session_failed during an active turn fails that turn with the native message`, async t => {
+  const { backend, items } = await setup(t, 'active-failed');
+  await assert.rejects(backend.turn({ id: 'one', prompt: 'a' }), /native exited mid-turn/);
+  assert.ok(items.some(i => i.data.kind === 'session_failed'));
+  assert.match((await backend.close()).execution_error.message, /native exited mid-turn/);
+});
+test(`rpc: session_failed with a pending permission aborts the decision and sends no reply`, async t => {
+  let aborted = false;
+  const { backend, artifactDir } = await setup(t, 'interaction-failed', undefined, {
+    onInteraction: (_o, signal) => new Promise(resolve => { signal.addEventListener('abort', () => { aborted = true; resolve({ decision: 'allow' }); }); }) });
+  await assert.rejects(backend.turn({ id: 'one', prompt: 'a' }), /native exited awaiting permission/);
+  assert.equal(aborted, true);
+  assert.match((await backend.close()).execution_error.message, /awaiting permission/);
+  assert.deepEqual(await inputs(artifactDir), []);
+});
+test(`rpc: session_failed around open fails open with the receipt and cleans up`, async t => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-'));
+  t.after(() => rm(artifactDir, { recursive: true, force: true }));
+  const error = await openRpc({ dueBinary, artifactDir, profile: { provider: 'codex', cwd: artifactDir, model: 'open-failed' } }).catch(e => e);
+  assert.match(error.message, /native exited during open/);
+  assert.equal(error.sessionReceipt.processes[0].exit_code, 0);
+  assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
+});
+const { stat } = await import('node:fs/promises');
+test(`rpc: stdout.bin keeps the exact bytes of a number the JavaScript view rounds`, async t => {
+  const { backend, items, artifactDir } = await setup(t, 'big-int');
+  await backend.turn({ id: 'big', prompt: 'go' });
+  await backend.close();
+  const raw = await readFile(join(artifactDir, 'stdout.bin'));
+  assert.ok(raw.includes('"n":9007199254740993'), 'authoritative wire bytes keep the exact integer');
+  // Callbacks and parsed artifacts are a Number view: the value is rounded to 2^53.
+  assert.equal(items.find(i => i.data.data?.n !== undefined).data.data.n, 9007199254740992);
+  assert.ok((await readFile(join(artifactDir, 'protocol.jsonl'), 'utf8')).includes('9007199254740992'));
+  assert.equal((await stat(join(artifactDir, 'stdout.bin'))).mode & 0o777, 0o600);
+});
+test(`rpc: stdout.bin retains malformed UTF-8 bytes while the call fails`, async t => {
+  const { backend, artifactDir } = await setup(t, 'invalid-utf8');
+  await assert.rejects(backend.turn({ id: 'bytes', prompt: 'go' }));
+  await backend.close().catch(() => {});
+  assert.ok((await readFile(join(artifactDir, 'stdout.bin'))).includes(Buffer.from([0xff])));
+});
+test(`rpc: stdout capture is bounded at 64 MiB; overflow fails and cleans up`, { timeout: 30000 }, async t => {
+  const { backend, artifactDir } = await setup(t, 'flood');
+  await assert.rejects(backend.turn({ id: 'flood', prompt: 'go' }), /stdout capture exceeds 64 MiB/);
+  await backend.close().catch(() => {});
+  assert.equal((await stat(join(artifactDir, 'stdout.bin'))).size, 64 * 1024 * 1024);
+  assert.equal(await readFile(join(artifactDir, 'fixture-exited'), 'utf8'), 'closed\n');
+  assert.match(JSON.parse(await readFile(join(artifactDir, 'resident-exit.json'))).error, /stdout capture exceeds/);
+});
+
+const fdCount = async () => (await readdir(process.platform === 'darwin' ? '/dev/fd' : '/proc/self/fd')).length;
+const descriptorAccounting = ['darwin', 'linux'].includes(process.platform);
+test(`rpc: a failed prelaunch artifact open leaks no descriptors, launches nothing and keeps existing evidence`, { skip: !descriptorAccounting && 'no descriptor listing' }, async t => {
+  for (const existing of ['protocol.jsonl', 'stderr.log', 'stdout.bin']) {
+    const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-'));
+    t.after(() => rm(artifactDir, { recursive: true, force: true }));
+    await writeFile(join(artifactDir, existing), 'prior evidence');
+    const before = await fdCount();
+    await assert.rejects(openRpc({ dueBinary, artifactDir, profile: { provider: 'codex', cwd: artifactDir, model: 'early' } }), { code: 'EEXIST' });
+    assert.equal(await fdCount(), before, `${existing} collision leaked descriptors`);
+    assert.equal(await readFile(join(artifactDir, existing), 'utf8'), 'prior evidence');
+    assert.ok(!(await readdir(artifactDir)).includes('fixture-exited'));
+    assert.ok(!(await readdir(artifactDir)).includes('fixture-input.jsonl'));
+  }
+});
+test(`rpc: a synchronous spawn exception leaks no descriptors and starts no child`, { skip: !descriptorAccounting && 'no descriptor listing' }, async t => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'due-resident-'));
+  t.after(() => rm(artifactDir, { recursive: true, force: true }));
+  const before = await fdCount();
+  await assert.rejects(openRpc({ dueBinary: 'bad\0binary', artifactDir, profile: { provider: 'codex', cwd: artifactDir, model: 'early' } }), { code: 'ERR_INVALID_ARG_VALUE' });
+  assert.equal(await fdCount(), before);
 });

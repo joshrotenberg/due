@@ -28,7 +28,11 @@ export function normalizeTurnWaitMs(value = 300_000) {
   return value;
 }
 
+const utf8 = new TextDecoder('utf-8', { fatal: true }); // Never substitute U+FFFD for invalid bytes.
 const STALE_REPLY = /unknown or finished turn|unknown or resolved interaction|No pending interaction/;
+
+// Exact incoming stdout bytes are retained up to this fixed limit; exceeding it fails the session.
+const STDOUT_CAPTURE_LIMIT = 64 * 1024 * 1024;
 
 // onInteraction(record, signal) -> provider-native response. `record` is a copy of the record
 // onItem saw (`record.data` is the complete interaction item, so the exact session_id, turn_id and
@@ -39,13 +43,21 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
   if (onInteraction !== undefined && typeof onInteraction !== 'function') throw new Error('onInteraction must be a function');
   const notification = 'session.item';
   if (signal?.aborted) throw new Error('Session cancelled before launch');
-  const wire = openSync(join(artifactDir, 'protocol.jsonl'), 'wx', 0o600);
-  const stderr = openSync(join(artifactDir, 'stderr.log'), 'wx', 0o600);
-  const child = spawn(dueBinary, ['rpc'], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+  // Descriptors and the child are acquired together; a failure before launch completes releases only these.
+  const opened = [];
+  let wire, stderr, raw, child;
+  try {
+    for (const name of ['protocol.jsonl', 'stderr.log', 'stdout.bin']) opened.push(openSync(join(artifactDir, name), 'wx', 0o600));
+    [wire, stderr, raw] = opened; // stdout.bin holds exact incoming bytes, before any decoding.
+    child = spawn(dueBinary, ['rpc'], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (error) {
+    for (const fd of opened) try { closeSync(fd); } catch {}
+    throw error;
+  }
   const exited = deferred(), pending = new Map(), turnIds = new Map(), decisions = new Map(), finishedTurns = new Set(), resolvedKeys = new Set();
   let sequence = 0, cursor = 0, sessionId, nativeId, active, fatal, closePromise, spawned = false;
   let closing = false, closed = false, buffer = Buffer.alloc(0), tail = Promise.resolve();
-  let queued = 0, queuedBytes = 0, wireBytes = 0, stderrBytes = 0, interrupted = false, wireOpen = true;
+  let rawBytes = 0, rawOpen = true, queued = 0, queuedBytes = 0, wireBytes = 0, stderrBytes = 0, interrupted = false, wireOpen = true;
   const record = { pid: null, exit_code: null, signal: null, launch_error: null, forced_kill: false };
   function stop() { if (!interrupted && !closed && spawned) { interrupted = true; child.kill('SIGINT'); } }
   function abortDecisions(reason, turn) {
@@ -119,6 +131,8 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
       throw new Error('onItem must be synchronous');
     }
     if (identityError) throw identityError;
+    // Rust pushes this when native exits between or during turns; keep the item, then fail the session.
+    if (item.kind === 'session_failed') throw new Error(`Due session failed: ${item.data?.message ?? 'no message'}`);
     if (item.kind === 'omitted') throw new Error(`Native item omitted: ${JSON.stringify(item.data)}`);
     if (item.kind === 'interaction') {
       if (!onInteraction) throw new Error('Native interaction requires an explicit decision; this experiment does not auto-approve');
@@ -138,6 +152,7 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
   }
   // Runs the caller's decision beside stdout parsing; nothing here blocks item delivery.
   function decide(observation, item) {
+    if (fatal || closing || closed) return; // Never ask the caller about an interaction in a dead or closing session.
     const requestId = item.data?.request_id;
     if (typeof requestId !== 'string' || !requestId || typeof item.turn_id !== 'string' || typeof item.session_id !== 'string') {
       throw new Error('Native interaction lacks exact session, turn and request IDs');
@@ -190,11 +205,16 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
   }
   child.stdout.on('data', chunk => {
     try {
+      if (!rawOpen) return;
+      const room = STDOUT_CAPTURE_LIMIT - rawBytes;
+      writeAll(raw, chunk.length > room ? chunk.subarray(0, room) : chunk);
+      rawBytes += Math.min(chunk.length, room);
+      if (chunk.length > room) { rawOpen = false; throw new Error('Resident stdout capture exceeds 64 MiB'); }
       buffer = Buffer.concat([buffer, chunk]);
       if (buffer.length > 16 * 1024 * 1024) throw new Error('RPC frame exceeds 16 MiB');
       let end;
       while ((end = buffer.indexOf(10)) >= 0) {
-        const message = JSON.parse(buffer.subarray(0, end).toString('utf8')); buffer = buffer.subarray(end + 1);
+        const message = JSON.parse(utf8.decode(buffer.subarray(0, end))); buffer = buffer.subarray(end + 1);
         capture('out', message);
         if (Object.hasOwn(message, 'id')) {
           const entry = pending.get(message.id);
@@ -247,7 +267,7 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
         try { await bounded(tail, 5_000, 'Resident item drain timed out'); }
         catch (error) { cleanupError ??= error; fail(error); }
         signal?.removeEventListener('abort', abort);
-        wireOpen = false; closeSync(wire); closeSync(stderr);
+        wireOpen = false; rawOpen = false; closeSync(wire); closeSync(stderr); closeSync(raw);
         jsonFile(join(artifactDir, 'resident-exit.json'), { ...record, error: (cleanupError ?? fatal)?.message ?? null });
       }
       if (cleanupError) throw cleanupError;
@@ -259,8 +279,8 @@ export async function openRpc({ dueBinary, profile, artifactDir, onItem = () => 
   const backend = {
     capabilities: { nativeItems: true, interactionReply: Boolean(onInteraction), interrupt: false },
     async turn({ id, prompt }) {
+      if (fatal) throw fatal; // The recorded failure is more truthful than "closed" after a child exit.
       if (closing || closed) throw new Error('Session is closed');
-      if (fatal) throw fatal;
       if (active) throw new Error('One turn at a time');
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(id)) throw new Error('Invalid turn ID');
       const dir = join(artifactDir, id); mkdirSync(dir, { mode: 0o700 });

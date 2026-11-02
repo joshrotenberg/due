@@ -77,6 +77,20 @@ native turn stays running. Native or transport failures, and a native
 interrupt-and-continue operation: when it expires, the scope ends and waits for
 cleanup. The client does not restart or resume that session automatically.
 
+A `session_failed` item (native exit between or during turns) is kept in the
+transcript, then fails the scope with its message. An earlier succeeded turn
+stays succeeded; later turns are rejected locally without sending `turn.start`.
+Incoming frames are decoded as strict UTF-8; invalid bytes fail the session.
+
+The RPC backend writes `stdout.bin` (mode 0600, exclusive create): the exact bytes
+Due wrote to stdout, captured before UTF-8 decoding or JSON parsing, including the
+bytes of a malformed frame. It is limited to 64 MiB; exceeding the limit fails the
+session and the file keeps the first 64 MiB. It is the authoritative wire evidence
+for what Due sent, not proof of the native provider's complete history. Callbacks,
+`items.jsonl` and `protocol.jsonl` are a JavaScript convenience view built with
+`JSON.parse`: integers outside Number's safe range may be rounded (for example 9007199254740993
+becomes 9007199254740992). Read `stdout.bin` when exact numbers matter.
+
 A monitored two-turn Claude conversation in one scope, with
 `onItem` receiving every full observed item (also saved in `items.jsonl`):
 save this as an `.mjs` file beside `session.mjs`, replace the project/artifact

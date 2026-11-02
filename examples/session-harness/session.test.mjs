@@ -438,3 +438,19 @@ test('an undefined turn wait keeps the resume backend and its receipt unchanged'
     assert.equal((await receipt()).processes[0].exit_code, 0);
   });
 }
+
+test('rpc: an idle session_failed after a succeeded turn fails the scope, not that turn', async t => {
+  const { dir, options, receipt } = await setup(t, { backend: 'rpc',
+    dueBinary: fileURLToPath(new URL('./resident.fixture.mjs', import.meta.url)) });
+  options.profile = { provider: 'codex', cwd: dir, model: 'idle-failed' };
+  await assert.rejects(withSession(options, async agent => {
+    assert.equal((await agent.turn({ id: 'one', prompt: 'a' })).status, 'succeeded');
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }), /native exited between turns/);
+  const saved = await receipt();
+  assert.match(saved.body_error, /native exited between turns/);
+  assert.equal(saved.cleanup_error, null);
+  assert.equal(saved.turns[0].status, 'succeeded');
+  assert.equal(saved.native_session_id, 'native-one');
+  assert.equal(saved.processes[0].exit_code, 0);
+});
