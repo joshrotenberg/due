@@ -5,6 +5,11 @@ description: Request structured answers with Due and interpret its result envelo
 
 # Use the result contract
 
+This guide covers `due run`. The JavaScript harness has a separate
+`due schema script-result` envelope and the `supervise` guide in normal builds.
+Do not interpret a script's acceptance data as a native turn result, or apply
+one-shot timeout/cancellation exit codes to `due script`.
+
 `due schema request`, `due schema result`, and `due schema trace` export the
 installed contracts as JSON Schema without a provider or network.
 `due schema trace-summary` describes offline summaries and their error envelope.

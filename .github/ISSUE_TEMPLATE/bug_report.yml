@@ -1,11 +1,11 @@
-name: Dogfooding issue
+name: Due issue
 description: Report a Due defect, installation problem, or confusing documented behavior.
 title: "[bug] "
 body:
   - type: markdown
     attributes:
       value: |
-        Features are frozen during source dogfooding. Include a minimal reproduction.
+        Include a minimal reproduction for run, script, RPC, or installation behavior.
         Review evidence before posting; omit credentials, private task content, and raw configuration files.
   - type: textarea
     id: symptom
@@ -25,15 +25,15 @@ body:
     id: reproduction
     attributes:
       label: Minimal reproduction
-      description: Sanitized command/profile and synthetic prompt. Note any native passthrough options.
+      description: Sanitized command/profile, script or RPC sequence, and synthetic prompt. Note native options.
       render: shell
     validations:
       required: true
   - type: textarea
     id: evidence
     attributes:
-      label: Result, trace summary, and checks
-      description: Relevant error fields or a small sanitized trace summary. Avoid full raw logs. Note any trace delivery loss and side effects.
+      label: Result, evidence summary, and checks
+      description: Relevant error fields or a small sanitized trace/process receipt summary. Avoid full raw logs. Note stream gaps, cleanup failures and observed effects.
   - type: textarea
     id: workaround
     attributes:

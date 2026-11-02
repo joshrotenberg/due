@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,6 +21,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: node --test examples/node-caller/caller.test.mjs
+      - run: node --test examples/session-harness/*.test.mjs
   python-caller-examples:
     runs-on: ubuntu-latest
     steps:
@@ -44,9 +46,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
       - name: Install from source and smoke-test offline commands
         shell: bash
         env:
@@ -59,13 +64,66 @@ jobs:
           PATH='' "$binary" --version
           PATH='' "$binary" skills list --output json > due-installed-skills.json
           PATH='' "$binary" skills show run --output json > due-installed-run-guide.json
+          PATH='' "$binary" skills show supervise --output json > due-installed-supervise-guide.json
           PATH='' "$binary" schema request > due-installed-request.schema.json
           PATH='' "$binary" schema trace-summary > due-installed-summary.schema.json
+          PATH='' "$binary" schema script-result > due-installed-script.schema.json
           : > due-empty-trace.jsonl
           PATH='' "$binary" trace summarize due-empty-trace.jsonl --output json > due-installed-summary.json
+          PATH='' "$binary" rpc < /dev/null > due-empty-rpc.jsonl
+          cat > due-installed-workflow.js <<'JS'
+          Due.run(async scope => {
+            await scope.sleep(1);
+            return {value: Due.args.value};
+          });
+          JS
+          PATH='' "$binary" script due-installed-workflow.js \
+            --args '{"value":"installed runtime"}' --evidence due-installed-evidence \
+            > due-installed-result.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('due-installed-result.json').read_text())
+          assert result['schema_version'] == 1
+          assert result['status'] == 'succeeded'
+          assert result['result'] == {'value': 'installed runtime'}
+          receipt = json.loads(Path(result['evidence']['process']).read_text())
+          assert receipt['settled'] and receipt['exit_code'] == 0
+          assert not receipt['forced_kill']
+          assert not Path('due-empty-rpc.jsonl').read_bytes()
+          PY
+  compatibility:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: cargo clippy --locked -p due --all-targets --no-default-features -- -D warnings
+      - run: cargo test --locked -p due --no-default-features
+      - run: cargo clippy --locked -p due --all-targets --no-default-features --features rpc -- -D warnings
+      - run: cargo test --locked -p due --no-default-features --features rpc --test rpc
+      - run: node --test examples/session-harness/native.test.mjs
+        env:
+          DUE_RPC_BINARY: ${{ github.workspace }}/target/debug/due
+      - run: cargo test --locked --manifest-path examples/rpc-languages/Cargo.toml
+      - run: cargo test --locked --manifest-path examples/rpc-languages/Cargo.toml --test native -- --ignored
+        env:
+          DUE_RPC_BINARY: ${{ github.workspace }}/target/debug/due
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90
-      - run: cargo check --locked
+      - run: cargo check --locked --workspace
+      - run: cargo check --locked -p due --no-default-features
+      - run: cargo check --locked -p due --no-default-features --features rpc

@@ -1,15 +1,16 @@
 # due
 
-Due runs one noninteractive Claude Code (`claude -p`) or Codex (`codex exec`)
-turn through a single command-line interface. The same options select the
-provider, prompt, model, effort, working directory, timeout, and output format
-for both. The command prints the final answer, or one versioned JSON result with
-status, session ID, usage, and a typed error.
+Due delegates bounded work to Claude Code or Codex through one command-line
+interface. Use `due run` for one noninteractive turn, `due script` for a
+supervised JavaScript assignment spanning several turns, or `due rpc` from your
+own client. Native authentication, settings and permissions stay with the
+provider; the caller supplies the assignment and independently checks its result.
 
-It is meant for scripts and for agents that hand a bounded task to another
-agent and need a predictable result to inspect. Each invocation is one
-foreground provider run. The caller and operating system own concurrency,
-scheduling, and any retry.
+The embedded JavaScript harness keeps one worker session alive while the caller
+observes items, answers permission requests, runs independent checks, and decides
+whether another turn is needed. Rust owns process limits, cancellation and cleanup.
+No Node installation is needed. Due does not add a background daemon or choose
+acceptance criteria for the caller.
 
 ```sh
 due run --provider claude -p "Explain this repository" --effort high
@@ -27,7 +28,7 @@ and schema transport.
 
 Due is installed from source; there are no published releases. You need:
 
-- Rust 1.90 or newer.
+- Rust 1.90 or newer and a native C compiler/linker for embedded JavaScript.
 - Read access to the private repository `joshrotenberg/due`.
 - The provider CLI you intend to use (`claude` or `codex`), installed and
   authenticated. Due inherits that CLI's environment, settings, and permission
@@ -55,7 +56,7 @@ due init                   # Both hosts; use --host claude or --host codex for o
 
 Its short `delegate` skill points agents at the installed binary's help and
 embedded guides. Due and the selected host CLI must be on PATH. Setup starts no
-model work and does not configure authentication or enable the caller trial.
+model work and does not configure authentication or enable a global delegation policy.
 See [installation](docs/install.md) for update, migration and recovery details.
 
 ## Quickstart
@@ -66,6 +67,7 @@ network:
 ```sh
 due --help
 due run --help
+due script --help
 due skills
 due run --provider codex -p "Say hello" --dry-run --output json
 ```
@@ -91,7 +93,7 @@ due run --provider claude --stdin -- --permission-mode acceptEdits --max-turns 5
 work, grant the task's edits and checks explicitly and deny unresolved approval
 requests; see [unattended permissions](docs/cli.md#unattended-claude-permissions).
 
-Due has no default timeout. Omit `--timeout` while you watch the run and can
+`due run` has no default timeout. Omit `--timeout` while you watch the run and can
 cancel it; unattended permissions do not mean nobody is watching. For an
 unmonitored run or a real time budget, set a generous, task-specific absolute
 limit; progress does not extend it. See
@@ -151,6 +153,8 @@ exact installed contract offline:
 due skills show run            # Scoping, execution, and verifying effects
 due skills show contracts      # Request and result semantics
 due skills show observe        # Progress traces and trace loss
+due skills show supervise      # Resident assignments and JavaScript supervision
+due schema script-result       # The JavaScript harness result envelope
 due schema request             # Also: result, trace, trace-summary
 ```
 
@@ -179,7 +183,39 @@ due trace summarize run.jsonl --output json
 | `127` | Provider executable not found |
 | `130` | Cancelled by Ctrl-C or Unix SIGTERM/SIGHUP |
 
-## Limits
+## Supervised assignments and raw RPC
+
+Normal builds include the JavaScript harness and JSON-RPC stdio interface:
+
+```sh
+due script examples/harness/supervision.js \
+  --cwd /path/to/authorized/project --evidence /tmp/due-assignment-001 \
+  --args-file /caller-owned/assignment.json > result.json
+```
+
+The [JavaScript guide](docs/harness.md) describes the supported `Due.run` API,
+JSON arguments and results, permission callbacks, command bounds, and evidence.
+The [runnable example](examples/harness/supervision.js) keeps one session across
+implementation, independent verification and bounded revision. The caller selects
+the verifier and checks its result; a model's claim that tests passed is not
+acceptance. Existing versioned JSON profiles work in `scope.open({request: ...})`.
+
+For a custom client, launch `due rpc` and send newline-delimited JSON-RPC.
+It exposes `session.open`, `turn.start`, `session.read`, interruption, interaction
+replies and close, with `session.item` streaming. One session and one active turn
+run per process. The raw protocol is independent of the embedded harness: callers
+can implement it in any language. See the [RPC guide](docs/rpc.md) and
+[two-turn external JavaScript client](examples/session-harness/rpc-example.mjs).
+
+Use `due run --resume ID` when separate invocations and native saved context are
+sufficient. Use a resident session when you need continuing observation, explicit
+permission replies, or interruption across an assignment. The
+[language comparison](docs/rpc-languages.md) records why JavaScript was selected;
+Lua remains a comparison fixture, not a shipped harness language. The separate
+[MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
+remains outside this implementation.
+
+## Limits of `due run`
 
 - One foreground turn per invocation. There is no daemon, queue, scheduler, MCP
   server, local session database, or interactive UI.
@@ -198,12 +234,14 @@ due trace summarize run.jsonl --output json
 
 - [docs/cli.md](docs/cli.md): full CLI reference covering options, request
   fields, structured answers, tracing, native passthrough, results, and errors.
+- [JavaScript harness](docs/harness.md): supported session supervision, JSON results and evidence.
+- [Raw RPC](docs/rpc.md): wire contract for independently written clients.
 - [Native subagent comparison](docs/native-comparison.md): defaults, existing
   controls, and deferred gaps.
 - [docs/install.md](docs/install.md): installation, including the Codex plugin.
 - [docs/dogfooding.md](docs/dogfooding.md): trying Due and reporting issues.
-- [Caller trial policy](docs/caller-policy.md): opt-in Due-only delegation,
-  positive and negative reports, and bounded A/B comparisons.
+- [Caller policy](docs/caller-policy.md): scope, verification and optional issue reporting;
+  the former mandatory source-trial workflow is retired.
 - [Node caller example](examples/node-caller/README.md): capture one run safely
   and validate a task-specific review answer using Node built-ins.
 - [Offline validation example](examples/offline-validation/README.md): optional
@@ -213,7 +251,7 @@ due trace summarize run.jsonl --output json
 - [Native control audit](docs/native-control-audit.md) and
   [trace evidence](docs/native-trace-evidence.md): versioned observations and limits.
 - [Troubleshooting](docs/troubleshooting.md): diagnose installation, host,
-  authentication, permissions, and schema failures; repair a frozen source build.
+  authentication, permissions, and schema failures; repair an existing source build without changing its revision.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development workflow and checks.
 - `due run --help` and `due skills show NAME`: the authoritative reference for
   the installed version.

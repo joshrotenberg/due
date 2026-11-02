@@ -187,6 +187,27 @@ fn standalone_apply_materializes_both_formats_and_only_native_plugin_commands() 
         assert_eq!(manifest["name"], "due");
         assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     }
+    let portable: Value =
+        serde_json::from_slice(&fs::read(plugin.join("plugin.json")).unwrap()).unwrap();
+    let codex: Value =
+        serde_json::from_slice(&fs::read(plugin.join(".codex-plugin/plugin.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        portable["$schema"],
+        "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+    );
+    assert_eq!(
+        codex["interface"],
+        portable["extensions"]["com.openai"]["interface"]
+    );
+    assert!(
+        codex["interface"]["shortDescription"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 30
+    );
     for path in [
         ".agents/plugins/marketplace.json",
         ".claude-plugin/marketplace.json",
@@ -299,6 +320,24 @@ fn rerun_refreshes_only_owned_package_and_lock_is_exclusive() {
     report(&f.run(&[]), 0, "installed");
     let skill = f.install.join("plugin/due/skills/delegate/SKILL.md");
     fs::write(&skill, "old managed bytes").unwrap();
+    // Updating from the one-shot package must refresh all portable/native
+    // metadata without reinstalling or replacing the marketplace identity.
+    let marker = f.install.join(".due-install.json");
+    fs::write(
+        &marker,
+        r#"{"format_version":1,"managed_by":"due","cli_version":"0.1.0"}"#,
+    )
+    .unwrap();
+    for name in [
+        "plugin/due/plugin.json",
+        "plugin/due/.claude-plugin/plugin.json",
+        "plugin/due/.codex-plugin/plugin.json",
+    ] {
+        let path = f.install.join(name);
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["version"] = Value::String("0.1.0".into());
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
     let again = report(&f.run(&[]), 0, "installed");
     assert_eq!(again["completed_steps"].as_array().unwrap().len(), 5);
     assert_eq!(again["skipped_steps"].as_array().unwrap().len(), 3);
@@ -313,6 +352,17 @@ fn rerun_refreshes_only_owned_package_and_lock_is_exclusive() {
         fs::read(skill).unwrap(),
         include_bytes!("../plugin/due/skills/delegate/SKILL.md")
     );
+    let metadata: Value = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
+    assert_eq!(metadata["cli_version"], env!("CARGO_PKG_VERSION"));
+    for name in [
+        "plugin/due/plugin.json",
+        "plugin/due/.claude-plugin/plugin.json",
+        "plugin/due/.codex-plugin/plugin.json",
+    ] {
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(f.install.join(name)).unwrap()).unwrap();
+        assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    }
     let calls = fs::read(&f.calls).unwrap();
     fs::write(
         f.install.join(".due-init.lock"),

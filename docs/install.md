@@ -1,20 +1,20 @@
 # Install from source
 
-Due is in a private, source-only dogfooding period. Install the CLI and use its
+Due is currently distributed from its private source repository. Install the CLI and use its
 embedded installer for the skills-only plugin on each machine. No plugin source
 checkout is needed after building the executable. The plugin does not install a
-binary, provider, or credentials. Features are frozen while we collect reliability
-and usability issues.
+binary, provider, or credentials. Normal builds include the resident RPC interface
+and embedded JavaScript harness; no Node runtime is needed.
 
 For an existing broken setup, start with [troubleshooting](troubleshooting.md).
-It includes a [frozen-build repair](troubleshooting.md#repair-a-frozen-checkout-build-through-its-existing-symlink)
+It includes an [existing-build repair](troubleshooting.md#repair-a-frozen-checkout-build-through-its-existing-symlink)
 that preserves an existing checkout symlink and distinguishes host, login and
 task-permission failures.
 
 ## Prerequisites
 
 - Access to [joshrotenberg/due](https://github.com/joshrotenberg/due) from that machine.
-- Rust 1.90 or newer, Cargo, Git, and a native linker/toolchain.
+- Rust 1.90 or newer, Cargo, Git, and a native C compiler/linker for embedded JavaScript.
 - Claude Code or Codex installed and authenticated locally for whichever provider
   you will run. Check that it works directly before diagnosing Due.
 - A plugin-capable local host with permission to execute commands. Work-machine
@@ -138,7 +138,8 @@ step; output-limit failures retain a capped prefix and mark its stream as
 truncated. Host output can include local paths; inspect it before sharing.
 
 Start a new host session or reload plugins after installation or an update. The
-entry point is `due:delegate`; it routes into the installed binary's three guides.
+entry point is `due:delegate`; it routes into the installed binary's guides for
+one-shot work, contracts, observation and supervised assignments.
 Native host registration succeeding is distinct from verifying skill discovery in
 a fresh session. Codex uses the [official local-plugin workflow](https://developers.openai.com/plugins/build/plugins).
 
@@ -187,88 +188,29 @@ Other plugins and host settings are left to the native host. The checked-in
 [`plugin/due`](../plugin/due) package remains the canonical skill/manifest source
 and can still be used by plugin authors; it is included at compile time.
 
-## Enable the caller trial policy
+## Choose how agents use Due
 
-The optional [caller policy](caller-policy.md) covers Due-only delegation,
-positive and negative findings, and bounded A/B trials. Installing the plugin
-does not enable that global preference automatically.
+The plugin is a scoped entry point, not a global delegation mandate. It directs
+agents to the installed binary's guidance and lets the caller choose `due run`,
+`due script`, or an independent RPC client for the authorized assignment.
+Installation does not require reports for every run or periodic A/B comparisons.
 
-### Codex
-
-For Codex in every repository, add a pointer to the active global instruction
-file. Codex uses `AGENTS.override.md` if present, otherwise `AGENTS.md`, under
-its configured Codex home (normally `~/.codex`). Preserve existing instructions
-and use the absolute checkout path on that machine:
-
-```markdown
-## Due source trial
-
-Use Due exclusively for delegated model work. At the start of each task, read
-/ABSOLUTE/PATH/TO/due/docs/caller-policy.md and follow its reporting and A/B
-workflow. Direct work by the calling agent remains allowed. If that file or Due
-is unavailable, report it and do not substitute another delegation mechanism.
-```
-
-Start a fresh chat after changing global instructions. The pointer follows
-checkout policy updates on subsequent reads. Host/project instructions can
-override global guidance, so verify it with a real task. See
-[Codex instruction discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md).
-
-### Claude Code
-
-Merge the following block into `~/.claude/CLAUDE.md`, Claude Code's user-level
-instructions for all projects. Preserve existing instructions and replace the
-placeholder with the absolute Due checkout path on that machine. You can also
-run `/memory`, select the user `CLAUDE.md` entry, and edit it there; opening a
-missing file creates it.
-
-```markdown
-## Due source trial
-
-At the start of each task, read
-/ABSOLUTE/PATH/TO/due/docs/caller-policy.md and follow its workflow.
-If the assignment identifies this session as a Due worker, return observations
-to the caller. Do not publish reports or initiate A/B trials. Do not recursively
-delegate unless the assignment explicitly authorizes it; use Due if authorized.
-
-As the outer caller, use Due exclusively for delegated model work and identify
-each recipient as a Due worker in its assignment. Report all favorable and
-unfavorable Due findings as sanitized issues or evidence in joshrotenberg/due:
-search existing issues first and aggregate routine successes per work batch.
-Periodically consider a controlled two-arm comparison, following the policy's
-cadence and deferral rules. Use the same prompt, inputs, schema, permissions and
-rubric, deliberately varying provider, model or effort. Independently select the
-better supported response when one exists and report the outcome; a tie, neither
-acceptable, or inconclusive result is valid.
-
-Direct work by the calling agent remains allowed. If Due or the policy file
-is unavailable, report the blocker and do not substitute another delegation
-mechanism. Explicit task constraints and host permissions still apply.
-```
-
-For example, begin worker prompts with: "You are a Due worker. Return your
-findings to the caller; do not delegate, publish issues or start A/B trials."
-This makes the role explicit even when a worker loads the same user instructions.
-
-Start a fresh Claude Code session and use `/context` to check that the user
-`CLAUDE.md` loaded. Then ask it to read the policy and inspect a scratch repository
-through Due without changing files. Confirm it finds `due` on PATH, reads
-`due --help` and `due skills show run`, and verifies the worker's output.
-The Codex plugin installation above does not configure Claude Code; Claude can
-use the installed CLI and its embedded guides directly.
-
-These are behavioral instructions, not permission grants. For scoped unattended
-permissions, read `due skills show run`. Reconcile conflicting user/project
-instructions and verify behavior in a real task. See
-[Claude Code instruction files](https://code.claude.com/docs/en/memory).
-The pointer reads the checkout policy on subsequent tasks; a new session avoids
-relying on previously loaded policy text. No background automation is installed.
+The earlier source-trial policy is retired. If you previously added a `Due source
+trial` block to global `AGENTS.md`, `AGENTS.override.md`, or `CLAUDE.md`, review and
+remove that block when you no longer want its separate restrictions. Due does
+not edit those files. Preserve unrelated instructions and start a fresh host
+session after changing its global guidance. See [caller policy](caller-policy.md)
+for the current scope and verification contract.
 
 ## Check installation without a provider call
 
 ```sh
 due skills list --output json
 due skills show run
+due skills show supervise
+due script --help
+due rpc --help
+due schema script-result
 due schema request
 due run --request examples/profile.json --provider codex \
   -p 'Explain this repository without changing files.' --dry-run --output json

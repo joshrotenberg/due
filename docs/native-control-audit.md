@@ -5,7 +5,9 @@ Claude Code 2.1.296, macOS 27 arm64. In that historical investigation, main,
 installed Due, wrappers and Rust runtime were unchanged. This stable extraction
 retains that versioned evidence; it is not a new live test or a current effective
 tool inventory. This is guidance and profile evidence, not
-native child lifecycle or accounting acceptance.
+native child lifecycle or accounting acceptance. The source-trial restrictions
+mentioned below are historical; the current [caller policy](caller-policy.md)
+does not require Due-only delegation or a reporting/A/B cadence.
 
 ## Codex: configuration is not a feature inventory
 
@@ -59,8 +61,8 @@ children do not establish universal enforcement or descendant accounting.
 
 Native child identifiers, parent links, failure/cancellation events and usage
 semantics remain unverified. No real native-child fixture collection was performed:
-this source trial requires all delegated model work to use Due, and workers must
-not recursively delegate. Capture sanitized existing event fixtures when available;
+the source trial at that time required delegated model work to use Due and did
+not authorize workers to recursively delegate. Capture sanitized existing event fixtures when available;
 leave missing relationships and accounting explicit rather than inventing a tree.
 Keep any future deliberate native-child experiment separately authorized.
 

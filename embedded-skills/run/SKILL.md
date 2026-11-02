@@ -5,17 +5,22 @@ description: Run one bounded Claude Code or Codex task through Due and independe
 
 # Run a task
 
-Due wraps one noninteractive `claude -p` or `codex exec` invocation.
+`due run` wraps one noninteractive `claude -p` or `codex exec` invocation.
 It is one foreground CLI run; the caller and OS own concurrency and scheduling.
 Use the provider the user selected, with its installed CLI, authentication,
 settings, and native permissions. Due does not grant additional authorization
 or make the providers' permission policies equivalent.
 
+For a bounded assignment that needs a resident session, streamed items,
+permission decisions or independent verify/revise steps, use `due script` and
+read the installed `supervise` guide. Raw `due rpc` also supports custom clients.
+Use commands exposed by the installed build; `due skills` lists its guides.
+
 Define the concrete deliverable, working directory, allowed changes, and stopping
 condition in the prompt. Carry existing user authorization into the task without
 expanding it. Inspect existing workspace changes when they matter to later verification.
 
-Due has no default timeout. If you will watch the run's events and artifacts and
+`due run` has no default timeout. If you will watch the run's events and artifacts and
 can cancel it, omit `--timeout`. Unattended permission settings (no approval
 prompts) do not mean nobody is monitoring. If nobody will monitor the run, or the
 task has a real time budget, choose a generous task-specific `--timeout`
@@ -106,7 +111,7 @@ schema rejection. Check provider status in the same normal host context; a
 sandbox-only `Not logged in` does not prove expired login. If that normal-host
 status requires login, the human must complete interactive login there. Do not
 copy credentials, widen grants or automatically retry. Source installations have
-[recovery and frozen-build guidance](../../docs/troubleshooting.md).
+[recovery and existing-build guidance](../../docs/troubleshooting.md).
 
 For persistent unattended Codex work, save this exact JSON as
 `codex-workspace-profile.json` in a caller-owned location outside every worker

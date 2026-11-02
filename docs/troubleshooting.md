@@ -167,13 +167,15 @@ enable task networking, copy certificates/credentials, or change global proxy
 settings as a generic repair. Preserve evidence and request the relevant host or
 network correction when confirmed.
 
-## Repair a frozen checkout build through its existing symlink
+## Repair an existing checkout build through its existing symlink
+
+<a id="repair-a-frozen-checkout-build-through-its-existing-symlink"></a>
 
 This is an operator-run repair for an already verified checkout-symlink install.
 It does not update source, install a new plugin, change global instructions, or
 replace the symlink. First confirm the expected source commit and dirty state,
 the existing symlink and its original target directory. Preserve local edits;
-stop if the identity differs from the intended frozen source. Record a hash of
+stop if the identity differs from the intended source revision. Record a hash of
 any surviving old executable separately from source identity.
 
 ```sh
@@ -184,7 +186,7 @@ git -C "$source_root" rev-parse HEAD
 git -C "$source_root" status --short
 ls -l "$due_link"
 readlink "$due_link"
-# Confirm these observations match the intended frozen source and original target.
+# Confirm these observations match the intended source revision and original target.
 cd "$source_root" || exit 1
 cargo build --offline --release --locked --target-dir "$target_dir"
 ```
@@ -214,8 +216,9 @@ different from the historical binary hash. This is a dated caller observation
 (2026-10-21), not a required hash for other builds. Approved-host redacted status
 checks also succeeded for Codex 0.163.0 and Claude Code 2.1.305; no authentication
 files were read or changed. The outer-host symlink-root failure described above
-was separate from those results. This maintenance branch adds docs, profiles,
-caller examples and fake-provider tests; it does not replace that frozen install.
+was separate from those results. Those maintenance changes did not replace that frozen installation. Current
+source adds resident RPC and JavaScript supervision; updating to it is a separate
+operator choice from repairing the historical binary.
 
 The caller also rechecked the unchanged eight-setting Codex profile through that
 restored executable on 2026-10-21 with Codex 0.163.0. Fresh and explicit resumed

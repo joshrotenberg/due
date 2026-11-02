@@ -63,6 +63,8 @@ impl Turn {
         }
     }
 
+    // App Server adds larger native error variants; keep the run adapter unchanged.
+    #[cfg_attr(feature = "rpc", allow(clippy::result_large_err))]
     async fn execute<C>(
         &self,
         client: &Codex,
@@ -77,6 +79,7 @@ impl Turn {
         }
     }
 
+    #[cfg_attr(feature = "rpc", allow(clippy::result_large_err))]
     async fn stream<C, F>(&self, client: &Codex, cancel: C, handler: F) -> codex_wrapper::Result<()>
     where
         C: Future<Output = ()> + Send,
