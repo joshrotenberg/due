@@ -114,7 +114,10 @@ unexpected permission requests and cleans up; it does not silently approve them.
 adapter. It is not a byte-for-byte copy of the native protocol: Claude exposes
 projected initialization metadata live and may provide the complete snapshot
 later, and its internal control responses are consumed by the wrapper. See the
-[item provenance and limits](mcp.md#pushed-session-items).
+[item provenance and limits](mcp.md#pushed-session-items). Codex records every native
+request as `native_request` before correlation, including requests later exposed
+as `interaction`. Claude uses `native_request` for permission requests denied
+outside its pending-interaction flow.
 
 Streaming is opt-in. `session.read` works without it and recovers gaps using the
 last session-wide `cursor`. Keep that cursor separate from `turn.read`'s cursor.
@@ -201,3 +204,18 @@ Offline checks passed the default Due suite (177 tests), the all-features suite
 tests, and 59 JavaScript tests. The added shutdown regressions hold stdin open
 while testing SIGTERM, broken stdout and unread stdout. Format, clippy and Rust
 1.90 checks passed; Linux/Windows native process behavior was not exercised.
+
+## Real-work observation (2026-11-02 UTC)
+
+One Codex RPC session (`gpt-6-astra`, medium effort) worked across three
+turns in a disposable Due snapshot: preserving process receipts after client
+failure, correcting early native-request correlation, and addressing review
+feedback while retaining the 32-request bound. All three turns preserved the
+same native session ID. The caller retained 1438 session items with consecutive
+cursors and zero reported push drops, received the session-closed item, and
+observed Due exit 0 without a forced kill. Independent review and subsequent
+checks passed 233 Rust tests and 65 JavaScript tests. This was one local macOS
+run using the pre-fix RPC binary; the fixes were checked through offline
+regressions, not live native approval tests. Native permissions were inherited
+(`approval: never`, `sandbox: dangerFullAccess`), so this was not a
+sandbox-boundary test.

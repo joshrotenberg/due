@@ -49,19 +49,53 @@ begin() {
     emit '{"type":"assistant","session_id":"'"$native"'","message":{"role":"assistant","content":[{"type":"text","text":"working"},{"type":"tool_use","id":"tool-fixture","name":"Read","input":{"file_path":"fixture.txt"}}]},"fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}'
   else
     start_response='{"turn":{"id":"'"$turn"'","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null},"fixtureResponse":{"unknown":[1,{"keep":true}]}}'
+    case "$line" in
+      *'"early-overflow"'*|*'"early-release"'*|*'"early-foreign-resolution"'*)
+        for request in $(seq 1 33); do
+          if [ "$request" = 33 ]; then
+            case "$line" in
+              *'"early-release"'*) notify serverRequest/resolved '{"threadId":"'"$native"'","turnId":"'"$turn"'","requestId":101}' ;;
+              *'"early-foreign-resolution"'*) notify serverRequest/resolved '{"threadId":"other-thread","requestId":101}' ;;
+            esac
+          fi
+          emit '{"method":"item/commandExecution/requestApproval","id":'"$((100 + request))"',"params":{"threadId":"'"$native"'","turnId":"'"$turn"'","command":"fixture-only"}}'
+        done
+        # Overflow must be rejected while the start response is still withheld.
+        case "$line" in
+          *'"early-release"'*)
+            while [ ! -f "$DUE_MCP_FIXTURE_DIR/release-start" ]; do sleep 0.01; done
+            ;;
+          *) return ;;
+        esac
+        ;;
+      *'"stale-approval"'*)
+        emit '{"method":"item/commandExecution/requestApproval","id":18,"params":{"threadId":"native-codex","turnId":"turn-1","itemId":"stale-command","command":"stale request from previous turn","unknown":{"keep":[true,null,42]}}}'
+        sleep 0.2
+        ;;
+    esac
     if [ "${DUE_MCP_EARLY:-0}" != 1 ]; then result "$id" "$start_response"; fi
     notify turn/started '{"threadId":"'"$native"'","turn":{"id":"'"$turn"'","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1790223474,"completedAt":null,"durationMs":null}}'
     notify item/started '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"id":"exec-fixture","type":"commandExecution","command":"fixture-only","fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}}'
   fi
   case "$line" in
-    *'"hold"'*) : ;;
-    *'"ask"'*)
+    *'"hold"'*|*'"stale-approval"'*|*'"early-release"'*) : ;;
+    *'"ask"'*|*'"ask-resolved"'*|*'"ask-completed"'*)
       pending=1
       if [ "$provider" = claude ]; then
         emit '{"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch never-created"}}}'
       else
         emit '{"method":"item/commandExecution/requestApproval","id":17,"params":{"threadId":"'"$native"'","turnId":"'"$turn"'","itemId":"exec-fixture","environmentId":"local","command":"touch never-created","cwd":"/tmp","availableDecisions":["accept","cancel"]}}'
       fi
+      case "$line" in
+        *'"ask-completed"'*)
+          finish completed 'completed with pending request'
+          emit '{"method":"item/commandExecution/requestApproval","id":19,"params":{"threadId":"'"$native"'","turnId":"'"$turn"'","command":"too late"}}'
+          ;;
+        *'"ask-resolved"'*)
+          notify serverRequest/resolved '{"threadId":"'"$native"'","requestId":17}'
+          finish completed 'resolved before start'
+          ;;
+      esac
       ;;
     *'"fail"'*) finish failed 'partial answer' ;;
     *) finish completed "turn $count" ;;

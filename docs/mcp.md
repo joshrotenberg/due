@@ -140,7 +140,7 @@ The item kinds distinguish provenance:
 | --- | --- |
 | `native` | Complete native payload exposed by the wrapper, including message and tool items |
 | `native_response` | Codex thread/start, thread/resume or turn/start response in `data.response`; structured RPC failures in `data.error` |
-| `native_request` | Native requests rejected outside the pending-interaction flow |
+| `native_request` | All Codex native requests, including those later exposed as `interaction`; Claude permission requests denied outside the pending-interaction flow |
 | `native_summary` | Claude's projected initialization event or wrapper subscriber-loss marker |
 | `native_snapshot` | Full Claude initialization recovered from the completed turn, delivered later |
 | `turn_started` / `turn_finished` | Due-submitted prompt / normalized Due result |

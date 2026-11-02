@@ -60,20 +60,64 @@ struct Active {
     answer: Option<String>,
     usage: Option<Usage>,
     requests: HashMap<String, RequestId>,
-    early: Vec<Notification>,
+    early: Vec<ServerMessage>,
     early_bytes: usize,
+    early_requests: HashMap<String, Value>,
     started: Instant,
     deadline: Option<tokio::time::Instant>,
 }
 
 impl Active {
-    fn matches(&mut self, native_id: &str) -> bool {
-        match &self.native_id {
-            Some(id) => id == native_id,
-            None => {
-                self.native_id = Some(native_id.to_owned());
-                true
+    // This accounts for unanswered requests only; request metadata never selects
+    // the authoritative turn ID. Keep the messages themselves for ordered replay.
+    fn track_early(&mut self, message: &ServerMessage, thread_id: &str) -> Result<(), String> {
+        match message {
+            ServerMessage::Request(request) => {
+                let key = request_key(&request.id);
+                if !self.early_requests.contains_key(&key) && self.early_requests.len() >= 32 {
+                    return Err("Codex exceeded the 32 pending interaction limit".into());
+                }
+                self.early_requests.insert(key, request.params.clone());
             }
+            ServerMessage::Notification(notification)
+                if notification.method == "serverRequest/resolved" =>
+            {
+                let params = &notification.params;
+                if let Some(id) = params.get("requestId") {
+                    let key = format!("codex:{id}");
+                    if let Some(request) = self.early_requests.get(&key) {
+                        // Without an authoritative ID, only release capacity when
+                        // the resolution unambiguously applies to this request.
+                        let same_thread = [params, request].iter().all(|p| {
+                            p.get("threadId")
+                                .and_then(Value::as_str)
+                                .is_none_or(|id| id == thread_id)
+                        });
+                        let same_turn =
+                            params
+                                .get("turnId")
+                                .and_then(Value::as_str)
+                                .is_none_or(|id| {
+                                    request.get("turnId").and_then(Value::as_str) == Some(id)
+                                });
+                        if same_thread && same_turn {
+                            self.early_requests.remove(&key);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn matches(&self, native_id: &str) -> bool {
+        self.native_id.as_deref() == Some(native_id)
+    }
+
+    fn reject_pending(&mut self, handle: &AppServerHandle) {
+        for (_, id) in self.requests.drain() {
+            let _ = handle.respond_error(id, -32000, "Due turn has finished");
         }
     }
 
@@ -281,41 +325,32 @@ async fn own(
         tokio::select! {
             _ = deadline_elapsed(deadline) => break Some((ErrorKind::Timeout, "Codex turn deadline exceeded; session closed".to_owned())),
             message = server.next_message() => match message {
-                Ok(Some(ServerMessage::Notification(notification))) => {
-                    // Session items preserve idle and late messages as well as active
-                    // turn messages. The turn-read view below keeps its stricter filter.
-                    sink.item("native", notification_item(&notification),
-                        native_turn_id(&notification.params, &thread_id, active.as_ref()));
-                    if let Err(error) = observe(&notification, &thread_id, &mut active, &sink) {
+                Ok(Some(message @ (ServerMessage::Notification(_) | ServerMessage::Request(_)))) => {
+                    let (kind, data, params) = match &message {
+                        ServerMessage::Notification(n) => ("native", notification_item(n), &n.params),
+                        ServerMessage::Request(r) => ("native_request", json!({"provider":"codex", "id":r.id, "method":r.method, "params":r.params}), &r.params),
+                        _ => unreachable!(),
+                    };
+                    sink.item(kind, data.clone(), native_turn_id(params, &thread_id, active.as_ref()));
+                    if let Some(turn) = active.as_mut().filter(|turn| turn.native_id.is_none()) {
+                        let bytes = data.to_string().len();
+                        if turn.early.len() >= 256 || turn.early_bytes.saturating_add(bytes) > 1024 * 1024 {
+                            if let ServerMessage::Request(request) = message {
+                                let _ = handle.respond_error(request.id, -32000, "Early-event limit exceeded");
+                            }
+                            break Some((ErrorKind::Protocol, "Codex start response lagged beyond the early-event limit".into()));
+                        }
+                        if let Err(error) = turn.track_early(&message, &thread_id) {
+                            if let ServerMessage::Request(request) = message {
+                                let _ = handle.respond_error(request.id, -32000, "Too many pending Due interactions");
+                            }
+                            break Some((ErrorKind::Protocol, error));
+                        }
+                        turn.early_bytes += bytes;
+                        turn.early.push(message);
+                    } else if let Err(error) = replay(message, &thread_id, &mut active, &sink, &handle) {
                         break Some((ErrorKind::Protocol, error));
                     }
-                }
-                Ok(Some(ServerMessage::Request(request))) => {
-                    let due_turn_id = native_turn_id(&request.params, &thread_id, active.as_ref()).map(str::to_owned);
-                    let reject = |message: &str| {
-                        sink.item("native_request", json!({"provider":"codex", "id":request.id, "method":request.method, "params":request.params}), due_turn_id.as_deref());
-                        let _ = handle.respond_error(request.id.clone(), -32000, message);
-                    };
-                    let Some(turn) = active.as_mut() else {
-                        reject("No active Due turn");
-                        continue;
-                    };
-                    if request.params.get("threadId").and_then(Value::as_str).is_some_and(|id| id != thread_id) {
-                        reject("Request belongs to another thread");
-                        continue;
-                    }
-                    if let Some(id) = request.params.get("turnId").and_then(Value::as_str)
-                        && turn.native_id.as_deref().is_some_and(|expected| expected != id) {
-                        reject("Request belongs to another turn");
-                        continue;
-                    }
-                    let key = request_key(&request.id);
-                    if !turn.requests.contains_key(&key) && turn.requests.len() >= 32 {
-                        reject("Too many pending Due interactions");
-                        break Some((ErrorKind::Protocol, "Codex exceeded the 32 pending interaction limit".into()));
-                    }
-                    turn.requests.insert(key.clone(), request.id.clone());
-                    sink.interaction(key, json!({"provider":"codex", "id":request.id, "method":request.method, "params":request.params}));
                 }
                 Ok(Some(_)) => {},
                 Ok(None) => break Some((ErrorKind::Protocol, "Codex app-server exited".to_owned())),
@@ -333,7 +368,7 @@ async fn own(
                         }
                     };
                     active = Some(Active { id: id.clone(), native_id: None, answer: None, usage: None,
-                        requests: HashMap::new(), early: Vec::new(), early_bytes: 0, started: Instant::now(), deadline });
+                        requests: HashMap::new(), early: Vec::new(), early_bytes: 0, early_requests: HashMap::new(), started: Instant::now(), deadline });
                     let mut params = TurnStartParams::text(&thread_id, prompt);
                     if let Some(effort) = &effort { params = params.effort(effort); }
                     let turn_handle = handle.clone();
@@ -362,13 +397,15 @@ async fn own(
                             turn.native_id = Some(native.id.clone());
                             let early = std::mem::take(&mut turn.early);
                             turn.early_bytes = 0;
-                            for notification in early {
-                                if let Err(error) = observe(&notification, &thread_id, &mut active, &sink) {
+                            turn.early_requests.clear();
+                            for message in early {
+                                if let Err(error) = replay(message, &thread_id, &mut active, &sink, &handle) {
                                     break 'owner Some((ErrorKind::Protocol, error));
                                 }
                             }
                             if native.status != TurnStatus::InProgress
-                                && let Some(done) = active.take() {
+                                && let Some(mut done) = active.take() {
+                                done.reject_pending(&handle);
                                 sink.finished(done.result(&thread_id, Some(native), None));
                             }
                         }
@@ -493,11 +530,62 @@ fn native_turn_id<'a>(
     (turn.native_id.as_deref() == Some(native_id)).then_some(turn.id.as_str())
 }
 
+// Both live and deferred messages use the same correlation and ordering rules.
+fn replay(
+    message: ServerMessage,
+    thread_id: &str,
+    active: &mut Option<Active>,
+    sink: &EventSink,
+    handle: &AppServerHandle,
+) -> Result<(), String> {
+    let request = match message {
+        ServerMessage::Notification(notification) => {
+            return observe(&notification, thread_id, active, sink, handle);
+        }
+        ServerMessage::Request(request) => request,
+        _ => return Ok(()),
+    };
+    let reject = |message: &str| {
+        let _ = handle.respond_error(request.id.clone(), -32000, message);
+    };
+    let Some(turn) = active.as_mut() else {
+        reject("No active Due turn");
+        return Ok(());
+    };
+    if request
+        .params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id != thread_id)
+    {
+        reject("Request belongs to another thread");
+        return Ok(());
+    }
+    if let Some(id) = request.params.get("turnId").and_then(Value::as_str)
+        && turn
+            .native_id
+            .as_deref()
+            .is_some_and(|expected| expected != id)
+    {
+        reject("Request belongs to another turn");
+        return Ok(());
+    }
+    let key = request_key(&request.id);
+    if !turn.requests.contains_key(&key) && turn.requests.len() >= 32 {
+        reject("Too many pending Due interactions");
+        return Err("Codex exceeded the 32 pending interaction limit".into());
+    }
+    turn.requests.insert(key.clone(), request.id.clone());
+    sink.interaction(key, json!({"provider":"codex", "id":request.id, "method":request.method, "params":request.params}));
+    Ok(())
+}
+
 fn observe(
     notification: &Notification,
     thread_id: &str,
     active: &mut Option<Active>,
     sink: &EventSink,
+    handle: &AppServerHandle,
 ) -> Result<(), String> {
     let params = &notification.params;
     if params
@@ -510,17 +598,6 @@ fn observe(
     let Some(turn) = active.as_mut() else {
         return Ok(());
     };
-    // Wait for the authoritative start response, retaining early notifications.
-    // Otherwise a late usage event from the previous turn could select its ID.
-    if turn.native_id.is_none() {
-        let bytes = params.to_string().len();
-        if turn.early.len() >= 256 || turn.early_bytes.saturating_add(bytes) > 1024 * 1024 {
-            return Err("Codex start response lagged beyond the early-event limit".into());
-        }
-        turn.early_bytes += bytes;
-        turn.early.push(notification.clone());
-        return Ok(());
-    }
     let native_id = params
         .get("turnId")
         .and_then(Value::as_str)
@@ -571,7 +648,8 @@ fn observe(
         if completed.thread_id != thread_id {
             return Ok(());
         }
-        let turn = active.take().expect("active turn");
+        let mut turn = active.take().expect("active turn");
+        turn.reject_pending(handle);
         sink.finished(turn.result(thread_id, Some(completed.turn), None));
     }
     Ok(())
@@ -590,9 +668,71 @@ mod tests {
             requests: HashMap::new(),
             early: Vec::new(),
             early_bytes: 0,
+            early_requests: HashMap::new(),
             started: Instant::now(),
             deadline: None,
         }
+    }
+
+    #[test]
+    fn early_request_accounting_uses_request_ids_and_matching_resolutions() {
+        use codex_wrapper::app_server::ServerRequest;
+        let mut turn = active();
+        turn.native_id = None;
+        let request = |id| {
+            ServerMessage::Request(ServerRequest {
+                id,
+                method: "item/commandExecution/requestApproval".into(),
+                params: json!({"threadId":"thread", "turnId":"candidate"}),
+            })
+        };
+        let resolved = |params| {
+            ServerMessage::Notification(Notification {
+                method: "serverRequest/resolved".into(),
+                params,
+            })
+        };
+        for id in 1..=32 {
+            turn.track_early(&request(RequestId::Number(id)), "thread")
+                .unwrap();
+        }
+        // A duplicate ID does not consume another slot; string IDs stay distinct.
+        turn.track_early(&request(RequestId::Number(1)), "thread")
+            .unwrap();
+        assert!(
+            turn.track_early(&request(RequestId::String("1".into())), "thread")
+                .is_err()
+        );
+        for params in [
+            json!({"threadId":"foreign", "requestId":1}),
+            json!({"threadId":"thread", "turnId":"other", "requestId":1}),
+            json!({"threadId":"thread", "requestId":"1"}),
+        ] {
+            turn.track_early(&resolved(params), "thread").unwrap();
+            assert_eq!(turn.early_requests.len(), 32);
+        }
+        // Native resolutions may omit a turn ID, as in the live replay path.
+        turn.track_early(
+            &resolved(json!({"threadId":"thread", "requestId":1})),
+            "thread",
+        )
+        .unwrap();
+        assert_eq!(turn.early_requests.len(), 31);
+        turn.track_early(&request(RequestId::Number(33)), "thread")
+            .unwrap();
+        assert_eq!(turn.early_requests.len(), 32);
+        assert!(turn.native_id.is_none());
+    }
+
+    #[test]
+    fn observed_turn_ids_cannot_establish_authoritative_identity() {
+        let mut turn = active();
+        turn.native_id = None;
+        assert!(!turn.matches("previous-turn"));
+        assert!(turn.native_id.is_none());
+        turn.native_id = Some("current-turn".into());
+        assert!(!turn.matches("previous-turn"));
+        assert!(turn.matches("current-turn"));
     }
 
     #[test]
