@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+import time
 
 CASE = os.environ.get("RPC_TEST_CASE", "conversation")
 cursor = 0
@@ -44,6 +45,12 @@ for line in sys.stdin:
     method = request["method"]
     params = request["params"]
     if method == "session.open":
+        # Model-free startup pressure before the callback can possibly run.
+        open_delay_ms = int(os.environ.get("RPC_TEST_OPEN_DELAY_MS", "0"))
+        if open_delay_ms:
+            sys.stderr.write("FIXTURE_OPEN_DELAY\n")
+            sys.stderr.flush()
+            time.sleep(open_delay_ms / 1000)
         if CASE == "bad_json":
             sys.stdout.buffer.write(b"{this is not JSON}\n")
             sys.stdout.buffer.flush()
