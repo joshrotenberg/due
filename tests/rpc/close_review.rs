@@ -147,3 +147,22 @@ fn failed_open_streams_provisional_evidence_without_publishing_a_handle() {
         client.eof();
     }
 }
+
+#[test]
+fn closing_a_session_timed_out_before_initialization_keeps_native_id_absent() {
+    let mut client = Client::new(false);
+    let session = client.open("claude", true, Some("200ms"));
+    let turn = client.start(&session, "no-init-hold");
+    let result = client.finished(&session, &turn);
+    assert_eq!(result["status"], "timed_out");
+    assert!(result["session_id"].is_null(), "{result}");
+    let closed = client.ok("session.close", json!({"session_id":session}));
+    assert_eq!(closed["closed"], true);
+    assert!(closed["native_session_id"].is_null(), "{closed}");
+    assert!(closed["session_error"].is_string(), "{closed}");
+    let item = client
+        .pushed_until(|item| item["session_id"] == session && item["kind"] == "session_closed");
+    assert!(item["data"]["native_session_id"].is_null(), "{item}");
+    assert!(client.dir.path().join("exited").exists());
+    client.eof();
+}
