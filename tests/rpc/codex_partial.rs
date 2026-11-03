@@ -1,17 +1,31 @@
 use super::*;
 
 fn partial(client: &mut Client, session: &str, turn: &str, number: usize) {
-    client.pushed_until(|item| {
-        item["session_id"] == session
-            && item["turn_id"] == turn
-            && item["kind"] == "native"
-            && item["data"]["method"] == "fixture/partial-ready"
-    });
-    assert!(client.notifications.iter().any(|message| {
-        message["params"]["turn_id"] == turn
-            && message["params"]["data"]["params"]["item"]["text"]
-                == format!("Partial turn {number}. é")
-    }));
+    // Session pushes can precede the authoritative turn/start acknowledgement
+    // and legitimately have no Due turn ID. The turn event window is populated
+    // only after correlation and early-event replay, so use it as the barrier.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut after = 0;
+    loop {
+        let snapshot = client.ok(
+            "turn.read",
+            json!({"session_id":session,"turn_id":turn,"after":after,"wait_ms":100}),
+        );
+        let events = snapshot["events"].as_array().unwrap();
+        if events
+            .iter()
+            .any(|event| event["event"]["method"] == "fixture/partial-ready")
+        {
+            return;
+        }
+        assert!(!snapshot["events_lost"].as_bool().unwrap(), "{snapshot}");
+        assert_ne!(snapshot["state"], "finished", "{snapshot}");
+        assert!(
+            Instant::now() < deadline,
+            "partial {number} was not correlated: {snapshot}"
+        );
+        after = snapshot["cursor"].as_u64().unwrap();
+    }
 }
 
 #[test]
@@ -117,4 +131,29 @@ fn codex_partial_deadline_and_native_exit_keep_accepted_text() {
         client.eof();
         assert_eq!(result["text"], "Partial turn 1. é", "{result}");
     }
+}
+
+#[test]
+fn codex_partial_before_start_ack_is_correlated_before_interruption() {
+    let mut client = Client::new(true);
+    let session = client.open("codex", true, None);
+    let turn = client.start(&session, "codex-partial-early-hold");
+    let early = client.pushed_until(|item| {
+        item["session_id"] == session && item["data"]["method"] == "fixture/partial-ready"
+    });
+    assert!(
+        early["turn_id"].is_null(),
+        "early pushes cannot claim a Due turn yet"
+    );
+    fs::write(client.dir.path().join("release-start"), "release").unwrap();
+    partial(&mut client, &session, &turn, 1);
+    client.ok(
+        "turn.interrupt",
+        json!({"session_id":session,"turn_id":turn}),
+    );
+    let result = client.finished(&session, &turn);
+    assert_eq!(result["status"], "cancelled");
+    assert_eq!(result["text"], "Partial turn 1. é");
+    client.close(&session);
+    client.eof();
 }

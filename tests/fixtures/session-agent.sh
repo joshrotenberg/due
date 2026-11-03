@@ -143,6 +143,9 @@ begin() {
       notify item/completed '{"threadId":"'"$native"'","turnId":"previous-turn","item":{"type":"agentMessage","id":"stale-late","phase":"commentary","text":"stale late text must not leak"}}'
       notify fixture/partial-ready '{"threadId":"'"$native"'","turnId":"'"$turn"'","fixturePartialReady":true}'
       case "$line" in
+        *'"codex-partial-early-hold"'*)
+          while [ ! -f "$DUE_SESSION_FIXTURE_DIR/release-start" ]; do sleep 0.01; done
+          ;;
         *'"codex-partial-failed"'*) finish failed '' ;;
         *'"codex-partial-final"'*) finish completed 'authoritative final answer' ;;
         *'"codex-partial-success"'*)
