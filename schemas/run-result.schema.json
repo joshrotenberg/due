@@ -62,6 +62,51 @@
         "planned"
       ]
     },
+    "provenance": {
+      "description": "Always emitted by current results; optional here so saved v1 results from earlier binaries remain valid.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "reported"],
+      "properties": {
+        "requested": {
+          "description": "Merged common request fields only. Null means intake was not resolved; null members mean omitted, with no native defaults inferred.",
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["model", "effort"],
+              "properties": {
+                "model": {"type": ["string", "null"]},
+                "effort": {"enum": ["low", "medium", "high", null]}
+              }
+            }
+          ]
+        },
+        "reported": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["models", "effort", "truncated"],
+          "properties": {
+            "models": {
+              "type": "array",
+              "uniqueItems": true,
+              "maxItems": 16,
+              "items": {"type": "string", "minLength": 1, "maxLength": 256},
+              "description": "Unique model IDs from validated native metadata for this turn, in observation order, each at most 256 UTF-8 bytes. Empty means unknown. Never inferred from requested aliases, assistant text, init/configuration or session accounting."
+            },
+            "effort": {
+              "type": ["string", "null"],
+              "description": "Actual native effort report, or null when unknown. Neither pinned native turn surface currently supplies one."
+            },
+            "truncated": {
+              "type": "boolean",
+              "description": "True if a reported model ID was omitted due to the count or byte bound. IDs are never shortened. False does not guarantee the provider supplied complete metadata."
+            }
+          }
+        }
+      }
+    },
     "text": {
       "type": "string"
     },

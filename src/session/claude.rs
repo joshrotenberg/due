@@ -407,6 +407,9 @@ fn forward(
         ),
         Err(broadcast::error::RecvError::Closed) => return,
     };
+    if let Some(turn_id) = turn_id {
+        sink.claude_provenance(turn_id, &event);
+    }
     let item = json!({"provider":"claude", "event":event});
     sink.item(kind, item.clone(), turn_id);
     if turn_id.is_some() {
@@ -600,6 +603,9 @@ fn partial_text(events: &[Value]) -> String {
 
 fn normalize_turn(native: Value, events: &[Value], interrupted: bool) -> RunResult {
     let mut result = normalize(native);
+    for event in events {
+        crate::providers::provenance::claude_message(&mut result.provenance.reported, event);
+    }
     if result.text.is_empty() && (interrupted || result.error.is_some()) {
         result.text = partial_text(events);
     }

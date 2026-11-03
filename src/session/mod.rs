@@ -23,7 +23,7 @@ pub(crate) use items::{PushQueue, SessionItems};
 
 use crate::{
     cli::{Effort, Provider},
-    result::{ErrorKind, RunError, RunResult},
+    result::{ErrorKind, ReportedSettings, RequestedSettings, RunError, RunResult},
 };
 
 const MAX_EVENTS: usize = 256;
@@ -90,6 +90,7 @@ struct Turn {
     id: String,
     started: Instant,
     result: Option<Value>,
+    reported: ReportedSettings,
     events: VecDeque<(u64, Value, usize)>,
     bytes: usize,
     cursor: u64,
@@ -100,6 +101,7 @@ struct Turn {
 
 struct State {
     provider: Provider,
+    requested: RequestedSettings,
     native_session_id: Option<String>,
     failure: Option<String>,
     turn: Option<Turn>,
@@ -117,6 +119,7 @@ impl EventSink {
         Self {
             state: Arc::new(Mutex::new(State {
                 provider,
+                requested: RequestedSettings::default(),
                 native_session_id: None,
                 failure: None,
                 turn: None,
@@ -164,6 +167,17 @@ impl EventSink {
         self.changed.notify_waiters();
     }
 
+    fn claude_provenance(&self, turn_id: &str, event: &Value) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(turn) = state
+            .turn
+            .as_mut()
+            .filter(|turn| turn.id == turn_id && turn.result.is_none())
+        {
+            crate::providers::provenance::claude_message(&mut turn.reported, event);
+        }
+    }
+
     pub fn interaction(&self, request_id: String, request: Value) {
         let mut state = self.state.lock().unwrap();
         if let Some(turn) = state.turn.as_mut().filter(|t| t.result.is_none()) {
@@ -203,7 +217,13 @@ impl EventSink {
         } else {
             result.session_id = state.native_session_id.clone();
         }
+        result.provenance.requested = Some(state.requested.clone());
         if let Some(turn) = state.turn.as_mut().filter(|t| t.result.is_none()) {
+            // Preserve observations even on adapter/transport failures. begin()
+            // gives every turn a fresh accumulator, including reused sessions.
+            let mut reported = std::mem::take(&mut turn.reported);
+            reported.merge(result.provenance.reported);
+            result.provenance.reported = reported;
             result.run_id = Some(turn.id.clone());
             result.duration_ms = turn
                 .started
@@ -281,6 +301,7 @@ impl EventSink {
             id: id.clone(),
             started: Instant::now(),
             result: None,
+            reported: ReportedSettings::default(),
             events: VecDeque::new(),
             bytes: 0,
             cursor: 0,
@@ -393,6 +414,8 @@ impl Manager {
             id.clone(),
             options.stream.then(|| self.push.clone()),
         );
+        sink.state.lock().unwrap().requested =
+            RequestedSettings::new(options.model.as_deref(), options.effort);
         let backend = match Backend::open(&options, sink.clone()).await {
             Ok(backend) => backend,
             Err(error) => {
@@ -560,6 +583,42 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provenance_is_turn_local_and_retained_on_transport_failure() {
+        let sink = EventSink::new(Provider::Claude, "session".into(), None);
+        sink.state.lock().unwrap().requested =
+            RequestedSettings::new(Some("alias"), Some(Effort::High));
+        let first = sink.begin().unwrap();
+        let event = json!({"type":"assistant", "message":{
+            "role":"assistant", "model":"native-first", "unknown":42
+        }});
+        sink.claude_provenance(&first, &event);
+        sink.native_session("native-id".into());
+        sink.finished(RunResult::new(Provider::Claude).fail(RunError::protocol("transport lost")));
+        let snapshot = sink.snapshot(&first, 0).unwrap();
+        assert_eq!(snapshot["result"]["status"], "failed");
+        assert_eq!(snapshot["result"]["session_id"], "native-id");
+        assert_eq!(
+            snapshot["result"]["provenance"],
+            json!({
+                "requested":{"model":"alias", "effort":"high"},
+                "reported":{"models":["native-first"], "effort":null, "truncated":false}
+            })
+        );
+        let second = sink.begin().unwrap();
+        sink.claude_provenance(&first, &event);
+        sink.finished(RunResult::new(Provider::Claude));
+        let snapshot = sink.snapshot(&second, 0).unwrap();
+        assert_eq!(
+            snapshot["result"]["provenance"]["reported"]["models"],
+            json!([])
+        );
+        assert_eq!(
+            snapshot["result"]["provenance"]["requested"]["model"],
+            "alias"
+        );
+    }
 
     #[tokio::test]
     async fn readers_do_not_wait_for_the_mutation_lock() {

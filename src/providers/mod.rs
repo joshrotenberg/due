@@ -1,6 +1,7 @@
 mod claude;
 mod codex;
 pub(crate) mod output;
+pub(crate) mod provenance;
 
 use std::{
     future::Future,

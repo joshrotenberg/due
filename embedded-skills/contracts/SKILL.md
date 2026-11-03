@@ -19,6 +19,12 @@ RPC-level errors are JSON-RPC codes (`due skills show rpc`). Use
 installed contracts as JSON Schema without a provider or network.
 `due schema trace-summary` describes offline summaries and their error envelope.
 
+Additive result fields may appear within v1. Consumers should ignore unfamiliar
+fields and validate against the producing binary's exported schema. An older
+strict schema can still reject newer fields through `additionalProperties`.
+Current results always emit `provenance`; it is optional in the exported v1
+schema so older saved results without it remain valid.
+
 `due run --request FILE` accepts a complete task or partial profile;
 `--request -` reads the document from stdin. Only `schema_version: 1` must be in
 the file. Explicit CLI execution flags replace file values; omitted flags inherit.
@@ -89,6 +95,27 @@ validate constraints, convert incompatible schemas, repair answers, or retry.
   independent validation, not native enforcement. Validate the answer separately
   when validity gates further work; neither presence nor execution success proves it.
 - `session_id` is the native Claude session or Codex thread ID, not a Due session.
+- `provenance` separates merged common request fields from native observations.
+  `requested` is `{ "model": "sonnet", "effort": "high" }`, for example;
+  omitted fields remain null, and rejected intake uses `requested: null`.
+  Plans and failures after resolution retain the request. Native arguments and
+  provider defaults are not interpreted as common requested settings.
+  `reported` is `{ "models": [], "effort": null, "truncated": false }` when
+  unknown. Claude assistant message metadata observed during this turn (including
+  streaming message starts and native child messages) supplies model IDs.
+  The reserved `<synthetic>` placeholder is treated as unknown.
+  Requested aliases, assistant prose, token counts,
+  initialization/configuration and session accounting such as `modelUsage` do
+  not establish which model served this turn. The pinned Codex exec/App Server
+  turn surfaces supply no actual model or effort report; thread configuration
+  is not a turn report. Neither provider currently supplies actual effort here.
+  Models are unique in observation order, capped at 16 IDs of 256 UTF-8 bytes
+  each; oversized IDs are omitted whole and `truncated` marks either limit.
+  Several IDs can be reported, so do not select one as the effective model.
+  Empty means unknown, not that no model ran. This same field appears on RPC
+  turn results and the results JavaScript returns. Observations reset each turn,
+  survive failures when available, and do not modify raw RPC items. Missing
+  native metadata, including metadata discarded by a wrapper error, stays unknown.
 - `usage` holds nullable native counters; cache accounting differs by provider.
   Do not infer missing totals. `cost_usd` is available Claude cost, otherwise null.
 - `duration_ms` includes Due input, setup, execution, and cleanup time.

@@ -225,6 +225,20 @@ fn schema_exports_are_offline_embedded_documents() {
 }
 
 #[test]
+fn result_schema_accepts_saved_v1_without_provenance() {
+    let schema = exported("result");
+    let mut saved: Value = serde_json::from_str(include_str!(
+        "../examples/offline-validation/fixtures/approve.result.json"
+    ))
+    .unwrap();
+    assert!(saved.get("provenance").is_none());
+    assert!(matches(&schema, &saved, &schema));
+    // Optional does not relax the shape when a record supplies provenance.
+    saved["provenance"] = json!({"requested":null});
+    assert!(!matches(&schema, &saved, &schema));
+}
+
+#[test]
 fn result_schema_covers_plans_and_input_errors_and_rejects_broken_presence() {
     let schema = exported("result");
     for args in [
@@ -251,6 +265,7 @@ fn result_schema_covers_plans_and_input_errors_and_rejects_broken_presence() {
             .output()
             .unwrap();
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(result["provenance"].is_object());
         assert!(matches(&schema, &result, &schema), "result={result}");
         let mut broken = result.clone();
         broken["structured_output_present"] = json!(false);
