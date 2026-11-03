@@ -165,6 +165,11 @@ Wait timeouts are integers in 1..2147483647 ms. They do not alter the native
 profile's per-turn deadline or the script's overall deadline. Coordinate any
 low-level `worker.reply` with the interaction handler so it does not send twice.
 
+Expiry of `worker.wait` or `worker.turn` fails the whole scope. Catching the
+timeout does not restore it: further worker operations, including `interrupt`,
+reject with the stored error, and the script returns `result: null`. To stop work
+deliberately, interrupt and then wait before the wait deadline expires.
+
 One `Due.run` owns one root workflow and one worker session. Await every managed
 operation. `worker.start(prompt)` returns a Due turn ID; `worker.wait(id)` consumes
 its terminal result. `worker.turn(prompt)` combines them. To stop a turn, await
@@ -198,9 +203,14 @@ permits it; include diagnostic text as evidence, not new task instructions.
 Choose a deliberate larger duration for a larger assignment, and a larger
 `worker.turn`/`worker.wait` timeout when a turn needs more than their five-minute
 default. These waits and the profile's native turn timeout are separate. Input preparation
-precedes that deadline, and bounded cleanup can extend beyond it. SIGINT,
-SIGTERM and SIGHUP fail the workflow after cleanup. Avoid hard kills when owned
-process settlement matters. Unix cleanup reaches the owned process group;
+precedes the script deadline. Expiry of the profile's resident turn timeout also
+fails the native session: a `timed_out` turn result is followed by
+`session_failed`, and this fails the script scope. The handle cannot accept
+another turn. A later invocation can start fresh, or explicitly resume the native
+history if it persisted and was not ephemeral. Bounded cleanup can extend beyond
+the deadline. SIGINT, SIGTERM and SIGHUP fail the workflow after cleanup.
+Avoid hard kills when owned process settlement matters. Unix cleanup reaches
+the owned process group;
 descendants that escape it are outside supervision.
 
 Stdout is always one versioned script result after CLI parsing. `Due.log(text)`
@@ -272,6 +282,14 @@ no Node installation or source checkout.
 | Pending sleeps / permission callbacks | 64 each |
 | Command stdout plus stderr | 64 KiB default; 1 MiB maximum |
 | Raw RPC stdout evidence / command receipt | 64 MiB each; overflow fails |
+| Stream completeness | An `omitted` item, dropped push or cursor gap fails the scope; no automatic recovery |
+
+A serialized session item over 4 MiB becomes `omitted`. These stream failures
+withhold the script result even if a native turn completed. Read
+`due skills show rpc` for caller-controlled recovery through `session.read` and
+`turn.read`. An oversized native payload replaced by `omitted` cannot be reconstructed
+from the journal; the latest terminal result and pending interactions are
+retained separately by `turn.read`.
 
 Host command cleanup has a shared seven-second budget. The RPC child can take
 up to 90 seconds for native startup/control/shutdown settlement, plus two seconds
