@@ -465,9 +465,9 @@ mod tests {
     impl Fixture {
         fn new(body: &str) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let binary = dir.path().join("peer");
-            fs::write(&binary, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+            let binary =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bridge-peer.sh");
+            fs::write(dir.path().join("body.sh"), format!("{body}\n")).unwrap();
             let evidence = dir.path().join("evidence");
             Self {
                 dir,

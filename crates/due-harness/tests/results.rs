@@ -5,7 +5,7 @@ use due_harness::{MAX_DOCUMENT_BYTES, Options, Outcome, run_js, run_with};
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    path::Path,
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
@@ -17,19 +17,13 @@ struct Fixture {
 impl Fixture {
     fn new(exit: i32) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let peer = dir.path().join("peer");
-        fs::write(
-            &peer,
-            format!("#!/bin/sh\nwhile IFS= read -r line; do :; done\nexit {exit}\n"),
-        )
-        .unwrap();
-        fs::set_permissions(&peer, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(dir.path().join("exit-code"), format!("{exit}\n")).unwrap();
         Self { dir }
     }
 
     fn options(&self, source: &str) -> Options {
         Options {
-            due: self.dir.path().join("peer"),
+            due: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/results-peer.sh"),
             cwd: self.dir.path().to_owned(),
             evidence: self.dir.path().join("evidence"),
             source: source.to_owned(),
