@@ -300,7 +300,7 @@ A Python 3 client example for one turn that approves only one exact command.
 Adapt the paths and provider; add your own verification afterwards:
 
 ```python
-import json, queue, subprocess, threading
+import json, queue, subprocess, threading, time
 
 class Due:
     """Single-caller example; a reader thread continuously drains RPC stdout."""
@@ -392,6 +392,7 @@ def decide(item):
         return {"decision": "decline"}
     raise RuntimeError("No authorized response for this interaction kind")
 
+TURN_WAIT_SECONDS = 600  # Caller-selected turn budget, separate from native timeout.
 due = Due()
 try:
     opened = due.call("session.open", provider="claude", cwd="/path/to/project",
@@ -401,11 +402,22 @@ try:
     sid = opened["session_id"]
     turn = due.call("turn.start", session_id=sid,
                     prompt="Run the unit tests and report failures. Do not edit files.")["turn_id"]
-    result = None
+    result, cursor = None, 0
+    deadline = time.monotonic() + TURN_WAIT_SECONDS
     while result is None:
-        item = due.items.get()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("Caller turn wait deadline exceeded")
+        try:
+            item = due.items.get(timeout=remaining)
+        except queue.Empty as error:
+            raise RuntimeError("Caller turn wait deadline exceeded") from error
         if item is None:
             raise RuntimeError(str(due.failure))
+        if (item["cursor"] != cursor + 1 or item.get("push_dropped", 0) > 0
+                or item["kind"] == "omitted"):
+            raise RuntimeError("Incomplete session stream; explicit recovery required")
+        cursor = item["cursor"]
         if item["kind"] == "session_failed":
             raise RuntimeError(item["data"])
         if item["turn_id"] != turn:
@@ -425,8 +437,11 @@ finally:
 
 The reader is bounded to 256 queued items and fails on overflow. A production
 client should also budget queued bytes and select request/assignment deadlines. The example
-uses a 75-second request-ack budget and a 90-second shutdown budget; choose
-budgets appropriate to your caller. A forced Due kill leaves native settlement
+fails explicitly on an omitted item, dropped push or cursor gap instead of
+silently continuing with incomplete observation. It uses a 75-second request-ack
+budget, a separate 600-second caller turn budget and a 90-second shutdown budget;
+choose budgets appropriate to your caller. Progress does not reset the turn
+deadline. A forced Due kill leaves native settlement
 unconfirmed. A stale interaction reply fails this example closed; a more capable
 client may reconcile an exact known retirement as described above.
 
