@@ -2,11 +2,36 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Child, Command, Output, Stdio},
 };
 
 use serde_json::Value;
 use tempfile::TempDir;
+
+// A concurrent fork can inherit a writable executable descriptor until exec,
+// making Linux reject another launch of that executable with ETXTBSY.
+// Serialize fixture writes and spawn only; child execution remains concurrent.
+static COPY_OR_SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+trait FixtureCommandExt {
+    fn capture(&mut self) -> std::io::Result<Output>;
+    fn spawn_fixture(&mut self) -> std::io::Result<Child>;
+}
+
+impl FixtureCommandExt for Command {
+    fn capture(&mut self) -> std::io::Result<Output> {
+        self.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn_fixture()?
+            .wait_with_output()
+    }
+
+    fn spawn_fixture(&mut self) -> std::io::Result<Child> {
+        let _guard = COPY_OR_SPAWN.lock().unwrap();
+        self.spawn()
+    }
+}
 
 struct Fixture {
     temp: TempDir,
@@ -23,7 +48,10 @@ impl Fixture {
         let binary = temp
             .path()
             .join(format!("due{}", std::env::consts::EXE_SUFFIX));
-        fs::copy(env!("CARGO_BIN_EXE_due"), &binary).unwrap();
+        {
+            let _guard = COPY_OR_SPAWN.lock().unwrap();
+            fs::copy(env!("CARGO_BIN_EXE_due"), &binary).unwrap();
+        }
         let host = temp.path().join("native host ' ; $(literal).claude");
         let codex_host = temp.path().join("native host ' ; $(literal).codex");
         let calls = temp.path().join("calls");
@@ -74,6 +102,7 @@ elif [ "$2" = update ]; then
 else printf '{"native_setup":true}\n'
 fi
 "#;
+            let _guard = COPY_OR_SPAWN.lock().unwrap();
             for path in [&host, &codex_host] {
                 fs::write(path, script).unwrap();
                 fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -124,7 +153,7 @@ fi
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.command().args(args).output().unwrap()
+        self.command().args(args).capture().unwrap()
     }
 }
 
@@ -241,7 +270,7 @@ fn selected_host_does_not_require_or_call_the_other_host() {
     let output = f
         .command_with(&f.host, Path::new("/missing/codex"))
         .args(["--host", "claude"])
-        .output()
+        .capture()
         .unwrap();
     let value = report(&output, 0, "installed");
     assert_eq!(value["completed_steps"].as_array().unwrap().len(), 4);
@@ -263,7 +292,7 @@ fn missing_host_reports_not_ready_without_files_or_processes() {
         if dry {
             cmd.arg("--dry-run");
         }
-        let value = report(&cmd.output().unwrap(), 1, "not_ready");
+        let value = report(&cmd.capture().unwrap(), 1, "not_ready");
         assert_eq!(value["plan"]["ready"], false);
         assert!(
             value["plan"]["issues"][0]
@@ -283,7 +312,7 @@ fn failed_native_step_preserves_local_package_and_stops_before_later_hosts() {
     let value = report(
         &f.command()
             .env("DUE_INIT_FAIL", "install")
-            .output()
+            .capture()
             .unwrap(),
         1,
         "partial_install",
@@ -440,7 +469,7 @@ fn default_directory_uses_data_home_then_home_and_rejects_root() {
         if let Some(path) = data {
             cmd.env("XDG_DATA_HOME", path);
         }
-        cmd.output().unwrap()
+        cmd.capture().unwrap()
     };
     let value = report(&run(&[], None), 0, "planned");
     assert_eq!(
@@ -467,7 +496,7 @@ fn init_help_explains_scope_and_rejects_invalid_host() {
     let f = Fixture::new();
     let output = Command::new(&f.binary)
         .args(["init", "--help"])
-        .output()
+        .capture()
         .unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
@@ -490,7 +519,7 @@ fn conflicting_marketplace_or_bad_native_json_stops_before_registration() {
     for setting in ["DUE_INIT_CONFLICT", "DUE_INIT_BAD_LIST"] {
         let f = Fixture::new();
         let value = report(
-            &f.command().env(setting, "1").output().unwrap(),
+            &f.command().env(setting, "1").capture().unwrap(),
             1,
             "partial_install",
         );
@@ -515,10 +544,7 @@ fn conflicting_marketplace_or_bad_native_json_stops_before_registration() {
 #[cfg(unix)]
 #[test]
 fn cancellation_reports_partial_setup_and_settles_its_native_processes() {
-    use std::{
-        process::Stdio,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
     let f = Fixture::new();
     let ready = f.temp.path().join("ready");
     let pids = f.temp.path().join("pids");
@@ -529,7 +555,7 @@ fn cancellation_reports_partial_setup_and_settles_its_native_processes() {
         .env("DUE_INIT_PIDS", &pids)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_fixture()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while !ready.exists() {
@@ -565,7 +591,7 @@ fn cancellation_reports_partial_setup_and_settles_its_native_processes() {
     for pid in fs::read_to_string(pids).unwrap().lines() {
         let output = Command::new("/bin/ps")
             .args(["-o", "stat=", "-p", pid])
-            .output()
+            .capture()
             .unwrap();
         assert!(
             output.stderr.is_empty()
@@ -588,7 +614,7 @@ fn invalid_utf8_paths_are_rejected_before_effects() {
     let f = Fixture::new();
     let invalid = PathBuf::from(OsString::from_vec(b"/invalid-\xff".to_vec()));
     let value = report(
-        &f.command_with(&invalid, &f.codex_host).output().unwrap(),
+        &f.command_with(&invalid, &f.codex_host).capture().unwrap(),
         1,
         "not_ready",
     );
