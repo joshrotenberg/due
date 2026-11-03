@@ -47,6 +47,16 @@ impl Client {
     /// `log_stderr` sends Due's stderr to `stderr.log` in the fixture directory
     /// so a failing test can include it; otherwise stderr is inherited.
     fn spawn(early: bool, log_stderr: bool) -> Self {
+        Self::with_stderr(early, |directory| {
+            if log_stderr {
+                Stdio::from(fs::File::create(directory.join("stderr.log")).unwrap())
+            } else {
+                Stdio::inherit()
+            }
+        })
+    }
+
+    fn with_stderr(early: bool, stderr: impl FnOnce(&std::path::Path) -> Stdio) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("provider");
         fs::write(&binary, include_bytes!("fixtures/session-agent.sh")).unwrap();
@@ -57,11 +67,7 @@ impl Client {
             .env("DUE_SESSION_EARLY", if early { "1" } else { "0" })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(if log_stderr {
-                Stdio::from(fs::File::create(dir.path().join("stderr.log")).unwrap())
-            } else {
-                Stdio::inherit()
-            })
+            .stderr(stderr(dir.path()))
             .spawn()
             .unwrap();
         let stdin = child.stdin.take();

@@ -39,21 +39,16 @@ pub(super) async fn execute(signal: impl Future<Output = ()>) -> Result<(), Stri
                         .write_all(&bytes[..count])
                         .and_then(|()| output.flush());
                     writing.send_replace(None);
-                    if let Err(error) = &written {
-                        // One line at detection time. The final error is only
-                        // printed after provider cleanup, so without this a
-                        // slow cleanup is indistinguishable from an EPIPE that
-                        // was never observed.
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "due rpc: stdout bridge write failed ({} bytes): {error}",
-                            count
-                        );
-                    }
                     written.map_err(|error| format!("RPC stdout: {error}"))?;
                 }
             })();
+            let failure = result.as_ref().err().cloned();
+            // Publish failure before diagnostics: an unread stderr pipe must
+            // not prevent the async owner from starting provider cleanup.
             let _ = output_done.send(result);
+            if let Some(error) = failure {
+                let _ = writeln!(std::io::stderr(), "due rpc: stdout bridge stopped: {error}");
+            }
         })
         .map_err(|error| format!("start RPC stdout bridge: {error}"))?;
 
