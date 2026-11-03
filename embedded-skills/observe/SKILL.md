@@ -101,3 +101,6 @@ Inspect artifacts and authorized external effects independently after interrupti
 or completion; trace events describe observations, not a verified effect inventory.
 Do not retry automatically. Use `due skills show contracts` to interpret the
 final result, or `due skills show run` to scope an authorized follow-up.
+`due run --help` lists the trace flags. For resident sessions, items arrive as
+`session.item` records (`due skills show rpc`) or through `onItem` in `due script`
+(`due skills show supervise`); `due skills show overview` maps the guides.

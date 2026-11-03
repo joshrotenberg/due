@@ -6,9 +6,14 @@ description: Request structured answers with Due and interpret its result envelo
 # Use the result contract
 
 This guide covers `due run`. The JavaScript harness has a separate
-`due schema script-result` envelope and the `supervise` guide in normal builds.
-Do not interpret a script's acceptance data as a native turn result, or apply
-one-shot timeout/cancellation exit codes to `due script`.
+`due schema script-result` envelope and the `supervise` guide when `due script`
+is in your build (`due -h`). Do not interpret a script's acceptance data as a
+native turn result, or apply one-shot timeout/cancellation exit codes to
+`due script`. Raw `due rpc` has no envelope or exit-code contract per turn: each
+resident turn's `turn_finished` result uses the vocabulary below (`status`,
+`text`, `session_id`, `error`, `usage`), with `run_id` set to the Due turn ID, and
+RPC-level errors are JSON-RPC codes (`due skills show rpc`). Use
+`due skills show profiles` for request/profile files shared across all three.
 
 `due schema request`, `due schema result`, and `due schema trace` export the
 installed contracts as JSON Schema without a provider or network.
@@ -111,3 +116,5 @@ Dry runs have `status: planned` and an `invocation`, with no provider execution.
 A valid schema or successful execution does not verify artifacts or side effects.
 Check claimed changes and actions against the workspace or authorized external system.
 Load `due skills show run` for execution or `due skills show observe` for progress.
+`due run --help` lists every flag; `due skills show overview` has a troubleshooting
+table keyed by exit code.

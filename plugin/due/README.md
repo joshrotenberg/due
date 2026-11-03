@@ -3,8 +3,12 @@
 This skills-only plugin helps an agent run a bounded assignment through the local
 Due CLI, using Claude Code or Codex, and independently verify the result and
 workspace changes. Choose a one-shot `due run`, a resident JavaScript `due script`,
-or an independent raw RPC client. Its `delegate` skill points to `due --help` and the guides
-embedded in the installed executable.
+or an independent raw RPC client. Its short `delegate` skill frames Due as an
+independent worker and points to progressive discovery in the installed
+executable: `due -h` (short), `due --help` (long), `due COMMAND --help`,
+`due skills list --output json` and `due skills show NAME` (start with
+`overview`). The executable's help and guides, not this package, document the
+commands and contracts of that version.
 
 Keep `due` and the selected provider CLI on PATH. Provider authentication and
 permissions remain the host's responsibility. The package contains no MCP server,

@@ -19,6 +19,7 @@ const MAX_EVENT_TYPES: usize = 256;
 const MAX_OPEN_ACTIVITIES: usize = 4096;
 
 #[derive(Debug, Args)]
+#[command(after_help = crate::help::SHORT, after_long_help = crate::help::TRACE)]
 pub struct TraceArgs {
     #[command(subcommand)]
     command: TraceCommand,
@@ -27,9 +28,11 @@ pub struct TraceArgs {
 #[derive(Debug, Subcommand)]
 enum TraceCommand {
     /// Summarize a saved JSONL trace without starting a provider
+    #[command(after_help = crate::help::SHORT, after_long_help = crate::help::TRACE)]
     Summarize {
         /// JSONL trace file (read-only; no provider or network access)
         file: PathBuf,
+        /// Readable summary or one versioned JSON summary/error document.
         #[arg(long, value_enum, default_value = "text")]
         output: Output,
     },
