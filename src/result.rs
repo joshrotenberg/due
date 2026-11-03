@@ -2,7 +2,7 @@ use std::{io, path::PathBuf};
 
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 
-use crate::cli::Provider;
+use crate::cli::{Effort, Provider};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +21,7 @@ pub struct RunResult {
     pub trace: Option<TraceSummary>,
     /// Null only when a JSON request was rejected before resolving an invocation.
     pub provider: Option<Provider>,
+    pub provenance: Provenance,
     pub status: Status,
     pub text: String,
     /// Native structured data, or a decoded final answer requested with --schema.
@@ -48,9 +49,66 @@ pub enum AnswerSchemaValidation {
     NotPerformed,
 }
 
+/// Resolved caller intent is independent of evidence from native turn metadata.
+#[derive(Debug, Default, Serialize)]
+pub struct Provenance {
+    /// None means intake failed before the merged request was resolved.
+    pub requested: Option<RequestedSettings>,
+    pub reported: ReportedSettings,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct RequestedSettings {
+    pub model: Option<String>,
+    pub effort: Option<&'static str>,
+}
+
+impl RequestedSettings {
+    pub fn new(model: Option<&str>, effort: Option<Effort>) -> Self {
+        Self {
+            model: model.map(str::to_owned),
+            effort: effort.map(Effort::as_str),
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ReportedSettings {
+    /// Unique native model IDs, in observation order, never requested aliases.
+    pub models: Vec<String>,
+    /// Neither pinned native turn surface currently reports actual effort.
+    pub effort: Option<String>,
+    /// At least one model ID exceeded the count or byte bound.
+    pub truncated: bool,
+}
+
+impl ReportedSettings {
+    pub fn model(&mut self, model: &str) {
+        if model.trim().is_empty() || model.chars().any(char::is_control) {
+            return;
+        }
+        if self.models.iter().any(|known| known == model) {
+            return;
+        }
+        // Do not truncate an ID into a different, apparently valid model name.
+        if model.len() > 256 || self.models.len() == 16 {
+            self.truncated = true;
+            return;
+        }
+        self.models.push(model.to_owned());
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        for model in other.models {
+            self.model(&model);
+        }
+        self.truncated |= other.truncated;
+    }
+}
+
 impl Serialize for RunResult {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let count = 12
+        let count = 13
             + usize::from(self.run_id.is_some())
             + usize::from(self.trace.is_some())
             + usize::from(self.invocation.is_some());
@@ -63,6 +121,7 @@ impl Serialize for RunResult {
             fields.serialize_field("trace", trace)?;
         }
         fields.serialize_field("provider", &self.provider)?;
+        fields.serialize_field("provenance", &self.provenance)?;
         fields.serialize_field("status", &self.status)?;
         fields.serialize_field("text", &self.text)?;
         fields.serialize_field("structured_output", &self.structured_output)?;
@@ -192,6 +251,10 @@ impl RunResult {
             run_id: None,
             trace: None,
             provider,
+            provenance: Provenance {
+                requested: provider.map(|_| RequestedSettings::default()),
+                ..Provenance::default()
+            },
             status: Status::Succeeded,
             text: String::new(),
             structured_output: None,
@@ -212,6 +275,11 @@ impl RunResult {
         } else {
             AnswerSchemaValidation::NotRequested
         };
+        self
+    }
+
+    pub fn with_requested(mut self, model: Option<&str>, effort: Option<Effort>) -> Self {
+        self.provenance.requested = Some(RequestedSettings::new(model, effort));
         self
     }
 

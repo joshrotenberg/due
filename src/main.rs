@@ -62,6 +62,7 @@ async fn run_command(input: RunCommand) -> ExitCode {
         Ok(tracing) => tracing,
         Err(error) => {
             let mut result = RunResult::new(run.provider)
+                .with_requested(run.model.as_deref(), run.effort)
                 .with_schema_requested(run.schema.is_some())
                 .fail(error);
             result.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -103,7 +104,9 @@ async fn run_command(input: RunCommand) -> ExitCode {
         }
         Err(error) => RunResult::new(run.provider).fail(error),
     };
-    result = result.with_schema_requested(run.schema.is_some());
+    result = result
+        .with_requested(run.model.as_deref(), run.effort)
+        .with_schema_requested(run.schema.is_some());
     result.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     result.run_id = progress.run_id().map(str::to_owned);
     progress.finished(&result);

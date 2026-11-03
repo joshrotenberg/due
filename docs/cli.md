@@ -798,6 +798,10 @@ argument syntax errors go to stderr with exit code 2.
   "provider": "codex",
   "status": "succeeded",
   "text": "The final answer",
+  "provenance": {
+    "requested": {"model": null, "effort": null},
+    "reported": {"models": [], "effort": null, "truncated": false}
+  },
   "structured_output": null,
   "structured_output_present": false,
   "answer_schema_validation": "not_requested",
@@ -812,6 +816,25 @@ argument syntax errors go to stderr with exit code 2.
 `due schema result` exports the result JSON Schema; `due schema trace` exports
 the JSONL record schema. All exports are embedded, offline, and match the installed
 CLI version. `schema_version` versions each data contract.
+
+Additive result fields may appear within v1. Consumers should ignore unfamiliar
+fields and validate against the producing binary's exported schema. Older strict
+schemas can still reject newer fields through `additionalProperties`. Current
+results always emit `provenance`; the exported v1 schema makes it optional so
+older saved records remain valid.
+
+`provenance.requested` records merged common `model` and `effort` values, including
+plans and resolved failures. Omitted values stay null; rejected intake uses
+`requested: null`. `reported.models` contains unique IDs from Claude assistant
+message metadata observed during the turn, including streaming message starts
+and child messages. The reserved `<synthetic>` placeholder, requested aliases,
+assistant prose, configuration/init metadata and accounting such as `modelUsage`
+do not establish a reported model for the turn. Codex's pinned turn surfaces
+supply no actual model report, so its list stays empty. Actual effort is unknown
+for both providers and remains null. The list is capped at 16 IDs of 256 UTF-8
+bytes each; `truncated` marks omitted IDs at either bound. Empty means unknown,
+and multiple IDs do not select one effective model. RPC and JavaScript turn
+results use the same field; observations survive failures and reset each turn.
 
 `status` is `succeeded`, `failed`, `timed_out`, `cancelled`, or `planned`. Dry runs
 add `invocation` with `binary`, `cwd`, `args`, and `stdin_bytes`. Errors contain

@@ -17,7 +17,7 @@ use serde_json::Value;
 use super::{Context, output};
 use crate::{
     cli::{Effort, Provider, RunArgs},
-    result::{ErrorKind, RunError, RunResult, Usage},
+    result::{ErrorKind, ReportedSettings, RunError, RunResult, Usage},
     telemetry::{ActivityKind, ActivityStatus, Progress},
 };
 
@@ -106,6 +106,7 @@ where
 // transcript. A content-block stop is not evidence that its tool has finished.
 #[derive(Default)]
 struct StreamState {
+    reported: ReportedSettings,
     terminal: Option<Value>,
     invalid_terminal: Option<Value>,
     segments: ResultSegments,
@@ -121,6 +122,7 @@ struct StreamState {
 
 impl StreamState {
     fn observe(&mut self, event: StreamEvent, progress: &Progress) {
+        super::provenance::claude_message(&mut self.reported, &event.data);
         self.progress = progress.clone();
         let root = event
             .data
@@ -414,6 +416,7 @@ impl StreamState {
                 &result.diagnostics,
             );
         }
+        result.provenance.reported.merge(self.reported);
         result
     }
 }
@@ -478,7 +481,9 @@ fn parse_document(document: &Value) -> RunResult {
     let mut segments = ResultSegments::default();
     let mut terminal = None;
     let mut invalid_terminal = None;
+    let mut reported = ReportedSettings::default();
     for record in records {
+        super::provenance::claude_message(&mut reported, record);
         if record
             .get("parent_tool_use_id")
             .is_some_and(|id| !id.is_null())
@@ -520,6 +525,7 @@ fn parse_document(document: &Value) -> RunResult {
         result.diagnostics =
             output::diagnostic(&format!("Claude root result segments: {}", segments.count));
     }
+    result.provenance.reported = reported;
     result
 }
 
@@ -735,6 +741,7 @@ fn failure(error: Error) -> RunResult {
                 result.cost_usd = parsed.cost_usd;
                 result.usage = parsed.usage;
                 result.structured_output = parsed.structured_output;
+                result.provenance = parsed.provenance;
                 result.diagnostics = parsed.diagnostics;
             }
             result.diagnostics = merge_diagnostics(&result.diagnostics, &stderr);
@@ -835,6 +842,56 @@ fn failure(error: Error) -> RunResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn provenance_survives_buffered_and_streamed_failures() {
+        let process_error = |stdout| Error::CommandFailed {
+            command: "fixture".into(),
+            working_dir: None,
+            exit_code: 9,
+            stdout,
+            stderr: "native diagnostic".into(),
+        };
+        let records = json!([
+            {"type":"assistant","message":{"role":"assistant","model":"native-a","content":"partial"}},
+            {"type":"assistant","message":{"role":"assistant","model":"native-b","content":"partial"}},
+            {"type":"result","subtype":"error_during_execution","is_error":true,
+             "result":"partial", "session_id":"native-id", "structured_output":{"partial":true},
+             "usage":{"output_tokens":3}}
+        ]);
+        let buffered = failure(process_error(records.to_string()));
+        let mut state = StreamState::default();
+        for data in records.as_array().unwrap() {
+            state.observe(StreamEvent { data: data.clone() }, &Progress::default());
+        }
+        let streamed = state.finish(Err(process_error(String::new())));
+        for result in [buffered, streamed] {
+            assert_eq!(result.provenance.reported.models, ["native-a", "native-b"]);
+            assert!(result.provenance.reported.effort.is_none());
+            assert_eq!(result.text, "partial");
+            assert_eq!(result.session_id.as_deref(), Some("native-id"));
+            assert_eq!(result.usage.unwrap().output_tokens, Some(3));
+            assert_eq!(result.structured_output, Some(json!({"partial":true})));
+            assert_eq!(result.error.unwrap().kind, ErrorKind::Provider);
+        }
+
+        let mut state = StreamState::default();
+        state.observe(
+            StreamEvent {
+                data: records[0].clone(),
+            },
+            &Progress::default(),
+        );
+        let result = state.finish(Err(Error::Cancelled));
+        assert_eq!(result.provenance.reported.models, ["native-a"]);
+        assert_eq!(result.text, "partial");
+        assert_eq!(result.error.unwrap().kind, ErrorKind::Cancelled);
+
+        // An incomplete transcript still retains observations on process failure.
+        let result = failure(process_error(json!([records[0]]).to_string()));
+        assert_eq!(result.provenance.reported.models, ["native-a"]);
+        assert_eq!(result.error.unwrap().kind, ErrorKind::Provider);
+    }
 
     fn output() -> claude_wrapper::CommandOutput {
         claude_wrapper::CommandOutput {
