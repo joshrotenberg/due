@@ -72,6 +72,7 @@ begin() {
   case "$line" in *'"late-ack"'*) late_mode=success ;; *'"late-error"'*) late_mode=error ;; esac
   case "$line" in *'"startup-ask"'*) startup_permission=1 ;; esac
   if [ "$provider" = claude ]; then
+    case "$line" in *'"no-init-hold"'*) return ;; esac
     emit '{"type":"system","subtype":"init","session_id":"'"$native"'","fixtureInit":{"tools":["Read"],"unknown":true}}'
     case "$line" in
       *'"interrupted-partial-empty"'*) claude_partial_mode=empty ;;
@@ -133,6 +134,27 @@ begin() {
     notify item/started '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"id":"exec-fixture","type":"commandExecution","command":"fixture-only","fixturePayload":{"nested":[{"input":{"path":"a/b","flags":[true,null,3]},"output":{"stdout":"line one\nline two","opaque":{"future":42}}}]}}}'
   fi
   case "$line" in
+    *'"codex-partial-'*)
+      notify item/completed '{"threadId":"foreign-thread","turnId":"'"$turn"'","item":{"type":"agentMessage","id":"foreign","phase":"commentary","text":"foreign thread must not leak"}}'
+      notify item/completed '{"threadId":"'"$native"'","turnId":"previous-turn","item":{"type":"agentMessage","id":"stale","phase":"commentary","text":"previous turn must not leak"}}'
+      notify item/completed '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"type":"agentMessage","id":"partial-'"$count"'","phase":"commentary","text":"Partial turn '"$count"'. é"}}'
+      notify item/completed '{"threadId":"'"$native"'","turnId":"'"$turn"'","item":{"type":"reasoning","id":"reasoning","summary":["reasoning must not leak"]}}'
+      notify item/completed '{"threadId":"foreign-thread","turnId":"'"$turn"'","item":{"type":"agentMessage","id":"foreign-late","phase":"commentary","text":"foreign late text must not leak"}}'
+      notify item/completed '{"threadId":"'"$native"'","turnId":"previous-turn","item":{"type":"agentMessage","id":"stale-late","phase":"commentary","text":"stale late text must not leak"}}'
+      notify fixture/partial-ready '{"threadId":"'"$native"'","turnId":"'"$turn"'","fixturePartialReady":true}'
+      case "$line" in
+        *'"codex-partial-failed"'*) finish failed '' ;;
+        *'"codex-partial-final"'*) finish completed 'authoritative final answer' ;;
+        *'"codex-partial-success"'*)
+          active=0
+          notify turn/completed '{"threadId":"'"$native"'","turn":{"id":"'"$turn"'","items":[{"type":"agentMessage","id":"only-commentary","phase":"commentary","text":"terminal commentary is not a final answer"}],"status":"completed","error":null}}'
+          ;;
+        *'"codex-partial-exit"'*)
+          while [ ! -f "$DUE_SESSION_FIXTURE_DIR/release-exit" ]; do sleep 0.01; done
+          exit 17
+          ;;
+      esac
+      ;;
     *'"native-exit"'*) exit 0 ;;
     *'"native-exit-error"'*) exit 17 ;;
     *'"partial-payload"'*)

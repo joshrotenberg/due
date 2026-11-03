@@ -145,6 +145,7 @@ struct Active {
     id: String,
     native_id: Option<String>,
     answer: Option<String>,
+    partial: Option<String>,
     usage: Option<Usage>,
     requests: HashMap<String, RequestId>,
     early: Vec<ServerMessage>,
@@ -155,6 +156,29 @@ struct Active {
 }
 
 impl Active {
+    fn remember_message(&mut self, text: String, final_answer: bool) -> Result<(), String> {
+        if text.len() > MAX_ANSWER {
+            return if final_answer {
+                Err("Codex answer exceeded the 4 MiB limit".into())
+            } else {
+                // Commentary was not answer-limited before partial retention.
+                // Skip this snapshot without changing native turn semantics.
+                Ok(())
+            };
+        }
+        if final_answer {
+            if !text.is_empty() {
+                self.partial = None;
+            }
+            self.answer = Some(text);
+        } else if !text.is_empty() && self.answer.as_deref().is_none_or(str::is_empty) {
+            // Retain a single snapshot for failed turns only. Once a nonempty
+            // final answer exists it owns the text budget and takes precedence.
+            self.partial = Some(text);
+        }
+        Ok(())
+    }
+
     // This accounts for unanswered requests only; request metadata never selects
     // the authoritative turn ID. Keep the messages themselves for ordered replay.
     fn track_early(&mut self, message: &ServerMessage, thread_id: &str) -> Result<(), String> {
@@ -220,6 +244,13 @@ impl Active {
             .map(str::to_owned)
             .or(self.answer)
             .unwrap_or_default();
+        let unsuccessful = error.is_some()
+            || turn
+                .as_ref()
+                .is_none_or(|turn| !matches!(turn.status, TurnStatus::Completed));
+        if unsuccessful && result.text.is_empty() {
+            result.text = self.partial.unwrap_or_default();
+        }
         if result.text.len() > MAX_ANSWER {
             result.text.clear();
             return result.fail(RunError::protocol("Codex answer exceeded the 4 MiB limit"));
@@ -507,7 +538,7 @@ async fn own(
                             None => { let _ = reply.send(Err("Turn timeout exceeds the clock range".into())); continue; }
                         }
                     };
-                    active = Some(Active { id: id.clone(), native_id: None, answer: None, usage: None,
+                    active = Some(Active { id: id.clone(), native_id: None, answer: None, partial: None, usage: None,
                         requests: HashMap::new(), early: Vec::new(), early_bytes: 0, early_requests: HashMap::new(), started: Instant::now(), deadline });
                     let mut params = TurnStartParams::text(&thread_id, prompt);
                     if let Some(effort) = &effort { params = params.effort(effort); }
@@ -801,13 +832,9 @@ fn observe(
     }
     // Publish only after correlation, including when replaying early messages.
     sink.event(notification_item(notification));
-    if let Some(message) = notification.agent_message()
-        && message.is_final_answer()
-    {
-        if message.text.len() > MAX_ANSWER {
-            return Err("Codex answer exceeded the 4 MiB limit".into());
-        }
-        turn.answer = Some(message.text);
+    if let Some(message) = notification.agent_message() {
+        let final_answer = message.is_final_answer();
+        turn.remember_message(message.text, final_answer)?;
     }
     if notification.method == "thread/tokenUsage/updated" {
         // `last` is the native per-turn counter; `total` includes earlier turns.
@@ -847,6 +874,7 @@ mod tests {
             id: "due-turn".into(),
             native_id: Some("native-turn".into()),
             answer: Some("earlier answer".into()),
+            partial: None,
             usage: None,
             requests: HashMap::new(),
             early: Vec::new(),
@@ -1052,6 +1080,118 @@ mod tests {
             assert_eq!(value["run_id"], "due-turn");
             assert!(!value["error"].is_null());
         }
+    }
+
+    #[test]
+    fn commentary_is_a_failure_only_fallback_including_an_empty_final() {
+        for empty_final in [false, true] {
+            for status in ["completed", "interrupted", "failed"] {
+                let mut state = active();
+                state.answer = None;
+                state
+                    .remember_message("first snapshot".into(), false)
+                    .unwrap();
+                state
+                    .remember_message("latest snapshot".into(), false)
+                    .unwrap();
+                state.remember_message(String::new(), empty_final).unwrap();
+                let turn =
+                    serde_json::from_value(json!({"id":"native-turn","status":status})).unwrap();
+                let result = state.result("native-thread", Some(turn), None);
+                assert_eq!(
+                    result.text,
+                    if status == "completed" {
+                        ""
+                    } else {
+                        "latest snapshot"
+                    }
+                );
+                assert_eq!(result.error.is_none(), status == "completed");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_failures_retain_partial_text_without_changing_the_error() {
+        for kind in [
+            ErrorKind::Timeout,
+            ErrorKind::Protocol,
+            ErrorKind::Provider,
+            ErrorKind::Cancelled,
+        ] {
+            let mut state = active();
+            state.answer = None;
+            state
+                .remember_message("accepted prefix".into(), false)
+                .unwrap();
+            let result = state.result(
+                "native-thread",
+                None,
+                Some(RunError::new(kind, "original failure")),
+            );
+            assert_eq!(result.text, "accepted prefix");
+            let error = result.error.unwrap();
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.message, "original failure");
+        }
+    }
+
+    #[test]
+    fn final_answers_keep_precedence_on_unsuccessful_turns() {
+        for status in ["completed", "interrupted", "failed"] {
+            for terminal in [false, true] {
+                let mut state = active();
+                state.answer = None;
+                state.remember_message("partial".into(), false).unwrap();
+                state
+                    .remember_message("observed final".into(), true)
+                    .unwrap();
+                state
+                    .remember_message("later commentary".into(), false)
+                    .unwrap();
+                assert!(state.partial.is_none());
+                let items = if terminal {
+                    json!([{"type":"agentMessage","phase":"final_answer","text":"terminal final"}])
+                } else {
+                    json!([])
+                };
+                let turn = serde_json::from_value(
+                    json!({"id":"native-turn","status":status,"items":items}),
+                )
+                .unwrap();
+                let result = state.result("native-thread", Some(turn), None);
+                assert_eq!(
+                    result.text,
+                    if terminal {
+                        "terminal final"
+                    } else {
+                        "observed final"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partial_text_is_byte_bounded_and_releases_its_budget_for_a_final_answer() {
+        let mut state = active();
+        state.answer = None;
+        state
+            .remember_message("é".repeat(MAX_ANSWER / 2), false)
+            .unwrap();
+        assert_eq!(state.partial.as_ref().unwrap().len(), MAX_ANSWER);
+        state
+            .remember_message("é".repeat(MAX_ANSWER / 2 + 1), false)
+            .unwrap();
+        assert_eq!(state.partial.as_ref().unwrap().len(), MAX_ANSWER);
+        state.remember_message("final".into(), true).unwrap();
+        assert!(state.partial.is_none());
+        assert!(
+            state
+                .remember_message("x".repeat(MAX_ANSWER + 1), true)
+                .is_err()
+        );
+        assert_eq!(state.answer.as_deref(), Some("final"));
     }
 
     #[test]

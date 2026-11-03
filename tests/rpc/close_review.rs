@@ -22,7 +22,19 @@ fn closing_a_failed_session_reports_cleanup_separately_for_both_providers() {
             });
             let closed = client.ok("session.close", json!({"session_id":session}));
             assert_eq!(closed["closed"], true);
-            assert_eq!(closed["native_session_id"], format!("native-{provider}"));
+            // A short deadline can expire before Claude's first init event.
+            // Close preserves the last known ID; absence is a valid outcome.
+            let id = &closed["native_session_id"];
+            if id.is_null() {
+                assert_eq!(provider, "claude");
+                assert!(timeout.is_some());
+                assert!(result["session_id"].is_null(), "{result}");
+            } else {
+                assert_eq!(*id, format!("native-{provider}"));
+            }
+            if result["session_id"].is_string() {
+                assert_eq!(*id, result["session_id"]);
+            }
             assert_eq!(closed["session_error"], failed["data"]["message"]);
             let item = client.pushed_until(|item| {
                 item["session_id"] == session && item["kind"] == "session_closed"
@@ -134,4 +146,23 @@ fn failed_open_streams_provisional_evidence_without_publishing_a_handle() {
         client.close(&session);
         client.eof();
     }
+}
+
+#[test]
+fn closing_a_session_timed_out_before_initialization_keeps_native_id_absent() {
+    let mut client = Client::new(false);
+    let session = client.open("claude", true, Some("200ms"));
+    let turn = client.start(&session, "no-init-hold");
+    let result = client.finished(&session, &turn);
+    assert_eq!(result["status"], "timed_out");
+    assert!(result["session_id"].is_null(), "{result}");
+    let closed = client.ok("session.close", json!({"session_id":session}));
+    assert_eq!(closed["closed"], true);
+    assert!(closed["native_session_id"].is_null(), "{closed}");
+    assert!(closed["session_error"].is_string(), "{closed}");
+    let item = client
+        .pushed_until(|item| item["session_id"] == session && item["kind"] == "session_closed");
+    assert!(item["data"]["native_session_id"].is_null(), "{item}");
+    assert!(client.dir.path().join("exited").exists());
+    client.eof();
 }
