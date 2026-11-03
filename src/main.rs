@@ -1,3 +1,4 @@
+mod build_info;
 mod cli;
 mod contracts;
 mod help;
@@ -40,6 +41,7 @@ async fn main() -> ExitCode {
         Command::Skills(args) => skills::execute(&args),
         Command::Schema(args) => contracts::execute(&args),
         Command::Trace(args) => trace_summary::execute(&args),
+        Command::BuildInfo(args) => build_info::execute(&args),
     }
 }
 

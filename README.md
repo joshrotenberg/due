@@ -68,6 +68,15 @@ installing it. The wrapper crates are pinned to Git commits, so the first build
 needs access to GitHub and crates.io. `Cargo.lock` is committed and `--locked`
 uses it as is.
 
+`due build-info --output json` reports the installed executable's package
+version, source revision, dirty/unknown state and enabled features. It reads no
+checkout or Git state at runtime. Source archives and builds without Git report
+unknown source metadata. The build-time probe deliberately runs on every Cargo
+build of Due to avoid stale identity, including after failed builds. This
+recompiles Due's own targets on otherwise unchanged builds; dependencies can
+remain cached. `due --version` stays compact. Build identity is a diagnostic
+snapshot, not a reproducible-build attestation.
+
 The binary also carries the skills-only agent plugin. Install it for Claude Code,
 Codex, or both without retaining a plugin checkout:
 

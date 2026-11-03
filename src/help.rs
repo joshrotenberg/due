@@ -20,7 +20,7 @@ pub fn overview() -> String {
         "    due skills show supervise            Write a supervised JavaScript workflow\n",
     );
     text.push_str(
-        "    due schema request                  Export the request JSON Schema\n    due run --help                      Examples and options for a command\n\nSETUP\n    due init --dry-run                   Preview local plugin setup\n    due init                            Register the bundled plugin in both hosts\n  Due must be on PATH. Install and authenticate Claude Code or Codex separately.\n  Guides, schemas and help work without a provider or source checkout.\n\nRESULTS\n  Due owns execution and process cleanup; the caller owns the assignment, native\n  permission policy, independent acceptance checks and authorized follow-ups.\n  A successful worker turn does not establish that its changes were accepted.\n  Run answers/results use stdout; progress and diagnostics use stderr.\n  Read a command's --help for its output, timeout and exit-code contract.",
+        "    due schema request                  Export the request JSON Schema\n    due build-info --output json        Report this binary's revision and features\n    due run --help                      Examples and options for a command\n\nSETUP\n    due init --dry-run                   Preview local plugin setup\n    due init                            Register the bundled plugin in both hosts\n  Due must be on PATH. Install and authenticate Claude Code or Codex separately.\n  Guides, schemas and help work without a provider or source checkout.\n\nRESULTS\n  Due owns execution and process cleanup; the caller owns the assignment, native\n  permission policy, independent acceptance checks and authorized follow-ups.\n  A successful worker turn does not establish that its changes were accepted.\n  Run answers/results use stdout; progress and diagnostics use stderr.\n  Read a command's --help for its output, timeout and exit-code contract.",
     );
     text
 }
@@ -285,6 +285,41 @@ LEARN MORE
   due skills show profiles
   due skills show contracts
   due skills show observe"#;
+
+pub const BUILD_INFO: &str = r#"EXAMPLES
+  due build-info
+  due build-info --output json > due-build.json
+
+WHAT IT REPORTS
+  The package version, the source revision and working tree state recorded
+  when this binary was built, and the enabled Due feature flags (for example
+  harness and rpc). Values are fixed at compile time. Nothing is read from a
+  checkout, the environment or the network when the command runs, so the
+  current directory never changes the answer. due --version is unchanged.
+
+UNKNOWN SOURCE METADATA
+  Builds from a source archive, without a git executable, or from a directory
+  that is not its own Git work tree root succeed and report revision null
+  (text: unknown) with tree "unknown". source.status explains why:
+  recorded, no_git_metadata, git_unavailable, not_repository_root, git_error.
+  tree is clean, dirty or unknown. Dirty includes untracked, non-ignored files.
+
+LIMITS
+  This is a descriptive snapshot, not a reproducible-build attestation or
+  signature. It contains no build paths, timestamps or environment values.
+  A binary built with uncommitted changes reports the commit it started from
+  and tree "dirty"; it cannot say what those changes were. Source state is
+  rechecked on every Cargo build of the package, which therefore recompiles
+  Due's own targets each time (dependencies stay cached).
+
+OUTPUT AND EXIT CODES
+  Text is a short summary. JSON is one object with schema_version 1, package
+  (name, version), source (status, revision, tree) and features (sorted names).
+  0: written; 1: stdout write failure; 2: argument error.
+
+LEARN MORE
+  due --version                       Package version only
+  due -h                              Commands in this installed build"#;
 
 pub const TRACE: &str = r#"EXAMPLES
   due trace summarize run.jsonl

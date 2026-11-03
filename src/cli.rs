@@ -37,6 +37,8 @@ pub enum Command {
     Schema(crate::contracts::SchemaArgs),
     /// Inspect a saved progress trace offline.
     Trace(crate::trace_summary::TraceArgs),
+    /// Report this executable's compile-time version, source revision and features.
+    BuildInfo(crate::build_info::BuildInfoArgs),
 }
 
 #[derive(Debug, Args)]
