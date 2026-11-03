@@ -96,7 +96,7 @@ example includes provider-specific denial and bounded revision handling.
 | `worker.start(prompt)` | Admit one turn and return its Due turn ID |
 | `worker.wait(turnId, timeoutMs?)` | Await and consume that turn's terminal result; default wait is five minutes |
 | `worker.turn(prompt, timeoutMs?)` | Start then wait for one turn |
-| `worker.interrupt(turnId)` | Request interruption of the exact active turn and await acknowledgement |
+| `worker.interrupt(turnId)` | Request interruption of the exact active turn and await acknowledgement; resolves `{interrupt_requested:false, turn_id, already_finished:true}` when that turn already finished and `wait` has not consumed it, including when its terminal item arrives before Due's finished-turn rejection of the outstanding request; other rejections still throw |
 | `worker.reply(item, response)` | Send a native response for an unresolved interaction and await acknowledgement |
 | `worker.close()` | Close explicitly; scope exit also closes automatically |
 

@@ -8,6 +8,12 @@ var Due = (function () {
   let client, worker, bodyDone = false, shutting = false, shutdownAt = 0;
   let opening = false, active = null, starting = false, interrupted = null;
   let options = {}, sessionController;
+  // True when the turn being interrupted reported its terminal item after the interruption was sent.
+  // One slot for the single in-flight interruption; nothing is retained per finished turn.
+  let interruptSawTerminal = false;
+  // Server rejections that mean the turn ended before the interruption was dispatched.
+  const FINISHED_REJECTIONS = ['turn is already finished', 'Unknown or finished Due turn to interrupt', 'No active turn'];
+  const finishedAck = id => ({ interrupt_requested: false, turn_id: id, already_finished: true });
   let resultJson = 'null';
   const encodeResult = DueClient._encodeResult;
   const log = bridge.log;
@@ -57,6 +63,7 @@ var Due = (function () {
     if (snapshot.kind === 'interaction_resolved') {
       callbacks.get(key(snapshot))?.control.abort(new Error('Interaction resolved'));
     } else if (snapshot.kind === 'turn_finished') {
+      if (interrupted === snapshot.turn_id) interruptSawTerminal = true;
       for (const entry of callbackTasks) {
         if (entry.item.turn_id === snapshot.turn_id) entry.control.abort(new Error('Turn finished'));
       }
@@ -155,14 +162,25 @@ var Due = (function () {
         async turn(prompt, timeout) { return worker.wait(await worker.start(prompt), timeout); },
         async interrupt(id) {
           live();
-          if (active !== id || !id || client._turns.get(id) !== undefined) throw new Error('no active turn with that id');
+          if (active !== id || !id) throw new Error('no active turn with that id');
+          // Terminal but unconsumed: the reservation stays until wait consumes the result.
+          if (client._turns.get(id) !== undefined) return finishedAck(id);
           if (interrupted) throw new Error('an interruption is already pending');
-          interrupted = id;
+          interrupted = id; interruptSawTerminal = false;
           try {
-            const result = await rpc(client.interrupt(id));
+            let result;
+            try { result = await rpc(client.interrupt(id)); }
+            catch (e) {
+              // Only the server's finished-turn rejection, and only when this client saw that
+              // turn finish while the interruption was outstanding. Other errors propagate.
+              const raced = e && e.kind === 'rpc' && e.code === -32000 && interruptSawTerminal && !state.error && !client.failure &&
+                FINISHED_REJECTIONS.some(text => e.message === 'RPC error ' + e.code + ': ' + text);
+              if (raced) return finishedAck(id);
+              throw e;
+            }
             if (!result || result.interrupt_requested !== true || result.turn_id !== id) throw new Error('Invalid interruption acknowledgement');
             return result;
-          } finally { interrupted = null; }
+          } finally { interrupted = null; interruptSawTerminal = false; }
         },
         reply(item, response) { live(); return rpc(client.reply(item, response)); },
         close() { return closeSession(); },
