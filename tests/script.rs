@@ -366,12 +366,148 @@ fn invalid_input_and_existing_evidence_are_rejected_without_overwriting() {
     fs::create_dir(&fixture.evidence).unwrap();
     fs::write(fixture.evidence.join("sentinel"), "keep").unwrap();
     let output = fixture.command().output().unwrap();
-    report(&output, 1);
+    let result = report(&output, 2);
+    assert!(result["error"].as_str().unwrap().contains("already exists"));
     assert_eq!(
         fs::read_to_string(fixture.evidence.join("sentinel")).unwrap(),
         "keep"
     );
     assert_eq!(fs::read_dir(&fixture.evidence).unwrap().count(), 1);
+}
+
+#[test]
+fn evidence_paths_are_normalized_for_success_and_early_failure() {
+    for absolute in [false, true] {
+        for invalid_input in [false, true] {
+            let mut fixture = Fixture::new("Due.run(async()=>({accepted:true}));");
+            let root = fixture.directory.path().canonicalize().unwrap();
+            fs::create_dir(root.join("parent")).unwrap();
+            fixture.evidence = PathBuf::from("./parent//./evidence//");
+            if absolute {
+                fixture.evidence = root.join(&fixture.evidence);
+            }
+            let mut command = fixture.command();
+            if invalid_input {
+                command.args(["--args", "{"]);
+            }
+            let result = report(
+                &command.output().unwrap(),
+                if invalid_input { 2 } else { 0 },
+            );
+            let directory = root.join("parent/evidence");
+            for (field, file) in [
+                ("directory", ""),
+                ("stdout", "stdout.bin"),
+                ("process", "receipt.json"),
+                ("commands", "exec.jsonl"),
+                ("workflow", "workflow.json"),
+            ] {
+                let path = if file.is_empty() {
+                    directory.clone()
+                } else {
+                    directory.join(file)
+                };
+                // Path equality itself ignores redundant components, so compare strings.
+                assert_eq!(result["evidence"][field], path.to_str().unwrap());
+                assert_eq!(path.exists(), !invalid_input);
+            }
+        }
+    }
+}
+
+#[test]
+fn evidence_parent_components_follow_symlinks_in_filesystem_order() {
+    for linked in [false, true] {
+        let mut fixture = Fixture::new("Due.run(async()=>({accepted:true}));");
+        let root = fixture.directory.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("target/child")).unwrap();
+        if linked {
+            std::os::unix::fs::symlink("target/child", root.join("parent")).unwrap();
+        } else {
+            fs::create_dir(root.join("parent")).unwrap();
+        }
+        fixture.evidence = PathBuf::from("./parent//./../evidence");
+        let result = report(&fixture.command().output().unwrap(), 0);
+        assert_eq!(
+            result["evidence"]["directory"],
+            root.join("parent/../evidence").to_str().unwrap()
+        );
+        let actual = if linked {
+            root.join("target/evidence")
+        } else {
+            root.join("evidence")
+        };
+        assert_eq!(
+            read_json(actual.join("workflow.json"))["status"],
+            "succeeded"
+        );
+        if linked {
+            assert!(
+                !root.join("evidence").exists(),
+                "collapsed .. across a symlink"
+            );
+        }
+    }
+}
+
+#[test]
+fn existing_files_and_symlinks_are_invalid_evidence_before_launch() {
+    for kind in ["file", "directory-link", "dangling-link"] {
+        let fixture =
+            Fixture::new("Due.log('workflow executed'); Due.run(async()=>({accepted:true}));");
+        let target = fixture.directory.path().join("target");
+        match kind {
+            "file" => fs::write(&fixture.evidence, "keep").unwrap(),
+            "directory-link" => {
+                fs::create_dir(&target).unwrap();
+                std::os::unix::fs::symlink(&target, &fixture.evidence).unwrap();
+            }
+            "dangling-link" => std::os::unix::fs::symlink(&target, &fixture.evidence).unwrap(),
+            _ => unreachable!(),
+        }
+        let output = fixture.command().output().unwrap();
+        let result = report(&output, 2);
+        assert!(
+            result["error"].as_str().unwrap().contains("already exists"),
+            "{result}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("workflow executed"));
+        if kind == "file" {
+            assert_eq!(fs::read_to_string(&fixture.evidence).unwrap(), "keep");
+        } else {
+            assert_eq!(fs::read_link(&fixture.evidence).unwrap(), target);
+            if kind == "directory-link" {
+                assert_eq!(fs::read_dir(target).unwrap().count(), 0);
+            } else {
+                assert!(!target.exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn evidence_setup_io_errors_do_not_become_invalid_input_or_skip_parent_components() {
+    for path in [
+        "missing/evidence",
+        "missing/../evidence",
+        "file/../evidence",
+        "loop/evidence",
+    ] {
+        let mut fixture = Fixture::new("Due.run(async()=>({accepted:true}));");
+        let root = fixture.directory.path();
+        fs::write(root.join("file"), "keep").unwrap();
+        std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
+        fixture.evidence = PathBuf::from(path);
+        let result = report(&fixture.command().output().unwrap(), 1);
+        let error = result["error"].as_str().unwrap();
+        assert!(
+            error.starts_with("create evidence directory:")
+                || error.starts_with("inspect evidence path:"),
+            "{result}"
+        );
+        assert!(!root.join("evidence").exists());
+        assert!(!root.join("missing").exists());
+    }
 }
 
 #[test]
@@ -433,8 +569,57 @@ fn workflow_expiry_waits_for_both_native_adapters_to_finish_legitimate_shutdown(
 
 #[test]
 fn sigterm_cancels_the_owned_verifier_before_the_failed_result_returns() {
+    signal_cancels_the_owned_verifier(libc::SIGTERM, "SIGTERM");
+}
+
+#[test]
+fn sigint_cancels_the_owned_verifier_without_a_duplicate_cleanup_failure() {
+    signal_cancels_the_owned_verifier(libc::SIGINT, "SIGINT");
+}
+
+#[test]
+fn sigint_with_clean_settlement_reports_only_the_signal() {
     let fixture = Fixture::new(
-        "Due.run(async scope=>{await scope.exec(Due.args.checker);return{accepted:true};});",
+        "Due.run(async scope=>{try{await scope.sleep(30000);}catch{}return{accepted:true};});",
+    );
+    let mut child = fixture
+        .command()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // This file is created after the bridge installs its listeners and launches
+    // Due, before evaluation. No verifier is needed for the readiness barrier.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.evidence.join("exec.jsonl").is_file() {
+        if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "script did not become ready: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("script did not settle after SIGINT");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let result = report(&child.wait_with_output().unwrap(), 1);
+    assert_eq!(result["error"], "runner received SIGINT");
+    assert_signal_receipts(&fixture, &result, "SIGINT");
+}
+
+fn signal_cancels_the_owned_verifier(signal: i32, name: &str) {
+    let fixture = Fixture::new(
+        "Due.run(async scope=>{try{await scope.exec(Due.args.checker);}catch{}return{accepted:true};});",
     );
     let checker = fixture.directory.path().join("checker.sh");
     fs::write(&checker, "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$SCRIPT_FIXTURE_DIR/checker.pid\"\nexec /bin/sleep 30\n").unwrap();
@@ -468,19 +653,28 @@ fn sigterm_cancels_the_owned_verifier_before_the_failed_result_returns() {
         }
         thread::sleep(Duration::from_millis(10));
     };
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
     let deadline = Instant::now() + Duration::from_secs(20);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("script did not settle after SIGTERM");
+            panic!("script did not settle after {name}");
         }
         thread::sleep(Duration::from_millis(10));
     }
     let output = child.wait_with_output().unwrap();
     let result = report(&output, 1);
-    assert!(result["error"].as_str().unwrap().contains("SIGTERM"));
+    let primary = format!("runner received {name}");
+    let error = result["error"].as_str().unwrap();
+    assert!(error.starts_with(&primary), "{result}");
+    assert_eq!(error.matches(&primary).count(), 1, "{result}");
+    // Abandoning an unconsumed command is a real lifecycle failure, unlike
+    // repeating the signal as if it were another cleanup failure.
+    assert!(
+        error.contains("workflow abandoned unconsumed exec operations"),
+        "{result}"
+    );
     assert_eq!(
         unsafe { libc::kill(checker_pid, 0) },
         -1,
@@ -501,8 +695,23 @@ fn sigterm_cancels_the_owned_verifier_before_the_failed_result_returns() {
         .unwrap();
     assert_eq!(finished["result"]["status"], "cancelled");
     assert!(finished["cleanup_error"].is_null());
+    assert_signal_receipts(&fixture, &result, name);
+}
+
+fn assert_signal_receipts(fixture: &Fixture, result: &Value, name: &str) {
     // A caught host signal is still a transport failure, but the child settles.
     let receipt = read_json(fixture.evidence.join("receipt.json"));
     assert_eq!(receipt["settled"], true);
     assert_eq!(receipt["forced_kill"], false);
+    assert_eq!(receipt["exit_code"], 0);
+    assert_eq!(receipt["rpc_shutdown_confirmed"], true);
+    assert!(receipt["cleanup_error"].is_null(), "{receipt}");
+    assert_eq!(
+        receipt["transport_error"],
+        format!("runner received {name}")
+    );
+    let workflow = read_json(fixture.evidence.join("workflow.json"));
+    assert_eq!(workflow["error"], result["error"]);
+    assert_eq!(workflow["status"], "failed");
+    assert!(workflow["result"].is_null());
 }

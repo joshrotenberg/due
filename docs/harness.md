@@ -55,7 +55,13 @@ becomes the RPC process and default verifier directory. Profile request paths
 resolve from the RPC directory, not the profile's directory. An explicit native
 session `cwd` does not change the verifier's default directory.
 
-The evidence directory must be new and its parent must already exist. `--timeout` defaults to `5m` and covers script
+The evidence directory must be new and its parent must already exist. An existing
+path (including a file or dangling symlink) is invalid input and exits 2 before
+launch. Other setup I/O failures, including a collision at exclusive creation
+after validation, exit 1. Evidence paths omit redundant `.` and separators but
+preserve symlink and `..` traversal for the filesystem to resolve.
+
+`--timeout` defaults to `5m` and covers script
 evaluation and waits; input preparation happens first. Choose a deliberate budget
 for the assignment. Cleanup has additional bounded settlement time. The whole-workflow deadline,
 `worker.wait`/`worker.turn` wait timeout and native profile turn timeout are
