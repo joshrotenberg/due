@@ -26,6 +26,7 @@ fn capture(command: &mut Command) -> Output {
 
 const SKILLS: &[&str] = &[
     "overview",
+    "use-cases",
     "profiles",
     "run",
     "contracts",
@@ -206,6 +207,43 @@ fn show_returns_complete_canonical_documents_in_text_and_json() {
         }
     }
     standalone.assert_no_files_written();
+}
+
+/// Every `due skills show NAME` route in the shipped guides and the plugin entry
+/// skill must name a guide in the catalog. Reduced builds intentionally mention
+/// feature-gated guides conditionally, so the check runs on the full build.
+#[cfg(all(feature = "rpc", feature = "harness"))]
+#[test]
+fn guide_routes_name_catalog_entries() {
+    let mut documents: Vec<(String, String)> = SKILLS
+        .iter()
+        .map(|&name| (format!("embedded-skills/{name}"), canonical(name)))
+        .collect();
+    documents.push((
+        "plugin/due/skills/delegate".into(),
+        fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/due/skills/delegate/SKILL.md"),
+        )
+        .unwrap(),
+    ));
+    let mut routes = 0;
+    for (source, text) in &documents {
+        for rest in text.split("due skills show ").skip(1) {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                .collect();
+            if name.is_empty() {
+                continue; // Placeholder such as `NAME`.
+            }
+            routes += 1;
+            assert!(
+                SKILLS.contains(&name.as_str()),
+                "{source} routes to unknown guide {name:?}"
+            );
+        }
+    }
+    assert!(routes > 0, "no guide routes found");
 }
 
 #[test]

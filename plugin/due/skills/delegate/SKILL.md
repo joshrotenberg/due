@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate bounded, authorized coding work to Claude Code or Codex through the installed Due CLI, as an independent super-subagent whose result the caller verifies.
+description: Delegate bounded, authorized work (code, documents, research, data) to a separate Claude Code or Codex session through the installed Due CLI, as an independent super-subagent whose result the caller verifies.
 ---
 
 # Delegate with Due
@@ -11,11 +11,16 @@ the scope you give it, and you review the outcome. This plugin only points to th
 installed `due` executable; the executable's help and guides are the source of
 truth for that version.
 
-You own the scope and the acceptance. Honor the provider the user chose. State the
-workspace, deliverables, constraints and stopping condition, and carry the user's
-existing authorization into the task without widening it. Delegation does not
-grant external actions or recursive delegation. A worker's success report is
-evidence to check against the actual diff, artifacts and tests, not proof.
+You own the scope and the acceptance. Honor the provider the user chose; one
+provider is enough, and a fresh session of the same provider can review work it
+did not write. State the workspace, deliverables, constraints and stopping
+condition, and carry the user's existing authorization into the task without
+widening it. Delegation does not grant external actions or recursive delegation.
+A worker's success report is evidence to check against the actual diff,
+artifacts and tests, not proof.
+
+Prefer doing the work directly when it is small or depends on this conversation's
+context. Delegate when it can be written as a self-contained assignment.
 
 Discover what this build offers, progressively and only as needed:
 
@@ -28,9 +33,11 @@ due skills show NAME            # One guide; start with: due skills show overvie
 ```
 
 Read only the guide the task needs. `due skills show overview` helps choose
-between a one-shot run and a resident session. Commands or guides that do not
-appear in `due -h` or `due skills` are not part of the installed build; do not
-assume them or invent flags.
+between a one-shot run and a resident session; `due skills show use-cases`
+matches a task to a pattern such as review and revise, independent assignments
+or structured extraction. Commands or guides that do not appear in `due -h` or
+`due skills` are not part of the installed build; do not assume them or invent
+flags.
 
 If `due` is not on PATH, report the missing prerequisite. The selected provider
 CLI must also be installed and authenticated by the user.

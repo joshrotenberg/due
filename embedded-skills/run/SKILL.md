@@ -14,6 +14,8 @@ choice and carry existing scope into the prompt without widening it.
 For a resident worker with live items, permission replies or several supervised
 turns, discover `script`/`rpc` with `due -h` and read `supervise`/`rpc` when listed.
 The caller owns scheduling, concurrency, verification and authorized follow-ups.
+To decide whether a task suits Due at all, or to combine runs into review,
+fan-out or extraction patterns, read `due skills show use-cases`.
 
 ## Run and inspect
 

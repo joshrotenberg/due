@@ -24,6 +24,28 @@ in a protected caller-owned location outside worker writable roots; follow the
 [fresh/resume recipe](docs/cli.md#reusable-codex-workspace-profile) for artifacts
 and schema transport.
 
+## What it is for
+
+Due is useful with only one provider installed. A worker is a separate session
+with its own context, so a fresh session of the same provider can take a narrow
+brief, hold a large body of material across follow-up turns, or review work it
+did not write. Running the other provider as well is optional. Common patterns:
+
+- Bounded delegation: one assignment with a deliverable and a stopping point.
+- Context-heavy specialist: follow-ups through `--resume ID` or a resident session.
+- Review, verify, revise: a fresh worker critiques, the caller runs the checks,
+  the author revises.
+- Independent assignments: separate `due run` processes that the caller starts
+  and collects. Due has no scheduler or pool and does not isolate workers.
+- Structured extraction or transformation: `--schema` answers the caller validates.
+- Embedding in a caller: `--output json` and exit codes from a script or
+  program, or the stdio RPC protocol.
+
+Code, documents, research and data are all inputs to the same patterns. For
+small tasks, or for live back-and-forth with a person steering, working directly
+or in the provider's interactive CLI is simpler. `due skills show use-cases`
+covers each pattern and when to choose something else.
+
 ## Install from source
 
 Due is installed from source; there are no published releases. You need:
@@ -157,6 +179,7 @@ exact installed contract offline:
 ```sh
 due skills list --output json  # Catalog for automated selection
 due skills show overview       # Choose a mode, set up, troubleshoot, report
+due skills show use-cases      # Whether Due fits a task, and which pattern
 due skills show run            # Scoping, execution, and verifying effects
 due skills show profiles       # JSON profiles for run, script and RPC
 due skills show contracts      # Request and result semantics

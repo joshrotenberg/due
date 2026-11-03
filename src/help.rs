@@ -11,7 +11,7 @@ pub fn overview() -> String {
     #[cfg(feature = "rpc")]
     text.push_str("  rpc       Build a client in any language over resident JSON-RPC stdio.\n");
     text.push_str(
-        "\nPROFILES\n  Reuse JSON defaults, then supply the assignment separately:\n    printf '%s\\n' '{\"schema_version\":1,\"provider\":\"claude\"}' > worker.json\n    due run --request worker.json -p 'Review the parser.' --dry-run --output json\n    due skills show profiles\n\nDISCOVER OFFLINE\n    due skills list --output json        List guides in this installed build\n    due skills show overview             Choose a workflow and get started\n    due skills show run                  Prepare and verify one-shot assignments\n    due skills show contracts            Interpret results and structured answers\n    due skills show observe              Monitor and summarize progress\n",
+        "\nPROFILES\n  Reuse JSON defaults, then supply the assignment separately:\n    printf '%s\\n' '{\"schema_version\":1,\"provider\":\"claude\"}' > worker.json\n    due run --request worker.json -p 'Review the parser.' --dry-run --output json\n    due skills show profiles\n\nDISCOVER OFFLINE\n    due skills list --output json        List guides in this installed build\n    due skills show overview             Choose a workflow and get started\n    due skills show use-cases            Decide whether Due fits; pick a pattern\n    due skills show run                  Prepare and verify one-shot assignments\n    due skills show contracts            Interpret results and structured answers\n    due skills show observe              Monitor and summarize progress\n",
     );
     #[cfg(feature = "rpc")]
     text.push_str("    due skills show rpc                  Implement a raw RPC client\n");
@@ -211,6 +211,7 @@ pub const SKILLS: &str = r#"GETTING STARTED
 
 GUIDES
   overview    Getting started, mode selection, setup and troubleshooting
+  use-cases   Task fit and patterns for delegation, review, extraction and embedding
   run         Scope, execute and verify one foreground assignment
   profiles    JSON configuration, overrides, native options and path resolution
   contracts   Structured answers and one-shot result/error semantics
