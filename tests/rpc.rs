@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::fs::PermissionsExt,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -27,6 +27,16 @@ mod numeric_params;
 mod profiles;
 #[path = "rpc/transport_review.rs"]
 mod transport_review;
+
+// A concurrent child launch can temporarily retain a caller's pipe read end
+// until exec closes inherited descriptors. Serialize launches with read-end
+// teardown so a post-disconnect probe cannot write through that extra reader.
+static PROCESS_SPAWN: Mutex<()> = Mutex::new(());
+
+fn spawn_rpc(command: &mut Command) -> Child {
+    let _guard = PROCESS_SPAWN.lock().unwrap();
+    command.spawn().unwrap()
+}
 
 struct Client {
     dir: TempDir,
@@ -63,15 +73,15 @@ impl Client {
         let binary = dir.path().join("provider");
         fs::write(&binary, include_bytes!("fixtures/session-agent.sh")).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_due"))
-            .arg("rpc")
-            .env("DUE_SESSION_FIXTURE_DIR", dir.path())
-            .env("DUE_SESSION_EARLY", if early { "1" } else { "0" })
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(stderr(dir.path()))
-            .spawn()
-            .unwrap();
+        let mut child = spawn_rpc(
+            Command::new(env!("CARGO_BIN_EXE_due"))
+                .arg("rpc")
+                .env("DUE_SESSION_FIXTURE_DIR", dir.path())
+                .env("DUE_SESSION_EARLY", if early { "1" } else { "0" })
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(stderr(dir.path())),
+        );
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let (tx, messages) = mpsc::channel();
@@ -82,7 +92,8 @@ impl Client {
         thread::spawn(move || {
             let started = Instant::now();
             let mut lines_read = 0_u32;
-            for line in BufReader::new(stdout).lines() {
+            let mut reader = BufReader::new(stdout);
+            for line in reader.by_ref().lines() {
                 lines_read += 1;
                 if reader_close.load(Ordering::Acquire) {
                     // Record which line woke the reader; a pushed item and a
@@ -100,7 +111,7 @@ impl Client {
                         })
                         .unwrap_or_else(|| "unparsed".into());
                     trace.lock().unwrap().push(format!(
-                        "{}ms reader dropping stdout on line {lines_read} ({kind})",
+                        "{}ms reader requested stdout close on line {lines_read} ({kind})",
                         started.elapsed().as_millis()
                     ));
                     break;
@@ -112,6 +123,16 @@ impl Client {
                     break;
                 }
             }
+            // Complete any in-flight child startup before closing this pipe.
+            // The sender's disconnect is the caller's post-close write barrier.
+            let close_guard = PROCESS_SPAWN.lock().unwrap();
+            drop(reader);
+            trace.lock().unwrap().push(format!(
+                "{}ms stdout closed after child launches settled",
+                started.elapsed().as_millis()
+            ));
+            drop(tx);
+            drop(close_guard);
         });
         Self {
             dir,
@@ -132,8 +153,9 @@ impl Client {
         let stderr = fs::read(self.dir.path().join("stderr.log")).unwrap_or_default();
         let tail = &stderr[stderr.len().saturating_sub(4096)..];
         format!(
-            "provider={provider}\ntimeline={timeline:?}\nreader={:?}\ndue_status={:?}\n\
+            "due_pid={} provider={provider}\ntimeline={timeline:?}\nreader={:?}\ndue_status={:?}\n\
              native_exited={} native_pid_recorded={}\ndue_stderr_tail={:?}",
+            self.child.id(),
             self.reader_trace.lock().unwrap(),
             self.child.try_wait(),
             self.dir.path().join("exited").exists(),
@@ -944,15 +966,13 @@ fn stalled_stdout_times_out_with_stdin_and_stdout_still_open() {
         }
     }
 
-    let mut child = OwnedChild(
+    let mut child = OwnedChild(spawn_rpc(
         Command::new(env!("CARGO_BIN_EXE_due"))
             .arg("rpc")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
+            .stderr(Stdio::piped()),
+    ));
     let mut input = child.0.stdin.take().unwrap();
     // Keep the output reader alive without consuming any bytes. The echoed ID
     // exceeds the pipe's buffer, so this tests a stalled write, not EPIPE.
@@ -1608,4 +1628,17 @@ fn codex_completion_before_interrupt_ack_keeps_original_response_and_identity() 
         assert_eq!(controls.len(), 1);
         assert_eq!(controls[0]["params"]["turnId"], "turn-1");
     }
+}
+
+#[test]
+fn concurrent_callers_settle_after_broken_stdout_with_input_open() {
+    thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                for _ in 0..8 {
+                    broken_stdout_stops_due_and_native_process_with_stdin_still_open();
+                }
+            });
+        }
+    });
 }

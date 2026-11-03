@@ -164,15 +164,13 @@ fn wait_child(child: &mut OwnedRpcChild, timeout: Duration) -> std::process::Exi
 
 #[test]
 fn aggregate_response_byte_overflow_fails_with_both_pipes_open() {
-    let mut child = OwnedRpcChild(
+    let mut child = OwnedRpcChild(spawn_rpc(
         Command::new(env!("CARGO_BIN_EXE_due"))
             .arg("rpc")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
+            .stderr(Stdio::piped()),
+    ));
     let mut input = child.0.stdin.take().unwrap();
     let _output = child.0.stdout.take().unwrap();
     let mut stderr = child.0.stderr.take().unwrap();
@@ -215,15 +213,13 @@ fn unix_socket_stdio_round_trip_and_signal_shutdown_with_input_open() {
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     let mut output = BufReader::new(output);
-    let mut child = OwnedRpcChild(
+    let mut child = OwnedRpcChild(spawn_rpc(
         Command::new(env!("CARGO_BIN_EXE_due"))
             .arg("rpc")
             .stdin(Stdio::from(OwnedFd::from(child_input)))
             .stdout(Stdio::from(OwnedFd::from(child_output)))
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
+            .stderr(Stdio::inherit()),
+    ));
     writeln!(
         input,
         "{}",
