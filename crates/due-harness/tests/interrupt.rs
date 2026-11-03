@@ -4,7 +4,7 @@
 
 use due_harness::{Options, Outcome, run_js};
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+use std::{fs, path::Path, time::Duration};
 use tempfile::TempDir;
 
 const PRELUDE: &str = "const rejection=async call=>{try{await call();return null;}catch(e){return String(e.message);}};";
@@ -16,15 +16,12 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let peer = dir.path().join("peer");
-        fs::write(&peer, include_str!("fixtures/interrupt-peer.py")).unwrap();
-        fs::set_permissions(&peer, fs::Permissions::from_mode(0o700)).unwrap();
         Self { dir }
     }
 
     fn run(&self, body: &str) -> Outcome {
         run_js(Options {
-            due: self.dir.path().join("peer"),
+            due: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/interrupt-peer.py"),
             cwd: self.dir.path().to_owned(),
             evidence: self.dir.path().join("evidence"),
             source: format!(

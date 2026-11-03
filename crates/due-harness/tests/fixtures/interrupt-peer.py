@@ -12,13 +12,13 @@ script and not by scheduling:
            later interrupts succeed normally
   other    turn.interrupt: cancelled terminal item, then a normal acknowledgement
 
-Every request is appended to requests.jsonl next to this file.
+Every request is appended to requests.jsonl in the isolated working directory.
 """
 import json
 from pathlib import Path
 import sys
 
-log = Path(__file__).resolve().parent / "requests.jsonl"
+log = Path.cwd() / "requests.jsonl"
 cursor = 0
 turn_number = 0
 modes = {}
