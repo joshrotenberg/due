@@ -254,6 +254,64 @@ fn both_native_adapters_keep_one_session_with_items_permissions_interrupt_and_re
 }
 
 #[test]
+fn interrupt_completed_unconsumed_turn_resolves_without_native_interrupt_and_wait_keeps_result() {
+    // The terminal barrier is the turn_finished item seen by onItem; the client stores the
+    // result before delivering that item, so no elapsed time is involved.
+    let source = r#"
+        Due.run(async scope => {
+          let finish; const finished=new Promise(resolve=>{finish=resolve;});
+          const worker=await scope.open(Due.args.profile,{
+            onItem(item){ if(item.kind==='turn_finished') finish(item.turn_id); },
+            async onInteraction(){ throw Error('unexpected interaction'); }
+          });
+          const rejection=async call=>{ try{ await call(); return null; } catch(e){ return String(e.message); } };
+          const id=await worker.start('quick');
+          if(await finished!==id) throw Error('terminal item for another turn');
+          const wrong=await rejection(()=>worker.interrupt('wrong-id'));
+          const empty=await rejection(()=>worker.interrupt(''));
+          const ack=await worker.interrupt(id);
+          const again=await worker.interrupt(id);
+          const result=await worker.wait(id);
+          const consumed=await rejection(()=>worker.interrupt(id));
+          const next=await worker.turn('next');
+          return {ack,again,wrong,empty,consumed,id,first:result.status,text:result.text,next:next.status,nextText:next.text};
+        });
+    "#;
+    for provider in ["claude", "codex"] {
+        let fixture = Fixture::new(source);
+        let profile = fixture.provider(provider);
+        let output = fixture
+            .native_command(&json!({"provider":provider,"profile":profile}))
+            .output()
+            .unwrap();
+        let result = report(&output, 0);
+        let value = &result["result"];
+        let expected =
+            json!({"interrupt_requested":false,"turn_id":value["id"],"already_finished":true});
+        assert_eq!(value["ack"], expected, "{provider}: {value}");
+        assert_eq!(value["again"], expected, "{provider}: {value}");
+        for field in ["wrong", "empty", "consumed"] {
+            assert!(
+                value[field]
+                    .as_str()
+                    .is_some_and(|message| message.contains("no active turn with that id")),
+                "{provider} {field}: {value}"
+            );
+        }
+        assert_eq!(value["first"], "succeeded", "{provider}: {value}");
+        assert_eq!(value["text"], "turn 1", "{provider}: {value}");
+        assert_eq!(value["next"], "succeeded", "{provider}: {value}");
+        assert_eq!(value["nextText"], "turn 2", "{provider}: {value}");
+        let input = fs::read_to_string(fixture.directory.path().join("input.jsonl")).unwrap();
+        assert!(
+            !input.contains("interrupt"),
+            "{provider} sent a native interruption: {input}"
+        );
+        fixture.settled(true);
+    }
+}
+
+#[test]
 fn checked_in_example_accepts_only_after_independent_verification_passes() {
     for provider in ["claude", "codex"] {
         let fixture = Fixture::new(include_str!("../examples/harness/supervision.js"));

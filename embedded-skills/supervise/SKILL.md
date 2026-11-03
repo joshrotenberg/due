@@ -157,7 +157,7 @@ directory must be new with an existing parent; evidence is never overwritten.
 | `worker.start(prompt)` | Start one turn and return its Due turn ID |
 | `worker.wait(id, timeoutMs?)` | Consume that turn's terminal result; default 300000 ms |
 | `worker.turn(prompt, timeoutMs?)` | Start and wait for one turn |
-| `worker.interrupt(id)` | Request interruption of the exact active turn and await acknowledgement |
+| `worker.interrupt(id)` | Request interruption of the exact active turn and await acknowledgement; resolves `{interrupt_requested:false, turn_id, already_finished:true}` when that turn already finished and `wait` has not consumed it |
 | `worker.reply(item, response)` | Low-level reply for an unresolved interaction; normally return a response from `onInteraction` instead |
 | `worker.close()` | Explicitly close; scope exit also closes automatically |
 
@@ -169,6 +169,11 @@ One `Due.run` owns one root workflow and one worker session. Await every managed
 operation. `worker.start(prompt)` returns a Due turn ID; `worker.wait(id)` consumes
 its terminal result. `worker.turn(prompt)` combines them. To stop a turn, await
 `worker.interrupt(id)`, then await `worker.wait(id)` before starting another turn.
+Check `interrupt_requested` in the acknowledgement: `already_finished:true` means the
+turn ended first and `wait` still returns its original result. If the turn's terminal
+result is already present no interruption is sent; if it arrives while the interruption
+is outstanding and Due rejects the request as already finished, that rejection is
+reported the same way. Any other error still throws. Unknown, wrong, or already consumed IDs still throw.
 Use the exact Due turn ID, not a native provider ID. `worker.close()` closes early;
 normal scope exit closes automatically. `scope.cancel(reason)` fails the scope
 even if the script catches the cancellation error.
