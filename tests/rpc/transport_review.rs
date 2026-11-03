@@ -50,6 +50,56 @@ fn invalid_utf8_closes_connection_and_reaps_active_provider() {
 }
 
 #[test]
+fn broken_stdout_settles_native_before_a_full_stderr_is_drained() {
+    for provider in ["claude", "codex"] {
+        let (mut error_reader, mut error_writer) = UnixStream::pair().unwrap();
+        error_writer.set_nonblocking(true).unwrap();
+        loop {
+            match error_writer.write(&[b'x'; 4096]) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill stderr socket: {error}"),
+            }
+        }
+        error_writer.set_nonblocking(false).unwrap();
+        let mut client = Client::with_stderr(false, |_| Stdio::from(OwnedFd::from(error_writer)));
+        let session = client.open(provider, true, None);
+        let turn = client.start(&session, "hold");
+        client.ready(provider, &session, &turn);
+        client.close_stdout.store(true, Ordering::Release);
+        client.request("missing", json!({}));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match client
+                .messages
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(error) => panic!("stdout reader did not close: {error}"),
+            }
+        }
+        client.request("missing", json!({}));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let exited = client.dir.path().join("exited");
+        while !exited.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let settled_before_drain = exited.exists();
+        // Drain only after observing native cleanup, or the guard expiring.
+        // Final diagnostics may block Due's exit; they must not block cleanup.
+        let drain =
+            thread::spawn(move || std::io::copy(&mut error_reader, &mut std::io::sink()).unwrap());
+        client.wait_exit(false);
+        drain.join().unwrap();
+        assert!(
+            settled_before_drain,
+            "{provider}: stderr diagnostics blocked native cleanup"
+        );
+    }
+}
+
+#[test]
 fn concurrent_request_limit_is_recoverable_when_output_is_draining() {
     let mut client = Client::new(false);
     let session = client.open("codex", true, None);

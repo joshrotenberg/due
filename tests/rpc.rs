@@ -8,7 +8,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
     },
@@ -37,10 +37,28 @@ struct Client {
     responses: BTreeMap<String, Value>,
     next_id: u64,
     close_stdout: Arc<AtomicBool>,
+    // Bounded notes from the stdout reader thread, for failure reports only.
+    reader_trace: Arc<Mutex<Vec<String>>>,
 }
 
 impl Client {
     fn new(early: bool) -> Self {
+        Self::spawn(early, false)
+    }
+
+    /// `log_stderr` sends Due's stderr to `stderr.log` in the fixture directory
+    /// so a failing test can include it; otherwise stderr is inherited.
+    fn spawn(early: bool, log_stderr: bool) -> Self {
+        Self::with_stderr(early, |directory| {
+            if log_stderr {
+                Stdio::from(fs::File::create(directory.join("stderr.log")).unwrap())
+            } else {
+                Stdio::inherit()
+            }
+        })
+    }
+
+    fn with_stderr(early: bool, stderr: impl FnOnce(&std::path::Path) -> Stdio) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("provider");
         fs::write(&binary, include_bytes!("fixtures/session-agent.sh")).unwrap();
@@ -51,7 +69,7 @@ impl Client {
             .env("DUE_SESSION_EARLY", if early { "1" } else { "0" })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(stderr(dir.path()))
             .spawn()
             .unwrap();
         let stdin = child.stdin.take();
@@ -59,9 +77,32 @@ impl Client {
         let (tx, messages) = mpsc::channel();
         let close_stdout = Arc::new(AtomicBool::new(false));
         let reader_close = close_stdout.clone();
+        let reader_trace = Arc::new(Mutex::new(Vec::new()));
+        let trace = reader_trace.clone();
         thread::spawn(move || {
+            let started = Instant::now();
+            let mut lines_read = 0_u32;
             for line in BufReader::new(stdout).lines() {
+                lines_read += 1;
                 if reader_close.load(Ordering::Acquire) {
+                    // Record which line woke the reader; a pushed item and a
+                    // reply lead to different timelines.
+                    let kind = line
+                        .as_deref()
+                        .ok()
+                        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+                        .map(|value| {
+                            format!(
+                                "id={} method={}",
+                                value.get("id").unwrap_or(&Value::Null),
+                                value.get("method").unwrap_or(&Value::Null)
+                            )
+                        })
+                        .unwrap_or_else(|| "unparsed".into());
+                    trace.lock().unwrap().push(format!(
+                        "{}ms reader dropping stdout on line {lines_read} ({kind})",
+                        started.elapsed().as_millis()
+                    ));
                     break;
                 }
                 let line = line.unwrap();
@@ -81,7 +122,24 @@ impl Client {
             responses: BTreeMap::new(),
             next_id: 0,
             close_stdout,
+            reader_trace,
         }
+    }
+
+    /// Evidence for a hang report: provider, test-side timeline, reader notes,
+    /// Due's liveness and the tail of its stderr. Bounded in size.
+    fn evidence(&mut self, provider: &str, timeline: &[String]) -> String {
+        let stderr = fs::read(self.dir.path().join("stderr.log")).unwrap_or_default();
+        let tail = &stderr[stderr.len().saturating_sub(4096)..];
+        format!(
+            "provider={provider}\ntimeline={timeline:?}\nreader={:?}\ndue_status={:?}\n\
+             native_exited={} native_pid_recorded={}\ndue_stderr_tail={:?}",
+            self.reader_trace.lock().unwrap(),
+            self.child.try_wait(),
+            self.dir.path().join("exited").exists(),
+            self.dir.path().join("pid").exists(),
+            String::from_utf8_lossy(tail),
+        )
     }
 
     fn raw(&mut self, bytes: &[u8]) {
@@ -802,43 +860,74 @@ fn sigterm_exits_with_stdin_still_open_and_settles_native_process() {
 #[test]
 fn broken_stdout_stops_due_and_native_process_with_stdin_still_open() {
     for provider in ["claude", "codex"] {
-        let mut client = Client::new(false);
+        let started = Instant::now();
+        let mut timeline: Vec<String> = Vec::new();
+        let note = |timeline: &mut Vec<String>, event: String| {
+            timeline.push(format!("{}ms {event}", started.elapsed().as_millis()))
+        };
+        let mut client = Client::spawn(false, true);
         let session = client.open(provider, true, None);
         let turn = client.start(&session, "hold");
         client.ready(provider, &session, &turn);
+        note(&mut timeline, "native turn ready".into());
         // Wake the reader with one harmless reply, then let it drop the owned
         // stdout pipe. No cross-thread raw descriptor closing is needed.
         client.close_stdout.store(true, Ordering::Release);
         client.request("missing", json!({}));
+        note(&mut timeline, "first missing request sent".into());
         let deadline = Instant::now() + Duration::from_secs(3);
+        let mut delivered = 0_u32;
         loop {
             match client
                 .messages
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             {
-                Ok(_) => {}
+                Ok(_) => delivered += 1,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(error) => panic!("stdout reader did not close: {error}"),
+                Err(error) => {
+                    note(&mut timeline, format!("reader wait failed: {error}"));
+                    let evidence = client.evidence(provider, &timeline);
+                    panic!("stdout reader did not close: {error}\n{evidence}");
+                }
             }
         }
+        // Whether Due had already seen the broken pipe before the second
+        // request distinguishes "reply raced the reader" from "no EPIPE seen".
+        note(
+            &mut timeline,
+            format!(
+                "reader disconnected after {delivered} messages; due exited: {:?}",
+                client.child.try_wait().unwrap()
+            ),
+        );
         client.request("missing", json!({}));
+        note(&mut timeline, "second missing request sent".into());
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             if let Some(status) = client.child.try_wait().unwrap() {
-                assert!(!status.success(), "broken stdout must fail the connection");
+                note(&mut timeline, format!("due exited: {status}"));
+                assert!(
+                    !status.success(),
+                    "broken stdout must fail the connection\n{}",
+                    client.evidence(provider, &timeline)
+                );
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "Due survived broken stdout with stdin held open; native exit observed: {}",
-                client.dir.path().join("exited").exists()
-            );
+            if Instant::now() >= deadline {
+                note(&mut timeline, "deadline reached".into());
+                let evidence = client.evidence(provider, &timeline);
+                panic!(
+                    "Due survived broken stdout with stdin held open; native exit observed: {}\n{evidence}",
+                    client.dir.path().join("exited").exists()
+                );
+            }
             thread::sleep(Duration::from_millis(10));
         }
         assert!(client.stdin.is_some());
         assert!(
             client.dir.path().join("exited").exists(),
-            "native process survived broken stdout"
+            "native process survived broken stdout\n{}",
+            client.evidence(provider, &timeline)
         );
     }
 }

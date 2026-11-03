@@ -42,7 +42,13 @@ pub(super) async fn execute(signal: impl Future<Output = ()>) -> Result<(), Stri
                     written.map_err(|error| format!("RPC stdout: {error}"))?;
                 }
             })();
+            let failure = result.as_ref().err().cloned();
+            // Publish failure before diagnostics: an unread stderr pipe must
+            // not prevent the async owner from starting provider cleanup.
             let _ = output_done.send(result);
+            if let Some(error) = failure {
+                let _ = writeln!(std::io::stderr(), "due rpc: stdout bridge stopped: {error}");
+            }
         })
         .map_err(|error| format!("start RPC stdout bridge: {error}"))?;
 
@@ -85,6 +91,14 @@ pub(super) async fn execute(signal: impl Future<Output = ()>) -> Result<(), Stri
         }
     })
     .await;
+    if early_output.is_some() {
+        // Pairs with the detection line above: shows provider cleanup finished.
+        let _ = writeln!(
+            std::io::stderr(),
+            "due rpc: shutdown after output bridge stopped finished (ok: {})",
+            outcome.is_ok()
+        );
+    }
     match input_result.try_recv() {
         Ok(result) => outcome = outcome.and(result),
         Err(oneshot::error::TryRecvError::Empty) => {}
