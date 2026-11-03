@@ -39,6 +39,7 @@ Guides in the full catalog:
 | Guide | Read it to |
 | --- | --- |
 | `overview` | Choose a mode, set up, troubleshoot, report (this guide) |
+| `use-cases` | Decide whether Due fits a task and pick a pattern, with one provider or two |
 | `run` | Run one bounded turn, resume it, verify the effects |
 | `profiles` | Write a JSON profile and reuse it across run, script and RPC |
 | `contracts` | Interpret the result envelope, typed errors and exit codes |
@@ -61,6 +62,12 @@ Choose the mode that fits the assignment. A resident session supports ongoing
 observation and caller-owned follow-up decisions. `due run` is one foreground invocation; the
 caller and the OS own concurrency, scheduling and retries. `due script` and
 `due rpc` hold one session and one active turn per Due process.
+
+Due is useful with either provider alone; a fresh session of the same provider
+is a valid independent reviewer. For patterns such as review and revise,
+independent assignments, structured extraction, embedding Due in a program, and
+when direct work or the provider's interactive CLI is simpler, read
+`due skills show use-cases`.
 
 ## Get started
 

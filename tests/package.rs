@@ -188,6 +188,7 @@ fn source_distribution_has_its_docs_contracts_and_no_plugin_services() {
         "docs/harness.md",
         "docs/rpc.md",
         "embedded-skills/overview/SKILL.md",
+        "embedded-skills/use-cases/SKILL.md",
         "embedded-skills/profiles/SKILL.md",
         "embedded-skills/rpc/SKILL.md",
         "embedded-skills/run/SKILL.md",

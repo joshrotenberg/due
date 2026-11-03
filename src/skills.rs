@@ -25,6 +25,11 @@ const SKILLS: &[Skill] = &[
         content: include_str!("../embedded-skills/overview/SKILL.md"),
     },
     Skill {
+        name: "use-cases",
+        description: "Decide whether a task suits Due and match it to a pattern (bounded delegation, multi-turn specialist, review and revise, independent assignments, structured extraction, embedding in a program), with one provider or two.",
+        content: include_str!("../embedded-skills/use-cases/SKILL.md"),
+    },
+    Skill {
         name: "run",
         description: "Scope, execute and independently verify one bounded Claude Code or Codex assignment, with optional native-session resume.",
         content: include_str!("../embedded-skills/run/SKILL.md"),
