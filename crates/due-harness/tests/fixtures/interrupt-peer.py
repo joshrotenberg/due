@@ -43,8 +43,8 @@ def result(request, value):
     send({"jsonrpc": "2.0", "id": request["id"], "result": value})
 
 
-def reject(request, message):
-    send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32000, "message": message}})
+def reject(request, message, code=-32000):
+    send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": code, "message": message}})
 
 
 def finish(turn, status="succeeded"):
@@ -89,6 +89,9 @@ for line in sys.stdin:
         elif mode == "genuine":
             finish(turn)
             reject(request, "interrupt delivery failed")
+        elif mode == "wrong-code":
+            finish(turn)
+            reject(request, "No active turn", code=-32603)
         elif mode == "failed":
             finish(turn)
             item("session_failed", {"message": "native failed"})

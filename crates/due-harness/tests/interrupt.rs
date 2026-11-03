@@ -118,25 +118,27 @@ fn terminal_before_finished_rejection_resolves_as_already_finished() {
 
 #[test]
 fn genuine_rejection_after_terminal_remains_an_error() {
-    let fixture = Fixture::new();
-    let outcome = fixture.run(&format!(
-        "const id=await worker.start('genuine');
+    for (prompt, expected) in [
+        ("genuine", "RPC error -32000: interrupt delivery failed"),
+        ("wrong-code", "RPC error -32603: No active turn"),
+    ] {
+        let fixture = Fixture::new();
+        let outcome = fixture.run(&format!(
+            "const id=await worker.start('{prompt}');
          const error=await rejection(()=>worker.interrupt(id));
          const status=(await worker.wait(id)).status;
          {REUSE}
          return {{error,status,nack,nstatus}};"
-    ));
-    assert!(outcome.error.is_none(), "{:?}", outcome.error);
-    assert_eq!(
-        outcome.result["error"],
-        "RPC error -32000: interrupt delivery failed"
-    );
-    assert_eq!(outcome.result["status"], "succeeded");
-    assert_eq!(
-        outcome.result["nack"],
-        json!({"interrupt_requested": true, "turn_id": "turn-2"})
-    );
-    assert_eq!(fixture.interrupts(), ["turn-1", "turn-2"]);
+        ));
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(outcome.result["error"], expected);
+        assert_eq!(outcome.result["status"], "succeeded");
+        assert_eq!(
+            outcome.result["nack"],
+            json!({"interrupt_requested": true, "turn_id": "turn-2"})
+        );
+        assert_eq!(fixture.interrupts(), ["turn-1", "turn-2"]);
+    }
 }
 
 #[test]

@@ -173,7 +173,7 @@ var Due = (function () {
             catch (e) {
               // Only the server's finished-turn rejection, and only when this client saw that
               // turn finish while the interruption was outstanding. Other errors propagate.
-              const raced = e && e.kind === 'rpc' && interruptSawTerminal && !state.error && !client.failure &&
+              const raced = e && e.kind === 'rpc' && e.code === -32000 && interruptSawTerminal && !state.error && !client.failure &&
                 FINISHED_REJECTIONS.some(text => e.message === 'RPC error ' + e.code + ': ' + text);
               if (raced) return finishedAck(id);
               throw e;
