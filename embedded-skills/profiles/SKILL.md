@@ -59,6 +59,12 @@ file, then the default. Omission inherits; nothing is merged key by key inside
 `timeout` applies whenever `--timeout` is omitted. In RPC and script sessions
 it is a per-turn deadline, and a script's own `--timeout` is separate.
 
+In a resident session, expiry also fails the native session: the `timed_out`
+turn result is followed by `session_failed`, and another turn on that handle is
+rejected. In `due script`, this fails the workflow. Close the failed handle before
+opening another session. Resume requires saved, non-ephemeral native history;
+otherwise start fresh. A session's successful cleanup does not restore usability.
+
 Native arguments replace as a whole list everywhere. Supplying `-- ARGS` to
 `due run`, or `native_args` to `session.open`, discards the profile's list,
 including any permission grants and restrictions. Copy the complete intended

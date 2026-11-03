@@ -32,9 +32,9 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"nope"}' | due rpc
 - Each object has `"jsonrpc":"2.0"`, a `method`, and named `params` (an object;
   omitted means `{}`). Positional params and batch arrays are rejected.
 - `id` is a string, an integer or `null`. A request with an `id` (even `null`)
-  gets a response unless the connection fails. An object with no `id` is a notification and never
-  gets a reply, not even for errors; use requests for anything whose outcome
-  matters.
+  gets a response unless the connection fails. A valid envelope with no `id` is a
+  notification and never gets a reply, even for dispatch errors. An invalid
+  envelope can receive a null-id error. Use requests when the outcome matters.
 - Responses may arrive out of order and `session.item` notifications may arrive
   before or after the response that caused them. Use unique IDs and correlate by
   ID, never by position.
@@ -81,7 +81,11 @@ Notes:
 
 ## Errors
 
-Failures carry `error: {code, message}` and the request's `id`.
+Dispatched method failures carry `error: {code, message}` and the request's `id`.
+Parse and envelope errors (`-32700`, `-32600`) always carry `id: null`, even when
+the invalid object supplied an ID. Clients cannot correlate these by request ID.
+They may fail explicitly on these codes; the server can remain usable. Other
+null-id replies can belong to valid requests that explicitly used `id: null`.
 
 | Code | Meaning |
 | --- | --- |
@@ -92,9 +96,17 @@ Failures carry `error: {code, message}` and the request's `id`.
 | `-32000` | Operation failed: unknown session or turn handle, empty prompt, a turn already running, invalid session state, stale interaction, cursor errors, provider startup or cleanup failure |
 | `-32001` | Too many in-flight requests |
 
+Some `session.open` checks run after parameter/profile resolution: unsupported
+resident `native_args`, an invalid merged `timeout`, or conflicting session
+options currently return `-32000`, even before a provider starts. The code alone
+does not establish that retrying is useful; retain the diagnostic message.
+
 An ordinary failed model turn is a successful RPC call. The turn's `result` has
 `status` `failed`, `timed_out` or `cancelled` and an `error`. Always inspect
 `result.status`, not only the absence of an RPC error. Nothing is retried.
+An expired profile `timeout` also fails the session: `session_failed` follows the
+`timed_out` result and further turns are rejected. Close the handle; a later
+session can start fresh or explicitly resume non-ephemeral history that persisted.
 
 ## A conversation
 

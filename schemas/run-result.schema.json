@@ -26,7 +26,7 @@
     "run_id": {
       "type": "string",
       "minLength": 1,
-      "description": "Present when tracing was initialized."
+      "description": "For due run, present when tracing was initialized. Resident turn results use the Due turn ID, independently of tracing."
     },
     "trace": {
       "type": "object",

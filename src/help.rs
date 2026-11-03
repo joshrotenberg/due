@@ -115,15 +115,19 @@ STREAMING AND LIFETIME
   waiting on controls, replying to permissions and closing. Replies may arrive
   out of order; correlate them by ID. Reconcile cursor gaps using session.read.
   Each process hosts one session and one active turn. Native session/thread IDs
-  differ from Due handles. After a finished turn, start another with the same
-  handle. Before exiting, read any needed items and send:
+  differ from Due handles. After a finished turn, reuse the handle only while
+  the session remains usable. A profile timeout ends the native session:
+  timed_out is followed by session_failed, and further turns are rejected.
+  Before exiting, read any needed items and send:
     {"jsonrpc":"2.0","id":4,"method":"session.close","params":{"session_id":"SESSION"}}
   Continue through stdout EOF and await child exit. Closing stdin also requests
   shutdown. An unexpected transport exit is not evidence of task acceptance.
 
 ERRORS AND PARAMETERS
-  Named parameters only; batches are unsupported. An absent id is a notification
-  and never receives a response. Use requests when acknowledgement matters.
+  Named parameters only; batches are unsupported. A valid envelope without id
+  is a notification and gets no response. Parse/envelope errors -32700/-32600
+  use id:null even if an invalid object supplied an ID. Other errors retain ID.
+  Use requests when acknowledgement matters.
   Common errors: -32602 invalid params; -32000 session operation failure;
   -32001 too many in-flight requests. Failed native turns are result data.
   session.read limit is 1..256 (default 64); turn.read wait_ms is 0..10000
@@ -179,6 +183,8 @@ OUTPUT AND DEADLINES
   --timeout defaults to 5m for workflow execution. Cleanup is additional and
   bounded. worker.turn/worker.wait also default to a separate five-minute wait;
   pass a deliberate timeout in milliseconds when a turn needs longer.
+  A wait timeout fails the whole scope even when caught. A profile turn timeout
+  also fails the native session and workflow; the handle accepts no more turns.
   Exit 0: script success; 2: invalid input; 1: setup/workflow/cancellation/cleanup
   failure. CLI syntax errors use stderr and exit 2 before the JSON envelope.
 

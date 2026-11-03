@@ -35,8 +35,9 @@ work; close the connection if unsupported.
 This small JSON-RPC 2.0 profile supports named parameters, string/integer/null
 request IDs and notifications (an absent `id`). Batches and positional
 parameters are intentionally unsupported. Use unique IDs for concurrent calls.
-Replies may arrive out of order. A notification receives no response, including
-on failure; use requests for session mutations whose outcome matters.
+Replies may arrive out of order. A valid notification receives no response,
+including on dispatch failure; use requests for mutations whose outcome matters.
+Invalid envelopes can receive null-id errors even when they have no id.
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -68,6 +69,23 @@ parameters `-32602`, session operation failure `-32000`, concurrency limit
 `-32001`. An ordinary failed model turn is a successful RPC operation containing
 a Due result with `status: "failed"`; inspect the result status, not merely the
 absence of an RPC error. There are no automatic retries.
+
+Dispatched errors retain the request ID. Parse/envelope errors (`-32700` and
+`-32600`) always use `id: null`, even if an invalid object supplied an ID. The
+server can remain usable; a client may choose to fail explicitly on these codes.
+Do not treat every null-id reply as a protocol failure: explicit `id: null`
+requests are valid and their method errors also retain null.
+
+After parameter/profile resolution, some merged open-option checks (unsupported
+resident `native_args`, invalid `timeout`, conflicting session options) currently
+return `-32000` before provider launch. Preserve their messages; the error code
+alone does not establish whether a retry is useful.
+
+Expiry of a resident profile `timeout` also fails the session: the `timed_out`
+turn result is followed by `session_failed`, and another turn on the handle is
+rejected. Close it before opening another. Resume requires native history that
+persisted from a non-ephemeral session; otherwise start fresh. In `due script`,
+the session failure fails the workflow even if the timed-out result was observed.
 
 ## Reusing JSON profiles
 

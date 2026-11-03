@@ -105,6 +105,16 @@ before starting the next one. A Due turn ID is not a native session/thread ID.
 An ordinary failed native turn is result data, not a thrown JavaScript error.
 The caller must inspect it before treating work as accepted.
 
+An expired `worker.wait` or `worker.turn` timeout fails the whole scope. Catching
+it does not restore the scope, so a later interrupt or verifier also rejects;
+the script result is null. Choose the wait budget deliberately. Interrupt and
+then wait to stop a turn before that budget expires.
+
+The profile's per-turn timeout is a separate deadline. Its expiry produces a
+`timed_out` turn followed by `session_failed`, makes the handle unusable and
+fails the script. A later invocation can start fresh or explicitly resume native
+history only if it persisted and was not ephemeral.
+
 There are no module imports, Node/npm APIs, browser APIs or file helpers. Use
 caller-selected `scope.exec` commands for checks that need filesystem access.
 The comparison runner's `bridge` object and scheduler internals are not public
@@ -174,6 +184,13 @@ an infrastructure failure.
 | Script source and JSON return value | At most 1 MiB each |
 | Raw Due stdout evidence | 64 MiB retained prefix; overflow fails |
 | Command receipt | 64 MiB; overflow or write failure fails |
+| Session stream | An omitted item, dropped push or cursor gap fails the scope; no automatic recovery |
+
+Session items larger than 4 MiB become `omitted`. Stream failure withholds the
+script result. A raw RPC client can implement journal/result reconciliation via
+`session.read` and `turn.read`, but an oversized native item replaced by an
+omission cannot be recovered from the journal. The latest terminal result and
+pending interactions are retained separately for `turn.read`.
 
 Invalid UTF-8 command output fails explicitly; invalid stream text is unavailable
 instead of silently replaced. Unix commands receive their own process groups.
