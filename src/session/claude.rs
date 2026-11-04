@@ -18,8 +18,8 @@ use tokio::task::JoinHandle;
 
 use super::{EventSink, MAX_EVENT_BYTES, MAX_EVENTS, OpenOptions};
 use crate::{
-    cli::Provider,
     result::{ErrorKind, RunError, RunResult, Usage},
+    types::Provider,
 };
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -113,9 +113,9 @@ impl Backend {
         }
         if let Some(effort) = options.effort {
             opts = opts.effort(match effort {
-                crate::cli::Effort::Low => claude_wrapper::Effort::Low,
-                crate::cli::Effort::Medium => claude_wrapper::Effort::Medium,
-                crate::cli::Effort::High => claude_wrapper::Effort::High,
+                crate::types::Effort::Low => claude_wrapper::Effort::Low,
+                crate::types::Effort::Medium => claude_wrapper::Effort::Medium,
+                crate::types::Effort::High => claude_wrapper::Effort::High,
             });
         }
         if let Some(id) = &options.resume {

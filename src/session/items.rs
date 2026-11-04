@@ -23,7 +23,7 @@ struct Journal {
     last_dropped: u64,
 }
 
-pub(crate) struct SessionItems {
+pub struct SessionItems {
     id: String,
     journal: Mutex<Journal>,
     push: Option<Arc<PushQueue>>,
@@ -106,7 +106,7 @@ struct Pending {
 /// Producers never wait on stdout. Slow consumers lose oldest queued items;
 /// the independent session journal remains available for cursor recovery.
 #[derive(Default)]
-pub(crate) struct PushQueue {
+pub struct PushQueue {
     pending: Mutex<Pending>,
     changed: Notify,
 }

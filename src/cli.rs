@@ -1,10 +1,6 @@
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, time::Duration};
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -69,21 +65,7 @@ pub enum SkillsCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Provider {
-    Claude,
-    Codex,
-}
-
-impl Provider {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-        }
-    }
-}
+pub use due::types::{Effort, Provider, parse_timeout};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum Output {
@@ -96,24 +78,6 @@ pub enum Output {
 pub enum TraceFormat {
     Text,
     Json,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Effort {
-    Low,
-    Medium,
-    High,
-}
-
-impl Effort {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -136,7 +100,7 @@ pub struct RunCommand {
     /// Provider CLI to invoke; its existing authentication and settings apply.
     #[arg(
         long,
-        value_enum,
+        value_parser = provider_parser(),
         required_unless_present = "request",
         help_heading = "Request and prompt"
     )]
@@ -155,7 +119,7 @@ pub struct RunCommand {
     pub model: Option<String>,
 
     /// Reasoning effort (provider/model support varies).
-    #[arg(long, value_enum, help_heading = "Execution")]
+    #[arg(long, value_parser = effort_parser(), help_heading = "Execution")]
     pub effort: Option<Effort>,
 
     /// Child working directory; defaults to the caller's current directory.
@@ -252,15 +216,13 @@ pub struct RunArgs {
     pub native_args: Vec<String>,
 }
 
-pub(crate) fn parse_timeout(value: &str) -> Result<Duration, String> {
-    let duration = humantime::parse_duration(value).map_err(|e| e.to_string())?;
-    if duration.is_zero() {
-        return Err("duration must be greater than zero".into());
-    }
-    // Duration can represent values beyond the platform's monotonic clock.
-    // Reject those before a heartbeat or native execution deadline is scheduled.
-    if Instant::now().checked_add(duration).is_none() {
-        return Err("duration exceeds this platform's scheduling range".into());
-    }
-    Ok(duration)
+fn provider_parser() -> impl clap::builder::TypedValueParser<Value = Provider> {
+    use clap::builder::TypedValueParser;
+    clap::builder::PossibleValuesParser::new(["claude", "codex"])
+        .map(|value| Provider::from_str(&value, false).expect("validated provider"))
+}
+fn effort_parser() -> impl clap::builder::TypedValueParser<Value = Effort> {
+    use clap::builder::TypedValueParser;
+    clap::builder::PossibleValuesParser::new(["low", "medium", "high"])
+        .map(|value| Effort::from_str(&value, false).expect("validated effort"))
 }

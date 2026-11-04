@@ -22,8 +22,8 @@ use tokio::{
 
 use super::{EventSink, OpenOptions};
 use crate::{
-    cli::Provider,
     result::{ErrorKind, RunError, RunResult, Usage},
+    types::Provider,
 };
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);

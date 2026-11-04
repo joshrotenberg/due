@@ -14,7 +14,10 @@ use tokio::{
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
-use crate::session::{Manager, PushQueue, profile::OpenInput};
+use crate::{
+    session::{Manager, PushQueue},
+    session_profile::OpenInput,
+};
 
 const MAX_INPUT: usize = 1024 * 1024;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;

@@ -2,9 +2,9 @@ use std::{io, path::PathBuf};
 
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 
-use crate::cli::{Effort, Provider};
+use crate::types::{Effort, Provider};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Succeeded,
@@ -14,7 +14,7 @@ pub enum Status {
     Planned,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RunResult {
     pub schema_version: u32,
     pub run_id: Option<String>,
@@ -50,7 +50,7 @@ pub enum AnswerSchemaValidation {
 }
 
 /// Resolved caller intent is independent of evidence from native turn metadata.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Provenance {
     /// None means intake failed before the merged request was resolved.
     pub requested: Option<RequestedSettings>,
@@ -72,7 +72,7 @@ impl RequestedSettings {
     }
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ReportedSettings {
     /// Unique native model IDs, in observation order, never requested aliases.
     pub models: Vec<String>,
@@ -144,13 +144,13 @@ impl Serialize for RunResult {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TraceSummary {
     pub incomplete: bool,
     pub dropped_records: u64,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Usage {
     /// Native input counter; cache inclusion differs between providers.
     pub input_tokens: Option<u64>,
@@ -162,7 +162,7 @@ pub struct Usage {
     pub total_tokens: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Invocation {
     pub binary: PathBuf,
     pub cwd: PathBuf,
@@ -188,7 +188,7 @@ pub enum ErrorKind {
     NotFound,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RunError {
     pub kind: ErrorKind,
     pub message: String,
@@ -285,7 +285,7 @@ impl RunResult {
 
     pub fn fail(mut self, error: RunError) -> Self {
         let mut error = error;
-        error.message = crate::providers::output::diagnostic(&error.message);
+        error.message = crate::diagnostics::diagnostic(&error.message);
         self.status = match error.kind {
             ErrorKind::Timeout => Status::TimedOut,
             ErrorKind::Cancelled => Status::Cancelled,

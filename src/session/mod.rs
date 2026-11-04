@@ -3,7 +3,7 @@
 mod claude;
 mod codex;
 mod items;
-pub(crate) mod profile;
+mod policy;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -19,11 +19,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
-pub(crate) use items::{PushQueue, SessionItems};
+pub use items::{PushQueue, SessionItems};
 
 use crate::{
-    cli::{Effort, Provider},
     result::{ErrorKind, ReportedSettings, RequestedSettings, RunError, RunResult},
+    types::{Effort, Provider},
 };
 
 const MAX_EVENTS: usize = 256;
@@ -56,13 +56,13 @@ impl OpenOptions {
     pub fn timeout_duration(&self) -> Result<Option<Duration>, String> {
         self.timeout
             .as_deref()
-            .map(crate::cli::parse_timeout)
+            .map(crate::types::parse_timeout)
             .transpose()
     }
 
-    fn validate(&mut self) -> Result<(), String> {
+    pub(crate) fn validate(&mut self) -> Result<(), String> {
         self.timeout_duration()?;
-        profile::validate_native_args(self.provider, &self.native_args)?;
+        policy::validate_native_args(self.provider, &self.native_args)?;
         for (name, value) in [("model", &self.model), ("resume", &self.resume)] {
             if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
                 return Err(format!("{name} must not be empty"));
@@ -89,7 +89,7 @@ impl OpenOptions {
 struct Turn {
     id: String,
     started: Instant,
-    result: Option<Value>,
+    result: Option<Arc<RunResult>>,
     reported: ReportedSettings,
     events: VecDeque<(u64, Value, usize)>,
     bytes: usize,
@@ -231,11 +231,11 @@ impl EventSink {
                 .as_millis()
                 .try_into()
                 .unwrap_or(u64::MAX);
-            turn.result = Some(serde_json::to_value(result).expect("RunResult is serializable"));
+            turn.result = Some(Arc::new(result));
             turn.interactions.clear();
             self.item(
                 "turn_finished",
-                turn.result.clone().unwrap(),
+                serde_json::to_value(turn.result.as_deref().unwrap()).expect("serializable result"),
                 Some(&turn.id),
             );
         }
@@ -332,7 +332,7 @@ impl EventSink {
             "events_lost": after < turn.last_dropped,
             "dropped_events": turn.dropped,
             "interactions": turn.interactions.iter().map(|(id, request)| json!({"request_id":id,"request":request})).collect::<Vec<_>>(),
-            "result": turn.result,
+            "result": turn.result.as_deref(),
             "session_error": state.failure,
         }))
     }
@@ -390,16 +390,16 @@ struct ReadSession {
 }
 
 #[derive(Default)]
-pub(crate) struct Manager {
+pub struct Manager {
     session: AsyncMutex<Option<Session>>,
     // Readers must not queue behind provider controls or native cleanup.
     read_session: Mutex<Option<ReadSession>>,
     stopping: AtomicBool,
-    pub(crate) push: Arc<PushQueue>,
+    pub push: Arc<PushQueue>,
 }
 
 impl Manager {
-    pub(crate) async fn open(&self, mut options: OpenOptions) -> Result<Value, String> {
+    pub async fn open(&self, mut options: OpenOptions) -> Result<Value, String> {
         options.validate()?;
         let mut slot = self.session.lock().await;
         if self.stopping.load(Ordering::Acquire) {
@@ -445,7 +445,7 @@ impl Manager {
         Ok(response)
     }
 
-    pub(crate) async fn start(&self, session_id: &str, prompt: String) -> Result<Value, String> {
+    pub async fn start(&self, session_id: &str, prompt: String) -> Result<Value, String> {
         if prompt.trim().is_empty() {
             return Err("prompt must not be empty".into());
         }
@@ -465,7 +465,7 @@ impl Manager {
         Ok(json!({"turn_id":id,"session_id":session_id}))
     }
 
-    pub(crate) async fn read(
+    pub async fn read(
         &self,
         session_id: &str,
         turn_id: &str,
@@ -488,7 +488,56 @@ impl Manager {
         }
     }
 
-    pub(crate) async fn session_read(
+    pub(crate) fn result(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<Arc<RunResult>>, String> {
+        let sink = self.read_sink(session_id)?;
+        let state = sink.state.lock().unwrap();
+        let turn = state
+            .turn
+            .as_ref()
+            .filter(|turn| turn.id == turn_id)
+            .ok_or("unknown turn")?;
+        Ok(turn.result.clone())
+    }
+
+    pub(crate) fn failure(&self, session_id: &str) -> Result<Option<String>, String> {
+        let sink = self.read_sink(session_id)?;
+        let failure = sink.state.lock().unwrap().failure.clone();
+        Ok(failure)
+    }
+
+    pub(crate) async fn wait_result(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Arc<RunResult>, String> {
+        let sink = self.read_sink(session_id)?;
+        loop {
+            let changed = sink.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let state = sink.state.lock().unwrap();
+                let turn = state
+                    .turn
+                    .as_ref()
+                    .filter(|turn| turn.id == turn_id)
+                    .ok_or("unknown turn")?;
+                if let Some(result) = &turn.result {
+                    return Ok(Arc::clone(result));
+                }
+                if let Some(error) = &state.failure {
+                    return Err(error.clone());
+                }
+            }
+            changed.await;
+        }
+    }
+
+    pub async fn session_read(
         &self,
         session_id: &str,
         after: u64,
@@ -498,7 +547,7 @@ impl Manager {
         sink.items.read(after, limit)
     }
 
-    pub(crate) async fn interrupt(&self, session_id: &str, turn_id: &str) -> Result<Value, String> {
+    pub async fn interrupt(&self, session_id: &str, turn_id: &str) -> Result<Value, String> {
         let answer = {
             let mut slot = self.session.lock().await;
             let session = Self::session(&mut slot, session_id)?;
@@ -516,7 +565,7 @@ impl Manager {
         Ok(json!({"interrupt_requested":true,"turn_id":turn_id}))
     }
 
-    pub(crate) async fn reply(
+    pub async fn reply(
         &self,
         session_id: &str,
         turn_id: &str,
@@ -543,7 +592,7 @@ impl Manager {
         Ok(json!({"replied":true,"request_id":request_id}))
     }
 
-    pub(crate) async fn close(&self, session_id: Option<&str>) -> Result<Value, String> {
+    pub async fn close(&self, session_id: Option<&str>) -> Result<Value, String> {
         let mut slot = self.session.lock().await;
         if let Some(id) = session_id {
             Self::session(&mut slot, id)?;
@@ -557,7 +606,7 @@ impl Manager {
         response
     }
 
-    pub(crate) async fn shutdown(&self) -> Result<Value, String> {
+    pub async fn shutdown(&self) -> Result<Value, String> {
         // EOF must reject queued opens before waiting for any current operation.
         self.stopping.store(true, Ordering::Release);
         self.close(None).await
