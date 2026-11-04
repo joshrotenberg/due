@@ -1253,10 +1253,11 @@ mod tests {
             if let Some(result) = supervisor.poll(b).unwrap() {
                 panic!("B exited before readiness: {result}");
             }
-            assert!(
-                std::time::Instant::now() < ready_deadline,
-                "B did not become ready"
-            );
+            if std::time::Instant::now() >= ready_deadline {
+                supervisor.cancel(b).unwrap();
+                let result = settle(&mut supervisor, b);
+                panic!("B did not become ready; cancelled result: {result}");
+            }
             thread::sleep(Duration::from_millis(2));
         };
         let ready_result = settle(&mut supervisor, ready);
@@ -1360,11 +1361,23 @@ mod tests {
             .unwrap();
         if !output.success() {
             let preserved = directory.keep();
+            let diagnostics: Vec<_> = fs::read_dir(&preserved)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let bytes = fs::read(entry.path()).ok()?;
+                    let text = std::str::from_utf8(&bytes).ok()?;
+                    Some(format!(
+                        "{}:\n{}",
+                        entry.file_name().to_string_lossy(),
+                        text
+                    ))
+                })
+                .collect();
             panic!(
-                "causal pipe-window probe failed; evidence: {}\nstdout:\n{}\nstderr:\n{}",
+                "causal pipe-window probe failed; evidence: {}\n{}",
                 preserved.display(),
-                fs::read_to_string(preserved.join("probe.stdout")).unwrap_or_default(),
-                fs::read_to_string(preserved.join("probe.stderr")).unwrap_or_default(),
+                diagnostics.join("\n"),
             );
         }
     }

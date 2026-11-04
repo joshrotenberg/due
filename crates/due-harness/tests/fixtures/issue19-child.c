@@ -32,6 +32,8 @@ int main(int argc, char **argv) {
         return 0;
     }
     char path[4096], name[64], pid[64];
+    snprintf(pid, sizeof(pid), "%d\n", getpid());
+    snprintf(name, sizeof(name), "%s.started", role); put(root, name, pid);
     snprintf(name, sizeof(name), "%s.fds.jsonl", role);
     snprintf(path, sizeof(path), "%s/%s", root, name);
     FILE *file = fopen(path, "w");
