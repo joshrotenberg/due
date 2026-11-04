@@ -1,4 +1,5 @@
 // Model-free leader/readiness/sibling commands with file-based barriers.
+#include <errno.h>
 #include <fcntl.h>
 #include <libproc.h>
 #include <stdio.h>
@@ -37,13 +38,22 @@ int main(int argc, char **argv) {
     if (!file) return 2;
     struct proc_fdinfo descriptors[1024];
     int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, descriptors, sizeof(descriptors));
-    if (size <= 0) return 4;
+    if (size <= 0) {
+        fprintf(stderr, "%s: list descriptors failed: bytes=%d errno=%d\n", role, size, errno);
+        return 4;
+    }
     for (int i = 0; i < size / (int)sizeof(descriptors[0]); i++) {
         int fd = descriptors[i].proc_fd;
         if (descriptors[i].proc_fdtype != PROX_FDTYPE_PIPE) continue;
+        // Inspect B's extra endpoints; its own stdio is assigned by its spawn.
+        if (strcmp(role, "b") == 0 && fd <= STDERR_FILENO) continue;
         struct pipe_fdinfo info = {0};
         int bytes = proc_pidfdinfo(getpid(), fd, PROC_PIDFDPIPEINFO, &info, sizeof(info));
-        if (bytes != sizeof(info)) return 5;
+        if (bytes != sizeof(info)) {
+            fprintf(stderr, "%s: inspect pipe fd=%d failed: bytes=%d errno=%d\n",
+                    role, fd, bytes, errno);
+            return 5;
+        }
         fprintf(file,
             "{\"fd\":%d,\"flags\":%d,\"access\":%d,\"handle\":\"%llx\",\"peer\":\"%llx\"}\n",
             fd, fcntl(fd, F_GETFD), fcntl(fd, F_GETFL) & O_ACCMODE,

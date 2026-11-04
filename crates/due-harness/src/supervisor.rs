@@ -1243,7 +1243,22 @@ mod tests {
             wait_file(&root.join("r.ready"));
         }
         let b = supervisor.start(&spec("b")).unwrap();
-        let b_pid: i32 = wait_file(&root.join("b.ready")).trim().parse().unwrap();
+        let ready_deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let b_pid: i32 = loop {
+            if let Ok(value) = fs::read_to_string(root.join("b.ready"))
+                && let Ok(pid) = value.trim().parse()
+            {
+                break pid;
+            }
+            if let Some(result) = supervisor.poll(b).unwrap() {
+                panic!("B exited before readiness: {result}");
+            }
+            assert!(
+                std::time::Instant::now() < ready_deadline,
+                "B did not become ready"
+            );
+            thread::sleep(Duration::from_millis(2));
+        };
         let ready_result = settle(&mut supervisor, ready);
         // Capture evidence and join A while B is still an active sibling.
         supervisor.cancel(a).unwrap();
