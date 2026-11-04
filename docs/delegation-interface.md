@@ -1,55 +1,69 @@
-# Core delegation interface and runtime options
+# Core delegation library, CLI, MCP and JavaScript client
 
-Status: design draft, 2026-11-04. No implementation or compatibility change is
-authorized by this document. The current supported commands remain documented in
-[CLI](cli.md), [RPC](rpc.md) and [JavaScript supervision](harness.md).
+Status: selected architectural direction, design draft, 2026-11-04. This is a
+documentation-only proposal, not an implemented API or a command-removal notice.
+The current supported commands remain documented in [CLI](cli.md), [RPC](rpc.md)
+and [JavaScript supervision](harness.md). Runtime changes need a later
+implementation and migration pass.
 
 Source map: main `725b8fe6e9e164db0d64c3e12efc84ec18eacc49`. This map excludes
 the paused #19 fix in [PR #144](https://github.com/joshrotenberg/due/pull/144).
-The older MCP branch and multi-session proxy experiment are historical inputs,
-not implementations of the interface below. The proxy remains parked in
+The older MCP branch at `a715cdd` and multi-session proxy experiment are historical
+inputs, not implementations of the interface below. The proxy remains parked in
 [#130](https://github.com/joshrotenberg/due/issues/130).
 
 ## Architectural boundary
 
-Define a small library-level delegation interface above `claude-wrapper` and
-`codex-wrapper`. CLI commands, MCP tools, raw RPC and embedded language bindings
-can adapt that interface. A language harness also lets callers compose functions
-and interpret results within one execution scope. None of those adapters is a
-prerequisite for the library or for another adapter.
+The selected direction has four pieces:
+
+1. A core delegation library above `claude-wrapper` and `codex-wrapper`, owning
+   the five functions and provider execution.
+2. A foreground CLI for one assignment and one result, including native resume.
+3. An MCP adapter exposing the functions, with one scoped engine owning N workers.
+4. A small JavaScript client over MCP for workflows in an ordinary JS runtime.
+
+Configuration helpers supply reusable function parameters. Supporting skills and
+plugin packaging teach and distribute this interface without owning execution.
+
+JavaScript is a convenience client, not a privileged path or an interpreter
+inside Due. Another language can call the same MCP tools with its own client.
+Due's custom raw RPC adapter and embedded JavaScript harness are retirement
+targets once replacements and migration are ready, rather than additional
+supported entry points in the target architecture.
 
 ```mermaid
 flowchart TB
     CLI[CLI adapter] --> Core[Core delegation library]
-    MCP[MCP adapter] --> Core
-    Raw[Optional raw RPC adapter] --> Core
-    Harness[Language harness or binding] --> Core
+    JS[JavaScript workflow and small client] --> MCP[MCP adapter]
+    Other[Other MCP clients and agent hosts] --> MCP
+    MCP --> Core
     App[Applications embedding the library] --> Core
     Core --> Claude[claude-wrapper]
     Core --> Codex[codex-wrapper]
 ```
 
-This is a logical separation, not a decision to create a repository, publish a
-crate, preserve every current transport or support several embedding languages.
-Rust is a natural implementation candidate because both wrappers are Rust; the
-contract is language independent. Keep orchestration decisions in the caller.
+Rust is a natural core implementation because both wrappers are Rust; the
+contract is language independent. Library packaging, repository layout and
+publication remain undecided. An application could also embed the Rust library
+directly, without a protocol. Keep orchestration decisions in the caller.
 
 Three independent choices determine a deployment:
 
-1. **How calls arrive:** library calls, CLI arguments, MCP, raw RPC or script
-   bindings. Adapters can compose: an MCP tool could evaluate one bounded script.
+1. **How calls arrive:** direct library calls, CLI arguments or MCP tools.
+   JavaScript workflows use the MCP path; they do not require another Due protocol.
 2. **Who owns active work:** one invocation, one application/connection scope,
    or an independently running service.
 3. **How native context continues:** a new provider process with native resume
    for each turn, or a resident native transport across turns.
 
-MCP does not require resident provider processes. A harness does not require a
-custom RPC child. A resident provider transport does not require a global daemon.
+MCP does not require resident provider processes. A JavaScript client needs
+neither an embedded interpreter nor a custom RPC child. A resident provider
+transport does not require a global daemon.
 
 ## The five functions
 
-These signatures are pseudocode, not a new JavaScript API, schema or CLI syntax.
-Calls may be async in a binding; starting a run returns after admission rather
+These signatures are pseudocode, not an implemented JS API, schema or CLI syntax.
+Calls may be async in a client; starting a run returns after admission rather
 than waiting for its assignment to finish.
 
 ```ts
@@ -143,12 +157,12 @@ A resident native process may remain alive after a run finishes; assignment
 completion and session-process shutdown are different events. Exact limits,
 retention and shutdown deadlines remain design decisions.
 
-No sixth delegation function is implied by scope teardown. Language scopes and
-service lifecycle code must nevertheless provide an explicit way to close the
-engine, release idle resident children and report cleanup failures.
+No sixth delegation function is implied by scope teardown. Library scopes,
+MCP lifecycle code and the JS client must nevertheless provide an explicit way
+to close their owner, release idle resident children and report cleanup failures.
 
 Keep fork, live messaging/steering, full session-item subscriptions and approval
-responses as separately specified capabilities. A convenience binding cannot
+responses as separately specified capabilities. A convenience client cannot
 invent them or silently simulate live steering by killing and resuming a run.
 Raw native item payloads can remain provider specific with explicit loss bounds.
 
@@ -158,14 +172,35 @@ and settle according to that policy rather than approve automatically or leave
 an unobservable wait. `awaiting_input` does not itself supply an approval API.
 Connecting another client, or receiving an agent message, grants no authority.
 
-## JSON profiles and guidance
+## Configuration, skills and plugin packaging
 
-Keep the existing JSON profile facility as shared configuration support next to
-the interface. Resolve a profile plus explicit overrides into an assignment
-before admission; retain the resolved values with the session. `review.json`
-can therefore act like a partial function without introducing a role router.
-File paths, merge/null semantics and provider options need one shared resolver,
-with explicit capability validation for resume and resident paths.
+The core functions and types represent the interface directly. Configuration
+support groups some of their parameters into reusable defaults; it does not
+introduce another execution model. Resolve defaults plus explicit overrides into
+an assignment before admission and retain the resolved values with the session.
+
+Keep the existing JSON profiles as the portable representation for the CLI and
+other clients. The JavaScript client can additionally offer partial-function
+helpers: a caller's `review` function captures provider, model, workspace or
+native options, then accepts a prompt and explicit overrides. JavaScript config
+and functions run in that caller's runtime. MCP carries the resulting JSON
+parameters, not executable functions; Due does not load a `.js` config file.
+
+For example, a caller can define a plain function without an additional API:
+
+```js
+const review = (prompt, overrides = {}) => due.spawn({
+  ...reviewDefaults, ...overrides, prompt,
+});
+```
+
+Use one authoritative typed validation/merge contract at the core/configuration
+boundary. A JS helper can prepare parameters, but must not implement a subtly
+different native-policy resolver. Preserve strict JSON intake, duplicate/unknown
+field handling, path rules and omitted/null/false semantics. Profile paths sent
+to an MCP server refer to its filesystem; a client that loads its own config
+must resolve intended paths explicitly. Native resume and resident paths still
+need capability validation.
 
 Profiles contain requested configuration, not credentials, actual permission
 grants or acceptance rules enforced by Due. A request to review without editing
@@ -174,25 +209,33 @@ workspace preparation, worker/reviewer routing, independent verification,
 revision limits and final acceptance in caller code and skills. Either provider
 alone must remain useful.
 
-## Runtime profiles by adapter
+Skills explain the five functions, when to choose the CLI or MCP, how to write a
+self-contained assignment, and how to check results. Reuse the installed-help
+and progressive-disclosure approach. Instructions can teach worker/reviewer
+patterns without putting those decisions in the core or JS client.
+
+Plugin packaging remains useful for delivering those skills and routing hosts
+to help, schemas and, if chosen, MCP setup. It is a distribution/discovery layer,
+not another delegation runtime. Whether a plugin bundles MCP registration or
+only documents it is a later packaging decision. Do not duplicate execution
+logic or install global configuration automatically. CLI users and generic MCP
+clients must remain usable without the plugin.
+
+## Runtime profiles in the selected direction
 
 Bidirectional control and a permanent bidirectional stream are different needs.
 Inspecting a handle through repeated calls can be sufficient. Receiving a live
 approval and returning its decision needs an interaction path, which can use
 calls, callbacks or a protocol according to the host.
 
-| Adapter/profile | Owner and lifetime | Functions exposed | Continuity and costs |
+| Interface | Owner and lifetime | Functions exposed | Continuity and costs |
 | --- | --- | --- | --- |
 | Foreground CLI | One process for one assignment | Compose `spawn` or `follow_up`, `wait`, then final `inspect`; signals cancel the owned run | Saved native resume across invocations. Lowest runtime commitment; caller task tools can run several invocations concurrently. |
-| Detached CLI | Worker/supervisor outlives the launching command | Separate commands address `RunRef`s for inspect/wait/interrupt | Requires durable state, process supervision and a control endpoint or equivalent. A PID file or OS fork alone is insufficient. |
-| Resident CLI/raw RPC | One explicit owner process across calls | All five through stdio or another endpoint | Natural live control, but the caller must preserve/drain the connection and handle owner failure. Provider processes can still be transient per turn. |
-| Blocking MCP tools | One native assignment per tool call; adapter may be long lived | Convenience tool composes start/wait/result; later tool call takes a saved session | Minimal active-job state. Host request deadlines and cancellation matter for long work. |
-| Scoped MCP tools | Engine lives across tool calls in a client-owned scope | Five tools with engine-owned handles | N workers within that owner. Needs job retention, connection-loss policy and cleanup; no machine-wide registry is implied. |
-| Independent HTTP service | Service owns engines independently of caller connections | Five tools or equivalent endpoints | Adds ownership/authentication, isolation, expiry, reconnect policy and service operation. Detached/reconnecting work is a separate scope decision. |
-| Harness run | One script invocation owns one engine and N logical workers | Bindings call all five; script parses results and makes decisions inline | Scope ends after its runs settle. No external interactive stream is necessary for a self-contained workflow; use callbacks/capabilities for interactions if supported. |
-| Embedded application/library | Application owns the engine | Direct function calls | Application chooses lifetime and UI; no required protocol or interpreter. |
+| Scoped MCP | Engine lives across tool calls in a client-owned scope; local stdio is the starting profile | Five tools with engine-owned handles | N workers within that owner. Needs result retention, connection-loss policy and cleanup; no machine-wide registry is implied. |
+| JavaScript workflow | Normal JS process uses a small MCP client; it can own a stdio adapter for the workflow's lifetime | Friendly methods over the same five MCP tools | Code uses normal libraries, concurrency and scheduling; Due does not evaluate it. On failure/exit the client closes its owned adapter and observes settlement. |
+| Direct library consumer | Application owns the engine | Direct function calls | Application chooses lifetime and UI; no required protocol or interpreter. |
 
-### CLI choices
+### CLI composition
 
 The current `due run` shape is a good fit for the foreground composition. Normal
 stdin prompt intake, stdout result and signals are enough. A later invocation
@@ -200,10 +243,11 @@ can follow up using saved native history. OS process forking/detaching is distin
 from forking a model conversation; neither gives the next CLI invocation a live
 control channel automatically.
 
-Separate `spawn`/`wait`/`inspect` shell commands would be a larger product choice.
-The owner could be a per-job detached supervisor, an explicit resident child or
-a shared service. Each needs a clear authority, cleanup and recovery contract.
-Do not add a background service merely to mirror function names as subcommands.
+Separate detached `spawn`/`wait`/`inspect` shell commands are outside the selected
+scope. They would need durable state, supervision and a control endpoint or
+equivalent; a PID file or OS fork alone is insufficient. The CLI need not mirror
+every function as a standalone subcommand. The library and MCP provide explicit
+control for hosts that need it.
 
 ### MCP choices and the meaning of a session
 
@@ -214,15 +258,17 @@ logical worker conversation, native process and run. One connection can address
 many worker handles. MCP does not mandate one server instance per agent chat;
 host lifecycle and tool concurrency must be checked for the target client.
 
-A scoped stdio adapter could own N conversations while its client is connected.
+A scoped stdio adapter owns N conversations while its client is connected.
 That is a multi-worker host, but it need not offer a persistent global registry,
 cross-client attachment or work that survives its owner. A connection ending
 must have an explicit cleanup policy. The [MCP lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)
 describes stdio shutdown by closing stdin, waiting, then terminating if needed;
 the adapter needs to settle native children within that opportunity.
 
-For HTTP, `MCP-Session-Id` is optional protocol state. It is not a durable job
-registry; HTTP disconnection does not itself cancel a request. Choosing to retain
+Streamable HTTP is a possible later MCP transport, not a separate delegation
+API or a required initial service deployment. For HTTP, `MCP-Session-Id` is
+optional protocol state. It is not a durable job registry; HTTP disconnection
+does not itself cancel a request. Choosing to retain
 jobs beyond a client connection therefore needs an explicit owner and expiry
 policy, rather than assuming that transport resumption guarantees job survival.
 See the same [transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management).
@@ -235,72 +281,80 @@ against five ordinary tools returning run handles; do not require it by default.
 Cancelling an inspection/wait request should not be confused with cancelling its
 underlying run. A blocking start-and-wait tool must state its different policy.
 
-An MCP adapter exposing the five functions directly would resemble the parked
-server in owning multiple workers. The scope can be much smaller: one caller's
-engine with cleanup at exit. Shared HTTP attachment and detached approvals would
-bring back much of the parked server's lifecycle complexity. Neither is required
-for MCP discovery and tool invocation alone. Native approval prompts also need
-an explicit mapping; MCP bidirectionality does not make provider permissions
-equivalent or guarantee a host can display/answer them.
+The selected MCP adapter resembles the parked server in owning multiple workers,
+with a smaller scope: one caller's engine and cleanup at exit. Shared HTTP
+attachment and detached approvals would bring back much of the parked server's
+lifecycle complexity. Neither is part of this direction. Native approval prompts
+still need an explicit mapping; MCP bidirectionality does not make provider
+permissions equivalent or guarantee a host can display/answer them.
 
-### Harness choices
+### JavaScript workflows over MCP, with no embedding
 
-One harness run can own N workers, make concurrent calls, parse their results
-and choose follow-ups without another model round trip for each control step.
-Its output can be one caller-defined JSON answer after cleanup. A script may
-create and retire workers across several functions; scope ownership must cover
-all of them even if a helper throws or returns early.
+An ordinary JS program can connect through an MCP client, use N workers, parse
+results and choose follow-ups inline. Its runtime supplies imports, libraries,
+timers and scheduling. Due needs no interpreter, JS evaluation endpoint, embedded
+module system or language-specific bindings. The JS runtime is a prerequisite
+only for callers choosing the JS client; it is not required by the Rust CLI or
+MCP adapter. Another language needs its own MCP client and runtime, not JS.
 
-There are two useful implementation paths to evaluate later:
+The small JS convenience library should expose the same function meanings and
+types over standard MCP tool calls. Use an MCP client implementation for protocol
+initialization, tool calls and transport handling rather than maintaining another
+hand-written JSON-RPC peer. Friendly methods and configuration helpers are
+optional: a generic MCP client can discover and invoke the tools directly.
+SDK selection, JS runtime version and package publication remain undecided.
 
-- **Bindings to the core in the same process:** one Rust engine beneath the
-  interpreter; no mandatory child Due binary, JSON-RPC framing or wire recovery
-  loop between the script and core. The interpreter still needs async scheduling,
-  resource bounds, error translation and cleanup. Same-process integration is
-  not automatically less complex in every respect.
-- **A script client over an owned process:** preserve process separation and
-  independent raw clients, with extra I/O, framing, queue and shutdown machinery.
-  A small external-language client can be an alternative to embedding a runtime.
+For a self-contained workflow, the JS client can launch one stdio MCP child,
+which owns one engine and N native workers. No manually started service is
+required. The caller owns the MCP process; the core owns its provider processes.
+Client scope exit requests shutdown and observes bounded settlement, including
+script exceptions. Forced shutdown or lost confirmation must remain explicit.
+Functions retained after scope closure reject new work. A normal failed run is
+data for the caller to inspect, not an automatic cancellation of every sibling.
 
-Neither choice requires several supported languages. Existing JavaScript code
-is reuse material; this design does not reopen or repeat the Lua comparison.
+If the caller manages the MCP connection itself, connection ownership and
+closure belong to it. Helpers must not terminate a server or unrelated jobs
+merely because one client object is released. Shared HTTP ownership would need
+the separate policy described above.
 
-Illustrative future binding, not a runnable `due script` example:
+Illustrative future JS client, not an implemented API or `due script` example:
 
 ```js
-await withEngine(async engine => {
-  const author = await engine.spawn(resolveProfile('implement.json', {
-    provider: 'claude', cwd: worktree, prompt: issueBrief,
-  }));
-  const authored = await engine.wait([author], {until: 'all'});
+await withDue({transport: 'stdio', command: dueBinary}, async due => {
+  const author = await due.spawn({
+    ...implementConfig, provider: 'claude', cwd: worktree, prompt: issueBrief,
+  });
+  const authored = await due.wait([author], {until: 'all'});
   requireSuccessfulExecution(authored); // Caller-defined; also check actual effects.
 
-  const reviewer = await engine.spawn(resolveProfile('review.json', {
-    provider: 'codex', cwd: worktree, prompt: independentReviewBrief,
-  }));
-  const reviewed = await engine.wait([reviewer], {until: 'all'});
+  const reviewer = await due.spawn({
+    ...reviewConfig, provider: 'codex', cwd: worktree, prompt: independentReviewBrief,
+  });
+  const reviewed = await due.wait([reviewer], {until: 'all'});
   if (callerRequestsRevision(reviewed)) {
-    const session = (await engine.inspect(author)).session;
-    const revision = await engine.follow_up(session, {prompt: revisionBrief});
-    requireSuccessfulExecution(await engine.wait([revision], {until: 'all'}));
+    const session = (await due.inspect(author)).session;
+    const revision = await due.follow_up(session, {prompt: revisionBrief});
+    requireSuccessfulExecution(await due.wait([revision], {until: 'all'}));
   }
   return callerAcceptanceReport();
 });
 ```
 
-`withEngine` describes host scope teardown, not a sixth delegation operation.
-Profile resolution, review independence and acceptance helpers are caller or
-configuration support. Parallel assignments would use several `spawn` calls
-before a `wait`; the core need not pick their order, roles or providers.
+`withDue` describes client/transport scope teardown, not a sixth delegation
+operation or another workflow engine. The methods make MCP calls; JS does not
+load the Rust library directly. Profile resolution, review independence and
+acceptance helpers are caller or configuration support. Parallel assignments
+use several `spawn` calls before a `wait`; the core does not choose their order,
+roles or providers. No remote script-evaluation MCP tool is needed.
 
-## Mapping the current implementation
+## Mapping what to reuse and what to retire
 
 The executable is currently a binary crate with private modules, not a reusable
 core library. `due-harness` is an internal library, but its public host surface
 is primarily a bridge to a single RPC child. A library extraction needs deliberate
 API/error/ownership work; renaming these modules would not establish the contract.
 
-| Proposed concern/function | Existing code | Reuse and mismatch |
+| Target concern/function | Existing code | Reuse or retirement plan |
 | --- | --- | --- |
 | Fresh assignment | [`src/main.rs`](../src/main.rs) `run_command`, [`src/providers`](../src/providers/mod.rs), [`src/request.rs`](../src/request.rs) | Reuse one-shot execution, input validation and native argument construction. They currently take CLI types and run to completion; no async engine run handle is published. |
 | Resident assignment | [`src/session/mod.rs`](../src/session/mod.rs) `Manager::open/start`, [`claude.rs`](../src/session/claude.rs), [`codex.rs`](../src/session/codex.rs) | Reuse native backends and exact-turn ownership. Open plus first turn could implement spawn, but Manager has one session slot. |
@@ -309,31 +363,41 @@ API/error/ownership work; renaming these modules would not establish the contrac
 | Wait | Resident `read(wait_ms)`; [`async.js`](../crates/due-harness/clients/async.js) worker wait | Existing native read wait is at most 10 seconds and can return on events/input. JS wait expiry fails the scope. Neither implements the proposed non-destructive wait-any/all contract. |
 | Interrupt | Resident `Manager::interrupt`, provider control owners; one-shot signal/cancellation path | Reuse immutable turn targeting, acknowledgement ownership and bounded cancellation. Current RPC returns acknowledgement before terminal settlement; proposed function must join the run. Resume-based cancellation need not keep a process hot. |
 | Configuration/results | [`src/request.rs`](../src/request.rs), [`src/session/profile.rs`](../src/session/profile.rs), [`src/result.rs`](../src/result.rs), [`src/schema.rs`](../src/schema.rs) | Preserve strict JSON, overrides, provenance, results and existing versioned contracts. Separate CLI/transport projections; resident restrictions currently differ from run. |
-| Wire adapter | [`src/rpc.rs`](../src/rpc.rs) | Reuse framing, budgets and dispatch tests if raw RPC is retained. Keep wire errors/queues outside the core API. Existing public wire behavior is not changed by this draft. |
-| Interpreter/binding | [`javascript.rs`](../crates/due-harness/src/javascript.rs), [`clients`](../crates/due-harness/clients/async.js), [`src/script.rs`](../src/script.rs) | Reuse async evaluation, strict JSON and scope tests selectively. One global client/worker, single-open scope and sticky failures prevent simply adding N worker objects. |
-| Child bridge | [`bridge.rs`](../crates/due-harness/src/bridge.rs), [`lib.rs`](../crates/due-harness/src/lib.rs) | Today one Host owns one Bridge that starts `due rpc`, captures raw frames and settles it. Optional for direct bindings; useful if process separation is chosen. |
-| Verifier execution | [`supervisor.rs`](../crates/due-harness/src/supervisor.rs) `start/poll/cancel/finish` | Has an owned map of ordinary command jobs, limits and receipts. Useful lifecycle patterns; arbitrary command execution is not a provider-assignment backend and should not become a sixth core function implicitly. |
-| External client comparison | [`examples/session-harness`](../examples/session-harness/README.md) | Existing same-workflow resume/RPC comparison informs the two native continuity models. It is an optional client experiment with its own policy, not the new core contract. |
+| MCP adapter | Historical [`src/mcp`](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike/src/mcp), [`tests/mcp.rs`](https://github.com/joshrotenberg/due/blob/codex/due-mcp-spike/tests/mcp.rs), client examples | Reuse tool-schema/routing/initialization and fixture ideas selectively. The inspected `a715cdd` spike exposes seven resident-session tools, lacks current profile resolution and uses one older Manager slot. Do not merge the branch wholesale or revive its API as the target. MCP dependency choice is a separate decision. |
+| Custom wire adapter | [`src/rpc.rs`](../src/rpc.rs) | Retire `due rpc` and its custom public method/transport contract after MCP migration. Reuse lifecycle and budget requirements, not another hand-written protocol in the JS client. |
+| Embedded interpreter | [`javascript.rs`](../crates/due-harness/src/javascript.rs), [`clients`](../crates/due-harness/clients/async.js), [`src/script.rs`](../src/script.rs) | Retire `due script`, embedded QuickJS/rquickjs, guest Promise scheduling and embedded JS clients. Port relevant scope/cancellation/result scenarios to core or MCP tests. Normal JS supplies language execution. |
+| Child bridge | [`bridge.rs`](../crates/due-harness/src/bridge.rs), [`lib.rs`](../crates/due-harness/src/lib.rs) | Retire the custom JS-to-`due rpc` bridge. Preserve ownership, bounded shutdown and explicit settlement requirements in the MCP owner/client. The new client owns a standard MCP transport, not another provider-process supervisor. |
+| Verifier execution | [`supervisor.rs`](../crates/due-harness/src/supervisor.rs) `start/poll/cancel/finish` | Reuse useful job-ownership patterns and process-cleanup regressions in the core where applicable. Retire the product's host-command API with the embedded harness; external workflow code uses its own runtime/libraries to run independent checks. Do not turn arbitrary command execution into a sixth delegation function. |
+| Small JS client | [`session.mjs`](../examples/session-harness/session.mjs), [`resident.mjs`](../examples/session-harness/resident.mjs), [`resume.mjs`](../examples/session-harness/resume.mjs) | Reuse scoped lifecycle, identity, profile and failed-execution-as-data lessons. Replace custom framing, cursor pumping and single-worker assumptions with the MCP client and core handles. The supported JS client targets MCP; a selectable resume/raw-RPC client backend is not required. |
+| Skills, help and plugin | [`src/skills.rs`](../src/skills.rs), [`embedded-skills`](../embedded-skills), [`src/help.rs`](../src/help.rs), [`plugin/due`](../plugin/due), [`src/init.rs`](../src/init.rs) | Reuse progressive discovery, bounded delegation guidance and setup packaging. Later migrate RPC/script recipes to CLI, MCP and external-client usage together; plugin setup does not implement execution. Preserve current instructions until the replacement exists. |
 
 Tests in [`tests/rpc.rs`](../tests/rpc.rs), [`tests/script.rs`](../tests/script.rs),
 [`crates/due-harness/tests`](../crates/due-harness/tests), provider unit tests and
 the separate language comparison retain useful scenarios. Map tests by behavior,
 including stale interruption, failed settlement and late interaction replies,
 rather than preserving an adapter's current restriction as a universal rule.
+Retire interpreter-specific and raw-transport-only suites with those products
+after porting the applicable behavior. Keep historical comparison evidence;
+there is no new Lua or JavaScript embedding comparison to maintain.
 
-## Reuse, simplify and leave undecided
+External workflow code remains responsible for its own commands, libraries,
+effects and permissions. Provider sandbox settings do not constrain the JS host.
+Moving checks out of Due does not grant permission to execute worker-proposed
+commands or make cleanup an implicit guarantee of arbitrary third-party libraries.
+
+## Selected direction, migration and remaining decisions
 
 **Preserve:** wrapper pins and native tool execution; predictable one-shot
 behavior; strict JSON profiles/results; requested versus observed provenance;
 deadline/cancellation distinctions; bounds, honest failures and cleanup evidence;
 caller-owned policy and useful fake-provider fixtures.
 
-**Candidate simplifications:** share an invocation resolver; extract portable
-run/result/lifecycle behavior from CLI and RPC types; let each adapter compose
-the five functions; make an extra Due child and wire protocol optional for
-bindings; separate ordinary host command execution from delegation; keep JSON
-profiles and skill guidance rather than adding a workflow configuration language.
-These are proposals, not permission to remove working contracts or safeguards.
+**Selected simplifications:** extract the core functions/types and common
+configuration support; keep the CLI as a foreground composition; expose MCP
+tools over that same core; provide a small JS client and parameter helpers over
+MCP. Replace embedded workflow execution with normal client programs. Keep
+portable JSON profiles and supporting skills/plugin packaging. Do not add a
+workflow configuration language, custom RPC alternative or remote eval tool.
 
 **Material work, not automatic reuse:** N independently owned worker sessions,
 retained per-run snapshots, non-destructive wait-any/all, saved-session import,
@@ -342,13 +406,34 @@ The current scope fails as a unit; a multi-worker engine needs an explicit polic
 for one worker failing while another is healthy. Caller orchestration chooses
 whether to cancel healthy siblings; owner/transport failure may still force cleanup.
 
-**Leave undecided:** extracted library packaging; which adapters to ship;
-transient versus resident backend defaults; exact result-retention limits;
-interaction/event capability shapes; and whether any detached service is needed.
-No global registry, cross-client leases, automatic retries, role routing,
-worktree management or second embedded language follows from the five functions.
+**Retirement distinction:** removing Due's custom RPC does not remove native
+duplex communication. Claude's `DuplexSession` and Codex's `AppServer` are useful
+core-backend candidates. Native CLI/tool execution, permission handling and
+stream reads stay in Rust/wrappers. Their lifetimes and optional capabilities
+remain independent of MCP's transport lifetime.
 
-Evaluate a scoped harness and a foreground CLI against the same core first at
-the design level. MCP can expose that core directly, or call a bounded harness
-when inline composition is useful. Host lifetime, native process lifetime and
-transport lifetime should each be stated independently in any later proposal.
+A later implementation plan should stage the migration:
+
+1. Extract core/configuration behavior with fake-provider coverage while
+   preserving the existing one-shot contracts and wrapper pins.
+2. Build the N-worker MCP adapter and small external JS client against the five
+   functions. Revalidate the old spike's useful scenarios on current core code.
+3. Move examples, help, schemas, embedded skills and plugin guidance together;
+   document how old RPC/script callers migrate, including lost/changed semantics.
+4. Retire custom RPC and embedded interpreter commands, feature/dependency paths
+   and obsolete tests only once the replacement and explicit migration decision
+   are ready. Do not copy a stale session implementation merely to save transport
+   work, or discard useful cleanup evidence with an obsolete adapter.
+
+This document performs none of those steps. In particular it does not remove
+commands, change pins or dependencies, replace installed plugins, resume paused
+bug work or close pending issues. Retiring the specific #19 harness path would
+not prove concurrent provider spawning in a new N-worker core is safe; retain
+the relevant failure mechanism and validate the replacement's ownership boundary.
+
+**Leave undecided:** extracted library packaging/publication; MCP implementation
+and JS SDK/package choices; transient versus resident backend defaults; exact
+run/result-retention bounds; interaction/event capability shapes; plugin MCP
+registration; and any later HTTP deployment. No global registry, cross-client
+leases, automatic retries, role routing, worktree management, embedded interpreter
+or second custom protocol follows from the selected direction.

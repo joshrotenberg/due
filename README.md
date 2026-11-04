@@ -276,8 +276,8 @@ remains outside this implementation.
 
 ## Documentation
 
-- [Core delegation interface design](docs/delegation-interface.md): proposed
-  library contract, current-code map and runtime options; no implementation change.
+- [Core delegation interface design](docs/delegation-interface.md): core library,
+  CLI, MCP and JS client direction, reuse/retirement map; documentation only.
 - [docs/cli.md](docs/cli.md): full CLI reference covering options, request
   fields, structured answers, tracing, native passthrough, results, and errors.
 - [JavaScript harness](docs/harness.md): supported session supervision, JSON results and evidence.
