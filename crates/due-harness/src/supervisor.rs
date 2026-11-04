@@ -445,12 +445,6 @@ async fn execute(
         value: result("failed", None, &Output::default(), Some(error)),
         cleanup_error: None,
     };
-    if *cancel.borrow() {
-        return Outcome {
-            value: result("cancelled", None, &output, None),
-            cleanup_error: None,
-        };
-    }
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -462,9 +456,25 @@ async fn execute(
     command.process_group(0);
     #[cfg(not(unix))]
     command.kill_on_drop(true);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => return failed(format!("spawn exec: {error}")),
+    let spawned = crate::with_spawn_lock(|| {
+        // Cancellation may arrive while another synchronous spawn holds the lock.
+        if *cancel.borrow() {
+            return Ok(None);
+        }
+        command
+            .spawn()
+            .map(Some)
+            .map_err(|error| format!("spawn exec: {error}"))
+    });
+    let mut child = match spawned {
+        Ok(Some(child)) => child,
+        Ok(None) => {
+            return Outcome {
+                value: result("cancelled", None, &output, None),
+                cleanup_error: None,
+            };
+        }
+        Err(error) => return failed(error),
     };
     let pid = child.id().unwrap();
     let mut custody = Custody::new(pid);
@@ -1196,5 +1206,163 @@ mod tests {
         assert!(empty_darwin_group(pid));
         child.wait().unwrap();
         assert!(!empty_darwin_group(pid));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual causal pipe-window probe; see target/issue19"]
+    fn issue19_current_runtime_sibling_pipe_probe() {
+        let root = PathBuf::from(std::env::var_os("DUE19_EVIDENCE_DIR").unwrap());
+        let program = PathBuf::from(std::env::var_os("DUE19_CHILD").unwrap());
+        let injected = std::env::var("DUE19_INJECT").as_deref() == Ok("1");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("parent.pid"), format!("{}\n", std::process::id())).unwrap();
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut supervisor = Supervisor::new(runtime.handle().clone(), &root, &root).unwrap();
+        let spec = |role: &str| {
+            json!({
+                "program":program,"args":[root,role],"timeout_ms":15000
+            })
+            .to_string()
+        };
+        let a = supervisor.start(&spec("a")).unwrap();
+        let a_pid = wait_file(&root.join("a.ready")).trim().parse().unwrap();
+        if injected {
+            fs::write(root.join("arm"), "arm").unwrap();
+        }
+        let ready = supervisor.start(&spec("r")).unwrap();
+        if injected {
+            let window: Value =
+                serde_json::from_str(&wait_file(&root.join("window.json"))).unwrap();
+            assert_eq!(window["write_flags"], 0, "injection must precede CLOEXEC");
+        } else {
+            wait_file(&root.join("r.ready"));
+        }
+        let b = supervisor.start(&spec("b")).unwrap();
+        let b_pid: i32 = wait_file(&root.join("b.ready")).trim().parse().unwrap();
+        let ready_result = settle(&mut supervisor, ready);
+        // Capture evidence and join A while B is still an active sibling.
+        supervisor.cancel(a).unwrap();
+        let a_result = settle(&mut supervisor, a);
+        assert_reaped(a_pid);
+        fs::write(root.join("challenge"), "fresh challenge").unwrap();
+        let challenge = wait_file(&root.join("b.ack"));
+        assert_eq!(unsafe { libc::kill(b_pid, 0) }, 0);
+        assert!(!root.join("release").exists());
+        let before_release = fs::read_to_string(root.join("exec.jsonl")).unwrap();
+        fs::write(root.join("before-release.jsonl"), before_release).unwrap();
+        fs::write(root.join("release"), "release").unwrap();
+        let b_result = settle(&mut supervisor, b);
+        assert_reaped(b_pid);
+        let finish = supervisor.finish();
+        let mut inherited_writer = false;
+        if injected {
+            let window: Value =
+                serde_json::from_str(&fs::read_to_string(root.join("window.json")).unwrap())
+                    .unwrap();
+            let readiness: Vec<Value> = fs::read_to_string(root.join("r.fds.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                readiness
+                    .iter()
+                    .any(|fd| fd["fd"] == 1 && fd["handle"] == window["write_handle"]),
+                "probe must identify readiness stdout"
+            );
+            let siblings: Vec<Value> = fs::read_to_string(root.join("b.fds.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            inherited_writer = siblings
+                .iter()
+                .any(|fd| fd["handle"] == window["write_handle"] && fd["access"] == libc::O_WRONLY);
+        }
+        let report = json!({"injected":injected,"ready":ready_result,"a":a_result,
+            "b":b_result,"challenge":challenge,"finish_error":finish.err(),
+            "same_writer_in_sibling":inherited_writer});
+        fs::write(root.join("report.json"), format!("{report:#}\n")).unwrap();
+        println!("{report:#}");
+        assert_eq!(report["a"]["status"], "cancelled", "{report}");
+        assert_eq!(report["b"]["status"], "succeeded", "{report}");
+        assert_eq!(report["ready"]["status"], "succeeded", "{report}");
+        assert!(report["finish_error"].is_null(), "{report}");
+        assert_eq!(report["same_writer_in_sibling"], false, "{report}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_sibling_pipe_collection_survives_the_cloexec_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let library = root.join("pipe-window.dylib");
+        let child = root.join("child");
+        for (source, output, dynamic) in [
+            ("issue19-pipe-window.c", &library, true),
+            ("issue19-child.c", &child, false),
+        ] {
+            let mut compiler = std::process::Command::new("/usr/bin/clang");
+            compiler.args(["-std=c11", "-Wall", "-Wextra", "-Werror"]);
+            if dynamic {
+                compiler.arg("-dynamiclib");
+            }
+            let compiled = compiler
+                .arg(fixtures.join(source))
+                .arg("-o")
+                .arg(output)
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "supervisor::tests::issue19_current_runtime_sibling_pipe_probe",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("DUE19_EVIDENCE_DIR", root)
+            .env("DUE19_CHILD", &child)
+            .env("DUE19_INJECT", "1")
+            .env("DYLD_INSERT_LIBRARIES", &library)
+            .stdout(File::create(root.join("probe.stdout")).unwrap())
+            .stderr(File::create(root.join("probe.stderr")).unwrap())
+            .status()
+            .unwrap();
+        if !output.success() {
+            let preserved = directory.keep();
+            panic!(
+                "causal pipe-window probe failed; evidence: {}",
+                preserved.display()
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cancellation_before_spawn_boundary_release_skips_the_child() {
+        let (_runtime, directory, mut supervisor) = setup();
+        let guard = crate::PROCESS_SPAWN.lock().unwrap();
+        let id = shell(&mut supervisor, "echo unexpected > launched", json!({}));
+        supervisor.cancel(id).unwrap();
+        drop(guard);
+        let outcome = settle(&mut supervisor, id);
+        assert_eq!(outcome["status"], "cancelled", "{outcome}");
+        assert!(!directory.path().join("launched").exists());
+        let receipt = fs::read_to_string(directory.path().join("exec.jsonl")).unwrap();
+        assert!(!receipt.contains("exec_spawned"), "{receipt}");
+        supervisor.finish().unwrap();
     }
 }
