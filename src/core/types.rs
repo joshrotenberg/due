@@ -25,6 +25,9 @@ pub struct WorkerOptions {
     pub ephemeral: bool,
     /// Audited resident native policy arguments, never transport overrides.
     pub native_args: Vec<String>,
+    /// Pending requests await an explicit caller response, or fail in reject mode.
+    #[serde(default)]
+    pub interaction_mode: InteractionMode,
 }
 
 impl WorkerOptions {
@@ -38,8 +41,20 @@ impl WorkerOptions {
             effort: None,
             ephemeral: false,
             native_args: Vec::new(),
+            interaction_mode: InteractionMode::Manual,
         }
     }
+}
+
+/// Handling of native interactions; this never changes native permission grants.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionMode {
+    /// Retain pending requests for explicit responses through the core.
+    #[default]
+    Manual,
+    /// Fail the run and close that worker on an interaction.
+    Reject,
 }
 
 /// One initial assignment in a fresh native conversation.
@@ -130,7 +145,7 @@ pub enum RunState {
     Starting,
     /// Native turn is active.
     Running,
-    /// A native interaction was observed. This spike fails unsupported interactions.
+    /// A native interaction is waiting for the caller's response.
     AwaitingInput,
     /// Terminal result retained independently of future assignments.
     Finished,
@@ -151,6 +166,33 @@ pub struct RunSnapshot {
     pub saved_session: Option<SavedSession>,
     /// Shared immutable terminal result; None while active.
     pub result: Option<Arc<RunResult>>,
+    /// Current native requests, with run/generation-scoped response tokens.
+    pub interactions: Vec<Interaction>,
+}
+
+/// Exact interaction generation. Native request IDs may be reused later.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InteractionRef {
+    pub(super) run: RunRef,
+    pub(super) request_id: String,
+    pub(super) cursor: u64,
+}
+
+/// One pending provider-specific request. Request payloads are not permission grants.
+#[derive(Debug, Clone, Serialize)]
+pub struct Interaction {
+    /// Token to pass to Engine::respond; valid only while this generation is pending.
+    pub id: InteractionRef,
+    /// Complete native request as exposed by the wrapper, including unknown fields.
+    pub request: serde_json::Value,
+}
+
+/// Confirmation of wrapper acceptance for response delivery, not tool completion.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseReceipt {
+    /// Request generation to which the response was submitted.
+    pub interaction: InteractionRef,
 }
 
 /// Completion condition for a set of engine runs.
@@ -236,6 +278,10 @@ pub enum ErrorKind {
     Runtime,
     /// Process/operation settlement could not be confirmed within its bound.
     Settlement,
+    /// The request was resolved, replaced, belongs to another run or is finished.
+    UnknownInteraction,
+    /// Provider-specific response validation or delivery failed; never auto-retry.
+    ResponseRejected,
 }
 impl Error {
     pub(super) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {

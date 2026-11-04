@@ -21,12 +21,27 @@ struct Journal {
     cursor: u64,
     dropped: u64,
     last_dropped: u64,
+    closed: bool,
 }
 
 pub struct SessionItems {
     id: String,
     journal: Mutex<Journal>,
     push: Option<Arc<PushQueue>>,
+    changed: Notify,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadError {
+    Ahead {
+        after: u64,
+        latest: u64,
+    },
+    Lagged {
+        after: u64,
+        oldest: u64,
+        latest: u64,
+    },
 }
 
 impl SessionItems {
@@ -35,11 +50,31 @@ impl SessionItems {
             id,
             journal: Mutex::new(Journal::default()),
             push,
+            changed: Notify::new(),
         }
     }
 
     pub fn record(&self, kind: &str, data: Value, turn_id: Option<&str>) {
+        let _ = self.record_with_cursor(kind, data, turn_id);
+    }
+
+    pub(crate) fn record_with_cursor(
+        &self,
+        kind: &str,
+        data: Value,
+        turn_id: Option<&str>,
+    ) -> Option<u64> {
         let mut journal = self.journal.lock().unwrap();
+        if journal.closed {
+            return None;
+        }
+        let cursor = self.append(&mut journal, kind, data, turn_id);
+        drop(journal);
+        self.changed.notify_waiters();
+        Some(cursor)
+    }
+
+    fn append(&self, journal: &mut Journal, kind: &str, data: Value, turn_id: Option<&str>) -> u64 {
         journal.cursor += 1;
         let cursor = journal.cursor;
         let mut item =
@@ -66,6 +101,71 @@ impl SessionItems {
         if let Some(push) = &self.push {
             push.enqueue(item, bytes);
         }
+        cursor
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn validate_cursor(&self, after: u64) -> Result<(), ReadError> {
+        let latest = self.journal.lock().unwrap().cursor;
+        if after > latest {
+            Err(ReadError::Ahead { after, latest })
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn next_after(&self, after: u64) -> Result<Option<Value>, ReadError> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let journal = self.journal.lock().unwrap();
+                if after > journal.cursor {
+                    return Err(ReadError::Ahead {
+                        after,
+                        latest: journal.cursor,
+                    });
+                }
+                if let Some((oldest, _, _)) = journal.items.front()
+                    && after < oldest.saturating_sub(1)
+                {
+                    return Err(ReadError::Lagged {
+                        after,
+                        oldest: *oldest,
+                        latest: journal.cursor,
+                    });
+                }
+                if let Some((_, value, _)) =
+                    journal.items.iter().find(|(cursor, _, _)| *cursor > after)
+                {
+                    return Ok(Some(value.clone()));
+                }
+                if journal.closed {
+                    return Ok(None);
+                }
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) fn finish(&self, error: Option<String>) {
+        let mut journal = self.journal.lock().unwrap();
+        if journal.closed {
+            return;
+        }
+        self.append(
+            &mut journal,
+            "session_stream_closed",
+            json!({"error":error}),
+            None,
+        );
+        journal.closed = true;
+        drop(journal);
+        self.changed.notify_waiters();
     }
 
     pub fn read(&self, after: u64, limit: usize) -> Result<Value, String> {
@@ -241,5 +341,56 @@ mod tests {
             last = Some(item);
         }
         assert_eq!(last.unwrap()["kind"], "turn_finished");
+    }
+    #[tokio::test]
+    async fn independent_readers_report_gaps_and_omissions_then_drain_closure() {
+        let items = Arc::new(SessionItems::new("s".into(), None));
+        assert_eq!(
+            items.next_after(1).await.unwrap_err(),
+            ReadError::Ahead {
+                after: 1,
+                latest: 0
+            }
+        );
+        // A blocked read is cancellation-safe, and every subscriber wakes.
+        let a_items = Arc::clone(&items);
+        let b_items = Arc::clone(&items);
+        let a = tokio::spawn(async move { a_items.next_after(0).await });
+        let b = tokio::spawn(async move { b_items.next_after(0).await });
+        items.record("native", json!({"unknown":[null, true]}), Some("turn"));
+        assert_eq!(a.await.unwrap().unwrap(), b.await.unwrap().unwrap());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), items.next_after(1))
+                .await
+                .is_err()
+        );
+        for n in 0..MAX_ITEMS {
+            items.record("native", json!(n), None);
+        }
+        assert_eq!(
+            items.next_after(0).await.unwrap_err(),
+            ReadError::Lagged {
+                after: 0,
+                oldest: 2,
+                latest: (MAX_ITEMS + 1) as u64
+            }
+        );
+        assert_eq!(items.next_after(1).await.unwrap().unwrap()["cursor"], 2);
+        let last = (MAX_ITEMS + 1) as u64;
+        items.record("native", json!("x".repeat(MAX_ITEM_BYTES)), None);
+        let omitted = items.next_after(last).await.unwrap().unwrap();
+        assert_eq!(omitted["kind"], "omitted");
+        assert_eq!(omitted["data"]["kind"], "native");
+        // An omission marker is delivered; it is not a silently skipped cursor.
+        assert_eq!(omitted["cursor"], last + 1);
+        let waiting_items = Arc::clone(&items);
+        let waiting = tokio::spawn(async move { waiting_items.next_after(last + 1).await });
+        items.finish(Some("fixture failure".into()));
+        let closed = waiting.await.unwrap().unwrap().unwrap();
+        assert_eq!(closed["kind"], "session_stream_closed");
+        assert_eq!(closed["data"]["error"], "fixture failure");
+        items.finish(None); // Closure is idempotent and seals all producers.
+        items.record("too_late", json!({}), None);
+        assert!(items.next_after(last + 2).await.unwrap().is_none());
     }
 }

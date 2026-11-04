@@ -38,6 +38,12 @@ done"#)
             fi
           fi"#);
         let source = source.replace("            finish interrupted ''\n          elif", "            finish interrupted ''\n            : > \"$DUE_SESSION_FIXTURE_DIR/interrupt-seen\"\n            while [ ! -f \"$DUE_SESSION_FIXTURE_DIR/release-ack\" ]; do /bin/sleep 0.01; done\n          elif");
+        // Reuse the same request ID within one native turn, after resolution.
+        let source = source.replace("finish completed 'resolved before start'", r#"if [ -f "$DUE_SESSION_FIXTURE_DIR/reissue" ]; then
+            : > "$DUE_SESSION_FIXTURE_DIR/resolved"
+            while [ ! -f "$DUE_SESSION_FIXTURE_DIR/release-reissue" ]; do /bin/sleep 0.01; done
+            emit '{"method":"item/commandExecution/requestApproval","id":17,"params":{"threadId":"'"$native"'","turnId":"'"$turn"'","command":"second generation"}}'
+          else finish completed 'resolved before start'; fi"#);
         fs::write(root.join("native"), source).unwrap();
         let binary = root.join("provider");
         fs::write(
@@ -411,7 +417,9 @@ async fn unsupported_interactions_fail_explicitly_without_approval_or_harming_si
         let good = Fixture::new(provider);
         let engine = engine();
         let held = engine.spawn(good.assignment("hold")).await.unwrap();
-        let ask = engine.spawn(fixture.assignment("ask")).await.unwrap();
+        let mut assignment = fixture.assignment("ask");
+        assignment.worker.interaction_mode = InteractionMode::Reject;
+        let ask = engine.spawn(assignment).await.unwrap();
         let result = finished(&engine, &ask).await;
         assert_eq!(
             result.result.as_ref().unwrap().error.as_ref().unwrap().kind,
@@ -1057,4 +1065,445 @@ async fn shutdown_closes_admission_before_its_cleanup_owner_is_scheduled() {
     );
     shutdown.await.unwrap();
     assert!(!fixture.directory.path().join("pid").exists());
+}
+
+async fn approval(engine: &Engine, run: &RunRef) -> InteractionRef {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = engine.inspect(run).unwrap();
+            assert_ne!(snapshot.state, RunState::Finished, "{snapshot:?}");
+            if snapshot.state == RunState::AwaitingInput && !snapshot.interactions.is_empty() {
+                return snapshot.interactions[0].id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+fn decision(provider: Provider, allow: bool) -> serde_json::Value {
+    match (provider, allow) {
+        (Provider::Claude, true) => serde_json::json!({"behavior":"allow"}),
+        (Provider::Claude, false) => {
+            serde_json::json!({"behavior":"deny","message":"caller declined"})
+        }
+        (Provider::Codex, true) => serde_json::json!({"decision":"accept"}),
+        (Provider::Codex, false) => serde_json::json!({"decision":"decline"}),
+    }
+}
+async fn stream_through(stream: &mut SessionStream, kind: &str) -> Vec<SessionItem> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut items = Vec::new();
+        loop {
+            let item = stream
+                .next()
+                .await
+                .unwrap()
+                .expect("premature stream closure");
+            let found = item.kind == kind;
+            items.push(item);
+            if found {
+                return items;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_approval_and_denial_preserve_live_session_and_raw_items() {
+    for provider in [Provider::Claude, Provider::Codex] {
+        let fixture = Fixture::new(provider);
+        let engine = engine();
+        let first = engine.spawn(fixture.assignment("ask")).await.unwrap();
+        let session = engine.inspect(&first).unwrap().session;
+        let mut stream = engine.subscribe(&session, 0).unwrap();
+        let token = approval(&engine, &first).await;
+        let items = stream_through(&mut stream, "interaction").await;
+        let item = items.last().unwrap();
+        assert_eq!(item.interaction.as_ref(), Some(&token));
+        assert_eq!(item.run.as_ref(), Some(&first));
+        assert!(item.data["request"].is_object());
+        // Bad responses do not consume the pending generation.
+        for bad in [serde_json::json!(null), serde_json::json!([])] {
+            assert_eq!(
+                engine.respond(&token, bad).await.unwrap_err().kind,
+                ErrorKind::InvalidInput
+            );
+        }
+        if provider == Provider::Claude {
+            for bad in [
+                serde_json::json!({"behavior":"allow","updated_input":[]}),
+                serde_json::json!({"behavior":"allow","typo":true}),
+            ] {
+                assert_eq!(
+                    engine.respond(&token, bad).await.unwrap_err().kind,
+                    ErrorKind::InvalidInput
+                );
+            }
+        }
+        let other = self::engine();
+        assert_eq!(
+            other
+                .respond(&token, decision(provider, true))
+                .await
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnknownRun
+        );
+        other.shutdown().await.unwrap();
+        assert_eq!(
+            engine
+                .respond(&token, decision(provider, true))
+                .await
+                .unwrap()
+                .interaction,
+            token
+        );
+        let original = finished(&engine, &first).await;
+        assert_eq!(original.result.as_ref().unwrap().text, "permission allowed");
+        assert!(original.interactions.is_empty());
+        assert_eq!(
+            engine
+                .respond(&token, decision(provider, true))
+                .await
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnknownInteraction
+        );
+        stream_through(&mut stream, "run_finished").await;
+        let second = engine
+            .follow_up(session.clone(), FollowUp::new("ask"))
+            .await
+            .unwrap();
+        let second_token = approval(&engine, &second).await;
+        assert_ne!(token, second_token); // Native request IDs are deliberately reused.
+        assert_eq!(
+            engine
+                .respond(&token, decision(provider, true))
+                .await
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnknownInteraction
+        );
+        engine
+            .respond(&second_token, decision(provider, false))
+            .await
+            .unwrap();
+        assert_eq!(
+            finished(&engine, &second)
+                .await
+                .result
+                .as_ref()
+                .unwrap()
+                .text,
+            "permission denied"
+        );
+        assert_eq!(original.result.as_ref().unwrap().text, "permission allowed");
+        stream_through(&mut stream, "run_finished").await;
+        engine.shutdown().await.unwrap();
+        let tail = stream_through(&mut stream, "session_stream_closed").await;
+        assert!(tail.last().unwrap().run.is_none());
+        assert!(stream.next().await.unwrap().is_none());
+        reaped(fixture.pid()).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streams_replay_full_native_payloads_across_turns_with_independent_cursors() {
+    for provider in [Provider::Claude, Provider::Codex] {
+        let fixture = Fixture::new(provider);
+        let engine = engine();
+        let first = engine
+            .spawn(fixture.assignment("partial-payload"))
+            .await
+            .unwrap();
+        let session = engine.inspect(&first).unwrap().session;
+        let mut a = engine.subscribe(&session, 0).unwrap();
+        let mut b = engine.subscribe(&session, 0).unwrap();
+        let items = stream_through(&mut a, "run_finished").await;
+        assert_eq!(items[0].kind, "run_admitted");
+        let opened = items
+            .iter()
+            .find(|item| item.kind == "session_opened")
+            .unwrap();
+        assert_eq!(opened.data["capabilities"]["session_stream"], true);
+        let raw = serde_json::to_string(&items).unwrap();
+        assert!(raw.contains("fixturePayload"), "{raw}");
+        assert!(raw.contains("future"), "{raw}");
+        assert!(raw.contains("line one\\nline two"), "{raw}");
+        if provider == Provider::Claude {
+            assert!(raw.contains("fixturePartial"), "{raw}");
+            assert!(raw.contains("partial chunk\\nsecond line"), "{raw}");
+        } else {
+            assert!(raw.contains("fixtureResponse"), "{raw}");
+            assert!(raw.contains("fixture/idle"), "{raw}");
+        }
+        assert!(items.iter().all(
+            |item| item.session == session && item.run.as_ref().is_none_or(|run| run == &first)
+        ));
+        assert!(
+            items
+                .windows(2)
+                .all(|pair| pair[1].cursor == pair[0].cursor + 1)
+        );
+        assert_eq!(
+            stream_through(&mut b, "run_finished")
+                .await
+                .iter()
+                .map(|i| i.cursor)
+                .collect::<Vec<_>>(),
+            items.iter().map(|i| i.cursor).collect::<Vec<_>>()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), a.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(a.cursor(), items.last().unwrap().cursor);
+        drop(b);
+        let mut resumed = engine.subscribe(&session, a.cursor()).unwrap();
+        let second = engine
+            .follow_up(session.clone(), FollowUp::new("next"))
+            .await
+            .unwrap();
+        let next = stream_through(&mut resumed, "run_finished").await;
+        assert_eq!(next.first().unwrap().cursor, a.cursor() + 1);
+        assert!(
+            next.iter()
+                .all(|item| item.run.as_ref().is_none_or(|run| run == &second))
+        );
+        assert_eq!(
+            finished(&engine, &second)
+                .await
+                .result
+                .as_ref()
+                .unwrap()
+                .text,
+            "turn 2"
+        );
+        assert_eq!(
+            engine.subscribe(&session, u64::MAX).err().unwrap().kind,
+            ErrorKind::InvalidInput
+        );
+        engine.shutdown().await.unwrap();
+        // Late readers retain history after manager close removed its read-side slot.
+        let mut late = engine.subscribe(&session, 0).unwrap();
+        let all = stream_through(&mut late, "session_stream_closed").await;
+        assert_eq!(all.iter().filter(|i| i.kind == "run_finished").count(), 2);
+        assert!(late.next().await.unwrap().is_none());
+        reaped(fixture.pid()).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_pending_approvals_settles_without_granting_permission() {
+    for provider in [Provider::Claude, Provider::Codex] {
+        for shutdown in [false, true] {
+            let fixture = Fixture::new(provider);
+            let engine = engine();
+            let run = engine.spawn(fixture.assignment("ask")).await.unwrap();
+            let token = approval(&engine, &run).await;
+            if shutdown {
+                engine.shutdown().await.unwrap();
+            } else {
+                engine.interrupt(&run).await.unwrap();
+            }
+            let final_state = finished(&engine, &run).await;
+            assert_eq!(
+                final_state
+                    .result
+                    .as_ref()
+                    .unwrap()
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .kind,
+                RunErrorKind::Cancelled
+            );
+            assert!(final_state.interactions.is_empty());
+            let error = engine
+                .respond(&token, decision(provider, true))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.kind,
+                if shutdown {
+                    ErrorKind::Closed
+                } else {
+                    ErrorKind::UnknownInteraction
+                }
+            );
+            assert!(!fixture.input().contains("\"behavior\":\"allow\""));
+            assert!(!fixture.input().contains("\"decision\":\"accept\""));
+            engine.shutdown().await.unwrap();
+            reaped(fixture.pid()).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_approval_submissions_deliver_at_most_once() {
+    for provider in [Provider::Claude, Provider::Codex] {
+        let fixture = Fixture::new(provider);
+        let engine = engine();
+        let run = engine.spawn(fixture.assignment("ask")).await.unwrap();
+        let token = approval(&engine, &run).await;
+        let (a, b) = tokio::join!(
+            engine.respond(&token, decision(provider, true)),
+            engine.respond(&token, decision(provider, true))
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        assert!(matches!(
+            a.err().or_else(|| b.err()).unwrap().kind,
+            ErrorKind::Busy | ErrorKind::UnknownInteraction
+        ));
+        assert_eq!(
+            finished(&engine, &run).await.result.as_ref().unwrap().text,
+            "permission allowed"
+        );
+        let key = if provider == Provider::Claude {
+            "\"behavior\":\"allow\""
+        } else {
+            "\"decision\":\"accept\""
+        };
+        assert_eq!(
+            fixture.input().lines().filter(|l| l.contains(key)).count(),
+            1
+        );
+        engine.shutdown().await.unwrap();
+        reaped(fixture.pid()).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolved_or_completed_requests_cannot_be_answered_from_replay() {
+    for prompt in ["ask-resolved", "ask-completed"] {
+        let fixture = Fixture::new(Provider::Codex);
+        let engine = engine();
+        let run = engine.spawn(fixture.assignment(prompt)).await.unwrap();
+        let snapshot = finished(&engine, &run).await;
+        let mut stream = engine.subscribe(&snapshot.session, 0).unwrap();
+        let items = stream_through(&mut stream, "run_finished").await;
+        let token = items.iter().find_map(|i| i.interaction.as_ref()).unwrap();
+        assert_eq!(
+            engine
+                .respond(token, decision(Provider::Codex, true))
+                .await
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnknownInteraction
+        );
+        assert!(snapshot.interactions.is_empty());
+        assert!(!fixture.input().contains("\"decision\":\"accept\""));
+        let next = engine
+            .follow_up(snapshot.session, FollowUp::new("next"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            finished(&engine, &next)
+                .await
+                .result
+                .as_ref()
+                .unwrap()
+                .status,
+            Status::Succeeded
+        ));
+        engine.shutdown().await.unwrap();
+        reaped(fixture.pid()).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_preserves_admission_and_terminal_failure_when_native_open_fails() {
+    let fixture = Fixture::new(Provider::Codex);
+    fs::write(fixture.directory.path().join("native"), "exit 17\n").unwrap();
+    let engine = engine();
+    let run = engine.spawn(fixture.assignment("first")).await.unwrap();
+    let snapshot = finished(&engine, &run).await;
+    assert!(snapshot.result.as_ref().unwrap().error.is_some());
+    let mut stream = engine.subscribe(&snapshot.session, 0).unwrap();
+    let items = stream_through(&mut stream, "session_stream_closed").await;
+    assert_eq!(items[0].kind, "run_admitted");
+    assert!(
+        items
+            .iter()
+            .any(|i| i.kind == "run_finished" && i.run.as_ref() == Some(&run))
+    );
+    assert!(stream.next().await.unwrap().is_none());
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_turn_reused_native_request_id_cannot_accept_an_old_generation() {
+    let fixture = Fixture::new(Provider::Codex);
+    fs::write(fixture.directory.path().join("reissue"), "").unwrap();
+    let engine = engine();
+    let run = engine
+        .spawn(fixture.assignment("ask-resolved"))
+        .await
+        .unwrap();
+    let session = engine.inspect(&run).unwrap().session;
+    let mut stream = engine.subscribe(&session, 0).unwrap();
+    let items = stream_through(&mut stream, "interaction").await;
+    let old = items.last().unwrap().interaction.clone().unwrap();
+    stream_through(&mut stream, "interaction_resolved").await;
+    assert_eq!(
+        engine
+            .respond(&old, decision(Provider::Codex, true))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnknownInteraction
+    );
+    fs::write(fixture.directory.path().join("release-reissue"), "").unwrap();
+    let items = stream_through(&mut stream, "interaction").await;
+    let current = items.last().unwrap().interaction.clone().unwrap();
+    assert_ne!(old, current);
+    assert_eq!(
+        engine
+            .respond(&old, decision(Provider::Codex, true))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnknownInteraction
+    );
+    engine
+        .respond(&current, decision(Provider::Codex, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        finished(&engine, &run).await.result.as_ref().unwrap().text,
+        "permission denied"
+    );
+    assert!(!fixture.input().contains("\"decision\":\"accept\""));
+    engine.shutdown().await.unwrap();
+    reaped(fixture.pid()).await;
+}
+
+#[tokio::test]
+async fn dropping_a_submitted_response_future_keeps_delivery_ownership() {
+    use std::{future::Future, task::Poll};
+    for provider in [Provider::Claude, Provider::Codex] {
+        let fixture = Fixture::new(provider);
+        let engine = engine();
+        let run = engine.spawn(fixture.assignment("ask")).await.unwrap();
+        let token = approval(&engine, &run).await;
+        let mut response = Box::pin(engine.respond(&token, decision(provider, false)));
+        // On this current-thread runtime the independent owner cannot execute
+        // until we yield, so this deterministically drops during submission.
+        std::future::poll_fn(|cx| {
+            assert!(response.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(response);
+        assert_eq!(
+            finished(&engine, &run).await.result.as_ref().unwrap().text,
+            "permission denied"
+        );
+        engine.shutdown().await.unwrap();
+        reaped(fixture.pid()).await;
+    }
 }

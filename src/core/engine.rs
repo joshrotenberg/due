@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -16,7 +16,7 @@ use tokio::{
 use super::*;
 use crate::{
     result::{ErrorKind as RunErrorKind, RunError, RunResult, Status},
-    session::{Manager, OpenOptions},
+    session::{Manager, OpenOptions, SessionItems},
 };
 
 // The wrapper open operation includes pipe creation and native initialization.
@@ -33,6 +33,7 @@ struct Worker {
     native: Mutex<Option<String>>,
     unavailable: AtomicBool,
     cleanup: AsyncMutex<Option<Result<(), String>>>,
+    items: Arc<SessionItems>,
 }
 struct Session {
     worker: Arc<Worker>,
@@ -41,6 +42,9 @@ struct Session {
 struct Run {
     snapshot: RunSnapshot,
     cancel: watch::Sender<bool>,
+    responses: HashSet<InteractionRef>,
+    accepting_responses: bool,
+    response_error: Option<String>,
 }
 #[derive(Default)]
 struct State {
@@ -171,16 +175,18 @@ impl Engine {
                 }
                 let (options, native) = fresh.expect("new worker options");
                 let id = SessionRef(uuid::Uuid::new_v4().to_string());
+                let items = Arc::new(SessionItems::new(id.0.clone(), None));
                 state.sessions.insert(
                     id.clone(),
                     Session {
                         worker: Arc::new(Worker {
                             options,
-                            manager: Manager::default(),
+                            manager: Manager::with_items(Arc::clone(&items)),
                             handle: Mutex::new(None),
                             native: Mutex::new(native),
                             unavailable: AtomicBool::new(false),
                             cleanup: AsyncMutex::new(None),
+                            items,
                         }),
                         active: None,
                     },
@@ -226,9 +232,24 @@ impl Engine {
             state: RunState::Starting,
             saved_session: saved_session(&worker),
             result: None,
+            interactions: Vec::new(),
         };
         let (cancel, receiver) = watch::channel(false);
-        state.runs.insert(run.clone(), Run { snapshot, cancel });
+        state.runs.insert(
+            run.clone(),
+            Run {
+                snapshot,
+                cancel,
+                responses: HashSet::new(),
+                accepting_responses: true,
+                response_error: None,
+            },
+        );
+        worker.items.record(
+            "run_admitted",
+            serde_json::json!({"provider":worker.options.provider}),
+            Some(&run.0),
+        );
         drop(state);
         let inner = Arc::clone(&self.inner);
         let id = run.clone();
@@ -261,6 +282,13 @@ impl Engine {
                     )
                 }
             };
+            if let Some(error) = inner.finish_responses(&id).await {
+                let cleanup = close_worker(&worker, inner.limits.settlement_timeout).await;
+                result = result.fail(RunError::new(
+                    RunErrorKind::Protocol,
+                    format!("{error}; cleanup: {cleanup:?}"),
+                ));
+            }
             result.run_id = Some(id.0.clone());
             result.duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
             let mut state = inner.state.lock().unwrap();
@@ -268,9 +296,20 @@ impl Engine {
             let entry = state.sessions.get_mut(&session).unwrap();
             entry.active = None;
             let snapshot = &mut state.runs.get_mut(&id).unwrap().snapshot;
+            worker.items.record(
+                "run_finished",
+                serde_json::to_value(&result).expect("serializable result"),
+                Some(&id.0),
+            );
+            if worker.unavailable.load(Ordering::Acquire) {
+                worker
+                    .items
+                    .finish(result.error.as_ref().map(|error| error.message.clone()));
+            }
             snapshot.state = RunState::Finished;
             snapshot.saved_session = saved_session(&worker);
             snapshot.result = Some(Arc::new(result));
+            snapshot.interactions.clear();
             drop(state);
             inner.changed.notify_waiters();
         });
@@ -280,6 +319,169 @@ impl Engine {
     /// Return a non-consuming snapshot, including retained results of older turns.
     pub fn inspect(&self, run: &RunRef) -> Result<RunSnapshot, Error> {
         self.inner.inspect(run)
+    }
+
+    /// Subscribe to a full session journal from an exclusive cursor (zero for replay).
+    /// Each reader is independent; it never blocks providers or cancels work.
+    /// Retained items remain readable after shutdown; late readers can see explicit gaps.
+    pub fn subscribe(&self, session: &SessionRef, after: u64) -> Result<SessionStream, Error> {
+        let state = self.inner.state.lock().unwrap();
+        let entry = state.sessions.get(session).ok_or_else(|| {
+            Error::new(ErrorKind::UnknownSession, "unknown session in this engine")
+        })?;
+        entry.worker.items.validate_cursor(after).map_err(|error| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid session cursor: {error:?}"),
+            )
+        })?;
+        Ok(SessionStream {
+            session: session.clone(),
+            items: Arc::clone(&entry.worker.items),
+            after,
+        })
+    }
+
+    /// Respond to an exact pending generation using a provider-native JSON object.
+    /// Acceptance is not tool completion. Once submitted, dropping this future
+    /// leaves response acknowledgement ownership with the core; never auto-retry.
+    pub async fn respond(
+        &self,
+        interaction: &InteractionRef,
+        response: serde_json::Value,
+    ) -> Result<ResponseReceipt, Error> {
+        if serde_json::to_vec(&response).map_or(true, |bytes| bytes.len() > MAX_INPUT) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "native response exceeds 1 MiB",
+            ));
+        }
+        let (worker, handle) = {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.closing {
+                return Err(Error::new(ErrorKind::Closed, "engine is shutting down"));
+            }
+            let run = state.runs.get(&interaction.run).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::UnknownRun,
+                    "unknown interaction run in this engine",
+                )
+            })?;
+            if run.snapshot.result.is_some() || !run.accepting_responses {
+                return Err(Error::new(
+                    ErrorKind::UnknownInteraction,
+                    "run is finished or retiring",
+                ));
+            }
+            let worker = Arc::clone(&state.sessions[&run.snapshot.session].worker);
+            if worker.options.interaction_mode == InteractionMode::Reject {
+                return Err(Error::new(
+                    ErrorKind::UnknownInteraction,
+                    "worker rejects interactions",
+                ));
+            }
+            let handle = worker.handle.lock().unwrap().clone().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::UnknownInteraction,
+                    "worker has no pending interaction",
+                )
+            })?;
+            let pending = worker
+                .manager
+                .interactions(&handle, &interaction.run.0)
+                .map_err(|error| Error::new(ErrorKind::UnknownInteraction, error))?;
+            if !pending.iter().any(|(id, cursor, _)| {
+                id == &interaction.request_id && *cursor == interaction.cursor
+            }) {
+                return Err(Error::new(
+                    ErrorKind::UnknownInteraction,
+                    "interaction is no longer current",
+                ));
+            }
+            Manager::validate_response(worker.options.provider, &response)
+                .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+            if !state
+                .runs
+                .get_mut(&interaction.run)
+                .unwrap()
+                .responses
+                .insert(interaction.clone())
+            {
+                return Err(Error::new(
+                    ErrorKind::Busy,
+                    "a response for this generation is already pending",
+                ));
+            }
+            (worker, handle)
+        };
+        let inner = Arc::clone(&self.inner);
+        let interaction = interaction.clone();
+        let owner = self.inner.runtime.spawn(async move {
+            let task_worker = Arc::clone(&worker);
+            let task_interaction = interaction.clone();
+            let budget = inner.limits.settlement_timeout;
+            // The independent owner always releases the reservation, even if the
+            // native operation panics. Dropping the caller cannot abandon it.
+            let outcome = tokio::spawn(async move {
+                timeout(
+                    budget,
+                    task_worker.manager.reply_checked(
+                        &handle,
+                        &task_interaction.run.0,
+                        &task_interaction.request_id,
+                        Some(task_interaction.cursor),
+                        response,
+                    ),
+                )
+                .await
+            })
+            .await;
+            let result = match outcome {
+                Ok(Ok(Ok(_))) => Ok(ResponseReceipt {
+                    interaction: interaction.clone(),
+                }),
+                Ok(Ok(Err(error))) if stale_reply(&error) => {
+                    Err(Error::new(ErrorKind::UnknownInteraction, error))
+                }
+                Ok(Ok(Err(error))) => Err(Error::new(ErrorKind::ResponseRejected, error)),
+                Ok(Err(_)) => Err(Error::new(
+                    ErrorKind::ResponseRejected,
+                    "native response acknowledgement timed out; delivery unconfirmed",
+                )),
+                Err(error) => Err(Error::new(
+                    ErrorKind::ResponseRejected,
+                    format!("native response operation failed; delivery unconfirmed: {error}"),
+                )),
+            };
+            let mut state = inner.state.lock().unwrap();
+            let run = state.runs.get_mut(&interaction.run).unwrap();
+            if let Err(error) = &result {
+                worker.items.record(
+                    "interaction_response_failed",
+                    serde_json::json!({
+                        "request_id": interaction.request_id,
+                        "interaction_cursor": interaction.cursor,
+                        "message": error.message,
+                    }),
+                    Some(&interaction.run.0),
+                );
+                if error.kind == ErrorKind::ResponseRejected {
+                    run.response_error
+                        .get_or_insert_with(|| error.message.clone());
+                    run.cancel.send_replace(true);
+                }
+            }
+            run.responses.remove(&interaction);
+            drop(state);
+            inner.changed.notify_waiters();
+            result
+        });
+        owner.await.map_err(|error| {
+            Error::new(
+                ErrorKind::Settlement,
+                format!("response owner failed; delivery unconfirmed: {error}"),
+            )
+        })?
     }
 
     /// Wait for any/all runs. Expiry or cancellation of this future leaves runs active.
@@ -370,8 +572,41 @@ impl Inner {
         let snapshot = &mut owned.runs.get_mut(run).unwrap().snapshot;
         snapshot.state = state;
         snapshot.saved_session = saved_session(worker);
+        if let Some(handle) = worker.handle.lock().unwrap().as_deref() {
+            snapshot.interactions = worker
+                .manager
+                .interactions(handle, &run.0)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(request_id, cursor, request)| Interaction {
+                    id: InteractionRef {
+                        run: run.clone(),
+                        request_id,
+                        cursor,
+                    },
+                    request,
+                })
+                .collect();
+        }
         drop(owned);
         self.changed.notify_waiters();
+    }
+
+    async fn finish_responses(&self, run: &RunRef) -> Option<String> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self.state.lock().unwrap();
+                let entry = state.runs.get_mut(run).unwrap();
+                entry.accepting_responses = false;
+                if entry.responses.is_empty() {
+                    return entry.response_error.clone();
+                }
+            }
+            changed.await;
+        }
     }
     async fn wait(&self, runs: &[RunRef], options: WaitOptions) -> Result<WaitResult, Error> {
         if runs.is_empty()
@@ -455,7 +690,11 @@ impl Inner {
         let mut tasks = tokio::task::JoinSet::new();
         for worker in workers {
             let bound = self.limits.settlement_timeout;
-            tasks.spawn(async move { close_worker(&worker, bound).await });
+            tasks.spawn(async move {
+                let result = close_worker(&worker, bound).await;
+                worker.items.finish(result.as_ref().err().cloned());
+                result
+            });
         }
         let mut errors = Vec::new();
         while let Some(result) = tasks.join_next().await {
@@ -553,7 +792,8 @@ fn open_options(worker: &WorkerOptions, resume: Option<String>) -> OpenOptions {
         effort: worker.effort,
         resume,
         ephemeral: worker.ephemeral,
-        stream: false,
+        // The injected core journal is always streamable, without a wire push queue.
+        stream: true,
         timeout: None,
         native_args: worker.native_args.clone(),
     }
@@ -660,21 +900,25 @@ async fn drive(
         };
         return stop_failed(inner, worker, kind, message.into()).await;
     }
-    let started = match worker.manager.start(&handle, assignment.prompt).await {
+    let started = match worker
+        .manager
+        .start_with_id(&handle, assignment.prompt, Some(id.0.clone()))
+        .await
+    {
         Ok(value) => value,
         Err(error) => return stop_failed(inner, worker, RunErrorKind::Provider, error).await,
     };
     let turn = started["turn_id"].as_str().unwrap();
     inner.update(id, worker, RunState::Running);
-    let mut cursor = 0;
+    let mut revision = None;
     loop {
         let observed = tokio::select! {
             biased;
             _ = cancel.changed() => return stop_run(inner, worker, &handle, turn, false).await,
             _ = at(deadline) => return stop_run(inner, worker, &handle, turn, true).await,
-            observed = worker.manager.read(&handle, turn, cursor, 10_000) => observed,
+            observed = worker.manager.observe(&handle, turn, revision) => observed,
         };
-        let observed = match observed {
+        let (observed, seen_revision) = match observed {
             Ok(value) => value,
             Err(error) => return stop_failed(inner, worker, RunErrorKind::Protocol, error).await,
         };
@@ -683,8 +927,16 @@ async fn drive(
         {
             return stop_failed(inner, worker, RunErrorKind::Protocol, error).await;
         }
-        inner.update(id, worker, RunState::Running);
-        cursor = observed["cursor"].as_u64().unwrap();
+        revision = Some(seen_revision);
+        inner.update(
+            id,
+            worker,
+            if observed["state"] == "awaiting_input" {
+                RunState::AwaitingInput
+            } else {
+                RunState::Running
+            },
+        );
         if observed["state"] == "finished" {
             let mut result = (*worker.manager.result(&handle, turn).unwrap().unwrap()).clone();
             if observed["session_error"].is_string()
@@ -697,14 +949,33 @@ async fn drive(
             }
             return result;
         }
-        if observed["state"] == "awaiting_input" {
-            inner.update(id, worker, RunState::AwaitingInput);
-            return stop_failed(inner, worker, RunErrorKind::Unsupported, "native interaction requires a response capability not implemented by this core spike".into()).await;
+        if observed["state"] == "awaiting_input"
+            && worker.options.interaction_mode == InteractionMode::Reject
+        {
+            return stop_failed(
+                inner,
+                worker,
+                RunErrorKind::Unsupported,
+                "native interaction rejected by this worker's interaction mode".into(),
+            )
+            .await;
         }
         if let Some(error) = observed["session_error"].as_str() {
             return stop_failed(inner, worker, RunErrorKind::Provider, error.into()).await;
         }
     }
+}
+fn stale_reply(message: &str) -> bool {
+    matches!(
+        message,
+        "unknown or finished turn"
+            | "unknown or resolved interaction"
+            | "interaction is no longer current"
+            | "Unknown or resolved interaction"
+            | "Unknown or resolved interaction ID"
+            | "No turn is waiting for an interaction"
+            | "No pending interaction"
+    )
 }
 fn before_start(worker: &Worker, timed_out: bool) -> RunResult {
     worker.unavailable.store(true, Ordering::Release);

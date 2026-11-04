@@ -39,6 +39,7 @@ enum Command {
     Respond {
         id: String,
         response: Value,
+        expected: Option<(String, u64)>,
         reply: Reply,
     },
     Close,
@@ -165,12 +166,18 @@ impl Backend {
         Ok(answer)
     }
 
-    pub async fn reply(&mut self, request_id: &str, response: Value) -> Result<(), String> {
+    pub async fn reply(
+        &mut self,
+        request_id: &str,
+        response: Value,
+        expected: Option<(String, u64)>,
+    ) -> Result<(), String> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Respond {
                 id: request_id.into(),
                 response,
+                expected,
                 reply,
             })
             .await
@@ -331,11 +338,11 @@ async fn drive_turn(
             ),
             command = commands.recv() => match command {
                 Some(Command::Start { reply, .. }) => { let _ = reply.send(Err("A turn is already running".into())); }
-                Some(Command::Respond { id: request_id, response, reply }) => {
-                    let result = respond(session, pending, &request_id, response.clone());
+                Some(Command::Respond { id: request_id, response, expected, reply }) => {
+                    let result = respond(session, pending, &request_id, response.clone(), expected.as_ref(), sink);
                     if result.is_ok() {
                         sink.item("interaction_reply", json!({"request_id":request_id,"response":response}), Some(&id));
-                        sink.resolved(&request_id);
+                        sink.resolved_generation(&request_id, expected.as_ref().map(|(_, cursor)| *cursor));
                     }
                     let _ = reply.send(result);
                 }
@@ -424,11 +431,26 @@ enum Decision {
     Deny { message: String },
 }
 
+pub(crate) fn validate_response(value: &Value) -> Result<(), String> {
+    let decision: Decision = serde_json::from_value(value.clone())
+        .map_err(|error| format!("Invalid Claude permission response: {error}"))?;
+    if let Decision::Allow {
+        updated_input: Some(input),
+    } = decision
+        && !input.is_object()
+    {
+        return Err("updated_input must be an object".into());
+    }
+    Ok(())
+}
+
 fn respond(
     session: &DuplexSession,
     pending: &Pending,
     id: &str,
     response: Value,
+    expected: Option<&(String, u64)>,
+    sink: &EventSink,
 ) -> Result<(), String> {
     let decision = match serde_json::from_value::<Decision>(response)
         .map_err(|e| format!("Invalid Claude permission response: {e}"))?
@@ -445,6 +467,9 @@ fn respond(
         Decision::Deny { message } => PermissionDecision::Deny { message },
     };
     let mut ids = pending.lock().unwrap();
+    if expected.is_some_and(|(turn, cursor)| !sink.interaction_current(turn, id, *cursor)) {
+        return Err("interaction is no longer current".into());
+    }
     if !ids.contains(id) {
         return Err("Unknown or resolved interaction".into());
     }
