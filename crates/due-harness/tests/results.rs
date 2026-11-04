@@ -128,6 +128,68 @@ fn candidate_result_is_withheld_when_cleanup_or_cancellation_fails() {
 }
 
 #[test]
+fn caught_transport_failure_is_not_cleanup_but_real_cleanup_errors_are_retained() {
+    for exit in [0, 7] {
+        let fixture = Fixture::new(exit);
+        let outcome = run_with(fixture.options(""), "test", true, |host, _, _, _| {
+            let error = host.send("{}\n{}").unwrap_err();
+            assert_eq!(host.send("{}"), Err(error));
+            Ok(json!({"accepted":true}))
+        })
+        .unwrap();
+        let primary = "request must be one line of at most 1 MiB";
+        let error = outcome.error.as_deref().unwrap();
+        assert_eq!(error.matches(primary).count(), 1, "{error}");
+        assert!(outcome.result.is_null());
+        let process: Value = serde_json::from_slice(
+            &fs::read(fixture.dir.path().join("evidence/receipt.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(process["transport_error"], primary);
+        assert_eq!(process["settled"], true);
+        assert_eq!(process["forced_kill"], false);
+        assert_eq!(process["exit_code"], exit);
+        assert_eq!(process["rpc_shutdown_confirmed"], exit == 0);
+        if exit == 0 {
+            assert_eq!(error, primary);
+            assert!(process["cleanup_error"].is_null());
+        } else {
+            let cleanup = process["cleanup_error"].as_str().unwrap();
+            assert!(cleanup.contains("Due child exited unsuccessfully"));
+            assert_eq!(error, format!("{primary}; cleanup: {cleanup}"));
+        }
+        let workflow: Value = serde_json::from_slice(
+            &fs::read(fixture.dir.path().join("evidence/workflow.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(workflow["status"], "failed");
+        assert_eq!(workflow["error"], error);
+        assert!(workflow["result"].is_null());
+    }
+}
+
+#[test]
+fn transport_failure_first_observed_during_settlement_still_withholds_result() {
+    let fixture = Fixture::new(0);
+    let mut options = fixture.options("");
+    options.due = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bridge-peer.sh");
+    fs::write(
+        fixture.dir.path().join("body.sh"),
+        "while IFS= read -r line; do :; done; printf '\\377\\n'\n",
+    )
+    .unwrap();
+    let outcome = run_with(options, "test", false, |_, _, _, _| {
+        Ok(json!({"accepted":true}))
+    })
+    .unwrap();
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("RPC stdout contains malformed UTF-8")
+    );
+    assert!(outcome.result.is_null());
+}
+
+#[test]
 fn invalid_inputs_reject_before_creating_evidence_or_spawning_due() {
     for scenario in ["source", "args", "json", "zero", "overflow"] {
         let fixture = Fixture::new(0);

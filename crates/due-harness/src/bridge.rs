@@ -62,6 +62,23 @@ impl State {
     }
 }
 
+/// Transport failure and actual settlement failure have separate provenance.
+#[derive(Clone)]
+pub(crate) struct Settlement {
+    pub transport_error: Option<String>,
+    pub cleanup_error: Option<String>,
+}
+
+impl Settlement {
+    fn result(self) -> Result<(), String> {
+        match (self.transport_error, self.cleanup_error) {
+            (None, None) => Ok(()),
+            (Some(error), None) | (None, Some(error)) => Err(error),
+            (Some(error), Some(cleanup)) => Err(format!("{error}; {cleanup}")),
+        }
+    }
+}
+
 /// Synchronous embedding facade; the reader continues while guest code runs.
 pub struct Bridge {
     runtime: Runtime,
@@ -74,7 +91,7 @@ pub struct Bridge {
     evidence: PathBuf,
     pid: u32,
     shutdown_grace: Duration,
-    finished: Option<Result<(), String>>,
+    finished: Option<Settlement>,
 }
 
 impl Bridge {
@@ -141,7 +158,11 @@ impl Bridge {
 
     /// The first transport failure remains authoritative even if a guest catches it.
     pub fn error(&self) -> Option<String> {
-        self.state.error()
+        self.state.error().or_else(|| {
+            self.finished
+                .as_ref()
+                .and_then(|settlement| settlement.cleanup_error.clone())
+        })
     }
 
     pub fn check(&self) -> Result<(), String> {
@@ -226,6 +247,11 @@ impl Bridge {
     /// Remaining frames are captured but no longer delivered to the guest.
     /// A forced kill is recorded as a failure, even if reaping succeeds.
     pub fn finish(&mut self) -> Result<(), String> {
+        self.settle().result()
+    }
+
+    /// Keep sticky transport failures separate from errors encountered settling.
+    pub(crate) fn settle(&mut self) -> Settlement {
         if let Some(result) = &self.finished {
             return result.clone();
         }
@@ -233,36 +259,37 @@ impl Bridge {
         self.input.take();
         let mut forced_kill = false;
         let mut status = None;
+        let mut cleanup_errors = Vec::new();
         self.runtime.block_on(async {
             match timeout(self.shutdown_grace, self.child.wait()).await {
                 Ok(Ok(exit)) => status = Some(exit),
-                Ok(Err(error)) => self.state.fail(format!("wait for Due child: {error}")),
+                Ok(Err(error)) => cleanup_errors.push(format!("wait for Due child: {error}")),
                 Err(_) => {
-                    self.state
-                        .fail("Due child did not exit within its RPC shutdown grace after stdin closed; forced kill");
+                    cleanup_errors.push(
+                        "Due child did not exit within its RPC shutdown grace after stdin closed; forced kill".into());
                 }
             }
             // Also attempt settlement after an unexpected wait error.
             if status.is_none() {
                 forced_kill = true;
+                cleanup_errors.push(FORCED_TERMINATION.into());
                 if let Err(error) = self.child.start_kill() {
-                    self.state.fail(format!("kill Due child: {error}"));
+                    cleanup_errors.push(format!("kill Due child: {error}"));
                 }
                 match timeout(SETTLEMENT_TIMEOUT, self.child.wait()).await {
                     Ok(Ok(exit)) => status = Some(exit),
-                    Ok(Err(error)) => self.state.fail(format!("reap Due child: {error}")),
-                    Err(_) => self.state.fail("Due child did not settle after kill"),
+                    Ok(Err(error)) => cleanup_errors.push(format!("reap Due child: {error}")),
+                    Err(_) => cleanup_errors.push("Due child did not settle after kill".into()),
                 }
             }
             if let Some(mut reader) = self.reader.take() {
                 match timeout(SETTLEMENT_TIMEOUT, &mut reader).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => self
-                        .state
-                        .fail(format!("stdout reader task failed: {error}")),
+                    Ok(Err(error)) => cleanup_errors
+                        .push(format!("stdout reader task failed: {error}")),
                     Err(_) => {
-                        self.state
-                            .fail("stdout did not close after Due child settlement");
+                        cleanup_errors
+                            .push("stdout did not close after Due child settlement".into());
                         reader.abort();
                         let _ = reader.await;
                     }
@@ -276,9 +303,12 @@ impl Bridge {
         if let Some(exit) = status
             && !exit.success()
         {
-            self.state
-                .fail(format!("Due child exited unsuccessfully: {exit}"));
+            cleanup_errors.push(format!("Due child exited unsuccessfully: {exit}"));
         }
+        let mut settlement = Settlement {
+            transport_error: self.state.error(),
+            cleanup_error: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; ")),
+        };
         let receipt = serde_json::json!({
             "pid": self.pid,
             "exit_code": status.and_then(|s| s.code()),
@@ -286,25 +316,18 @@ impl Bridge {
             "settled": status.is_some(),
             "forced_kill": forced_kill,
             "rpc_shutdown_confirmed": !forced_kill && status.is_some_and(|s| s.success()),
-            "cleanup_error": forced_kill.then_some(FORCED_TERMINATION),
-            "transport_error": self.error(),
+            "cleanup_error": settlement.cleanup_error,
+            "transport_error": settlement.transport_error,
             "raw_bytes": fs::metadata(self.evidence.join("stdout.bin")).map(|m| m.len()).unwrap_or(self.state.captured_bytes.load(Ordering::Acquire) as u64),
         });
         if let Err(error) = private_file(&self.evidence.join("receipt.json"))
             .and_then(|mut file| writeln!(file, "{receipt}").map_err(|e| e.to_string()))
         {
-            self.state.fail(format!("write bridge receipt: {error}"));
+            cleanup_errors.push(format!("write bridge receipt: {error}"));
+            settlement.cleanup_error = Some(cleanup_errors.join("; "));
         }
-        // A sticky earlier transport error must not hide loss of native cleanup
-        // ownership when Due itself had to be killed. `settled` only names Due.
-        let result = match (self.check(), forced_kill) {
-            (Ok(()), false) => Ok(()),
-            (Err(error), false) => Err(error),
-            (Ok(()), true) => Err(FORCED_TERMINATION.into()),
-            (Err(error), true) => Err(format!("{error}; {FORCED_TERMINATION}")),
-        };
-        self.finished = Some(result.clone());
-        result
+        self.finished = Some(settlement.clone());
+        settlement
     }
 }
 
@@ -655,8 +678,18 @@ mod tests {
     fn nonzero_exit_is_not_successful_cleanup() {
         let fixture = Fixture::new("while IFS= read -r line; do :; done; exit 7");
         let mut bridge = fixture.spawn();
-        assert!(bridge.finish().unwrap_err().contains("unsuccessfully"));
+        let error = bridge.finish().unwrap_err();
+        assert!(error.contains("unsuccessfully"));
+        assert_eq!(bridge.check(), Err(error.clone()));
+        assert_eq!(bridge.finish(), Err(error));
         assert_eq!(fixture.receipt()["exit_code"], 7);
+        assert!(fixture.receipt()["transport_error"].is_null());
+        assert!(
+            fixture.receipt()["cleanup_error"]
+                .as_str()
+                .unwrap()
+                .contains("unsuccessfully")
+        );
     }
 
     #[test]
@@ -675,7 +708,12 @@ mod tests {
         assert_eq!(fixture.receipt()["forced_kill"], true);
         assert_eq!(fixture.receipt()["settled"], true);
         assert_eq!(fixture.receipt()["rpc_shutdown_confirmed"], false);
-        assert_eq!(fixture.receipt()["cleanup_error"], FORCED_TERMINATION);
+        assert!(
+            fixture.receipt()["cleanup_error"]
+                .as_str()
+                .unwrap()
+                .contains(FORCED_TERMINATION)
+        );
         assert_eq!(fixture.receipt()["exit_signal"], 9);
     }
 
@@ -705,8 +743,35 @@ mod tests {
             fixture.receipt()["transport_error"],
             "original transport failure"
         );
-        assert_eq!(fixture.receipt()["cleanup_error"], FORCED_TERMINATION);
+        assert!(
+            fixture.receipt()["cleanup_error"]
+                .as_str()
+                .unwrap()
+                .contains(FORCED_TERMINATION)
+        );
         assert_eq!(fixture.receipt()["rpc_shutdown_confirmed"], false);
+        assert_eq!(bridge.finish(), Err(error));
+    }
+
+    #[test]
+    fn receipt_write_failure_is_retained_after_an_earlier_transport_failure() {
+        let fixture = Fixture::new("while IFS= read -r line; do :; done");
+        let mut bridge = fixture.spawn();
+        bridge.state.fail("original transport failure");
+        // Exclusive evidence creation must fail rather than overwrite this file.
+        fs::write(fixture.evidence.join("receipt.json"), "keep").unwrap();
+        let error = bridge.finish().unwrap_err();
+        assert!(error.starts_with("original transport failure"), "{error}");
+        assert!(error.contains("write bridge receipt:"), "{error}");
+        assert_eq!(
+            bridge.error().as_deref(),
+            Some("original transport failure")
+        );
+        assert_eq!(bridge.finish(), Err(error));
+        assert_eq!(
+            fs::read_to_string(fixture.evidence.join("receipt.json")).unwrap(),
+            "keep"
+        );
     }
 
     #[test]

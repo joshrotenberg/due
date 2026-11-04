@@ -810,6 +810,66 @@ fn protocol_errors_are_structured_and_connection_remains_usable() {
 }
 
 #[test]
+fn envelope_diagnostics_distinguish_batches_versions_and_malformed_json() {
+    let mut client = Client::new(false);
+    for (line, code, message) in [
+        ("{broken", -32700, "Parse error"),
+        (
+            "[]",
+            -32600,
+            "Invalid Request (one object per line; no batches)",
+        ),
+        (
+            r#"[{"jsonrpc":"2.0","id":1,"method":"missing"}]"#,
+            -32600,
+            "Invalid Request (one object per line; no batches)",
+        ),
+        (
+            "null",
+            -32600,
+            "Invalid Request (one object per line; no batches)",
+        ),
+        (
+            r#"{"id":1,"method":"missing"}"#,
+            -32600,
+            "Invalid Request (jsonrpc must be \"2.0\")",
+        ),
+        (
+            r#"{"jsonrpc":"1.0","id":1,"method":"missing"}"#,
+            -32600,
+            "Invalid Request (jsonrpc must be \"2.0\")",
+        ),
+        (
+            r#"{"jsonrpc":2,"method":"missing"}"#,
+            -32600,
+            "Invalid Request (jsonrpc must be \"2.0\")",
+        ),
+        (
+            r#"{"jsonrpc":"2.0","method":42}"#,
+            -32600,
+            "Invalid Request (invalid JSON-RPC envelope)",
+        ),
+    ] {
+        client.raw(format!("{line}\n").as_bytes());
+        assert_eq!(
+            client.response(&Value::Null, Duration::from_secs(3)),
+            json!({"jsonrpc":"2.0","id":null,"error":{"code":code,"message":message}}),
+            "{line}"
+        );
+    }
+    // Valid envelopes without IDs remain silent, including invalid params.
+    client.write(json!({"jsonrpc":"2.0","method":"missing"}));
+    client.write(json!({"jsonrpc":"2.0","method":"session.open","params":[]}));
+    assert_eq!(client.call("missing", json!({}))["error"]["code"], -32601);
+    client.eof();
+    assert!(client.messages.iter().next().is_none());
+    assert!(
+        client.responses.is_empty(),
+        "notification received a response"
+    );
+}
+
+#[test]
 fn ids_round_trip_and_notifications_never_receive_responses() {
     let mut client = Client::new(false);
     client.write(json!({"jsonrpc":"2.0","method":"missing","params":{}}));

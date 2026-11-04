@@ -106,6 +106,13 @@ fn read_file(path: &Path, label: &str) -> Result<String, String> {
     read_bounded(file, label)
 }
 
+fn evidence_path(invocation: &Path, path: &Path) -> PathBuf {
+    // Components remove redundant separators and `.` without resolving links
+    // or collapsing `..`: the filesystem must interpret those in order. The
+    // final directory need not exist, including when reporting an early error.
+    invocation.join(path).components().collect()
+}
+
 fn prepare(args: &ScriptArgs, invocation: &Path) -> Result<due_harness::Options, String> {
     for (path, label) in [
         (Some(invocation), "invocation directory"),
@@ -147,7 +154,7 @@ fn prepare(args: &ScriptArgs, invocation: &Path) -> Result<due_harness::Options,
     Ok(due_harness::Options {
         due: std::env::current_exe().map_err(|e| format!("locate Due executable: {e}"))?,
         cwd,
-        evidence: invocation.join(&args.evidence),
+        evidence: evidence_path(invocation, &args.evidence),
         source,
         args: input,
         timeout: args.timeout,
@@ -161,7 +168,7 @@ pub async fn execute(args: ScriptArgs) -> ExitCode {
         .as_ref()
         .ok()
         .filter(|cwd| cwd.to_str().is_some() && args.evidence.to_str().is_some())
-        .map(|cwd| Evidence::new(cwd.join(&args.evidence)));
+        .map(|cwd| Evidence::new(evidence_path(cwd, &args.evidence)));
     let mut report = Report {
         schema_version: 1,
         cli_version: env!("CARGO_PKG_VERSION"),
@@ -173,11 +180,24 @@ pub async fn execute(args: ScriptArgs) -> ExitCode {
     };
     let options = invocation
         .map_err(|e| format!("read invocation directory: {e}"))
-        .and_then(|cwd| prepare(&args, &cwd));
+        .and_then(|cwd| prepare(&args, &cwd))
+        .map_err(|error| (2, error))
+        .and_then(|options| {
+            // Include files and dangling symlinks. Bridge::spawn still creates
+            // exclusively, so a collision after this preflight is a setup error.
+            match std::fs::symlink_metadata(&options.evidence) {
+                Ok(_) => Err((
+                    2,
+                    "evidence path already exists; choose a new directory".into(),
+                )),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(options),
+                Err(error) => Err((1, format!("inspect evidence path: {error}"))),
+            }
+        });
     let code = match options {
-        Err(error) => {
+        Err((code, error)) => {
             report.error = Some(error);
-            2
+            code
         }
         Ok(options) => {
             // The interpreter and its owned Tokio I/O runtime live on this

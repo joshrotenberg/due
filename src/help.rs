@@ -173,7 +173,8 @@ INPUTS AND PATHS
   --cwd selects the RPC process and default verifier directory. Script, argument,
   evidence and --cwd paths resolve from the invocation directory. Profile request
   paths resolve from the RPC directory, not the profile file's directory.
-  The evidence directory must be new, with an existing parent.
+  The evidence directory must be new, with an existing parent. An existing path
+  (including a file or symlink) is invalid input; other setup I/O failures exit 1.
 
 OUTPUT AND DEADLINES
   Stdout is one version-1 script result after owned work and cleanup settle.

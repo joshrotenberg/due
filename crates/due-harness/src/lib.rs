@@ -219,7 +219,11 @@ pub fn run_with(
         .borrow_mut()
         .as_mut()
         .map_or(Ok(()), Supervisor::finish);
-    let native_cleanup = host.bridge.borrow_mut().finish();
+    let settlement = host.bridge.borrow_mut().settle();
+    // Settlement can observe a late transport failure. Keep that sticky without
+    // relabeling the original signal/transport failure as a cleanup failure.
+    let checked = checked.and(settlement.transport_error.map_or(Ok(()), Err));
+    let native_cleanup = settlement.cleanup_error.map_or(Ok(()), Err);
     let cleanup = match (commands, native_cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),

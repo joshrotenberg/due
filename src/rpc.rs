@@ -40,15 +40,18 @@ impl RpcError {
 fn parse(line: &str) -> Result<Request, RpcError> {
     let value: Value =
         serde_json::from_str(line).map_err(|_| RpcError(-32700, "Parse error".into()))?;
-    let invalid = || {
+    let object = value.as_object().ok_or_else(|| {
         RpcError(
             -32600,
             "Invalid Request (one object per line; no batches)".into(),
         )
-    };
-    let object = value.as_object().ok_or_else(invalid)?;
+    })?;
+    let invalid = || RpcError(-32600, "Invalid Request (invalid JSON-RPC envelope)".into());
     if object.get("jsonrpc") != Some(&json!("2.0")) {
-        return Err(invalid());
+        return Err(RpcError(
+            -32600,
+            "Invalid Request (jsonrpc must be \"2.0\")".into(),
+        ));
     }
     let method = object
         .get("method")
@@ -488,15 +491,32 @@ mod tests {
 
     #[test]
     fn malformed_envelopes_and_batch_have_protocol_errors() {
-        assert_eq!(parse("{").err().unwrap().0, -32700);
+        let error = parse("{").err().unwrap();
+        assert_eq!((error.0, error.1.as_str()), (-32700, "Parse error"));
+        for value in ["null", "42", "[]", r#"[{"jsonrpc":"2.0","method":"x"}]"#] {
+            let error = parse(value).err().unwrap();
+            assert_eq!(error.0, -32600);
+            assert_eq!(error.1, "Invalid Request (one object per line; no batches)");
+        }
         for value in [
-            "null",
-            "[]",
-            r#"{"jsonrpc":"1.0","method":"x"}"#,
+            r#"{"method":"x"}"#,
+            r#"{"jsonrpc":"1.0","method":"x","id":1}"#,
+            r#"{"jsonrpc":2.0,"method":"x"}"#,
+            r#"{"jsonrpc":null,"method":"x"}"#,
+        ] {
+            let error = parse(value).err().unwrap();
+            assert_eq!(error.0, -32600);
+            assert_eq!(error.1, "Invalid Request (jsonrpc must be \"2.0\")");
+        }
+        for value in [
+            r#"{"jsonrpc":"2.0"}"#,
+            r#"{"jsonrpc":"2.0","method":3}"#,
             r#"{"jsonrpc":"2.0","method":"x","id":{}}"#,
             r#"{"jsonrpc":"2.0","method":"x","id":1.5}"#,
         ] {
-            assert_eq!(parse(value).err().unwrap().0, -32600);
+            let error = parse(value).err().unwrap();
+            assert_eq!(error.0, -32600);
+            assert_eq!(error.1, "Invalid Request (invalid JSON-RPC envelope)");
         }
     }
 
