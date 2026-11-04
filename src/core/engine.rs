@@ -323,6 +323,7 @@ impl Engine {
     /// Snapshots remain readable afterward. Repeated calls may retry pending cleanup.
     /// Dropping this future leaves its independent shutdown owner running.
     pub async fn shutdown(&self) -> Result<(), Error> {
+        self.inner.request_shutdown();
         let inner = Arc::clone(&self.inner);
         self.inner
             .runtime
@@ -340,12 +341,7 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         let inner = Arc::clone(&self.inner);
-        let mut state = inner.state.lock().unwrap();
-        state.closing = true;
-        for run in state.runs.values() {
-            run.cancel.send_replace(true);
-        }
-        drop(state);
+        inner.request_shutdown();
         self.inner.runtime.spawn(async move {
             let _ = inner.shutdown().await;
         });
@@ -353,6 +349,13 @@ impl Drop for Engine {
 }
 
 impl Inner {
+    fn request_shutdown(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.closing = true;
+        for run in state.runs.values() {
+            run.cancel.send_replace(true);
+        }
+    }
     fn inspect(&self, run: &RunRef) -> Result<RunSnapshot, Error> {
         self.state
             .lock()

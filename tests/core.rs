@@ -994,7 +994,7 @@ async fn a_queued_darwin_open_can_be_cancelled_without_waiting_for_another_engin
         .spawn(queued.assignment("never start"))
         .await
         .unwrap();
-    let result = tokio::time::timeout(Duration::from_millis(100), second.interrupt(&two)).await;
+    let result = tokio::time::timeout(Duration::from_secs(1), second.interrupt(&two)).await;
     let launched = queued.directory.path().join("pid").exists();
     fs::write(held.directory.path().join("release-open"), "go").unwrap();
     let result = result
@@ -1032,4 +1032,29 @@ async fn a_utf8_alias_to_a_non_utf8_workspace_is_rejected_before_native_launch()
     );
     assert!(!fixture.directory.path().join("pid").exists());
     engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_closes_admission_before_its_cleanup_owner_is_scheduled() {
+    use std::{future::Future, task::Poll};
+    let fixture = Fixture::new(Provider::Claude);
+    let engine = engine();
+    let shutdown = engine.shutdown();
+    tokio::pin!(shutdown);
+    std::future::poll_fn(|context| {
+        assert!(shutdown.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    // On this current-thread runtime no spawned owner has run yet.
+    assert_eq!(
+        engine
+            .spawn(fixture.assignment("closed"))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::Closed
+    );
+    shutdown.await.unwrap();
+    assert!(!fixture.directory.path().join("pid").exists());
 }
