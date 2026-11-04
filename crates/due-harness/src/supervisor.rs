@@ -1280,9 +1280,11 @@ mod tests {
                 .lines()
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect();
-            inherited_writer = siblings
-                .iter()
-                .any(|fd| fd["handle"] == window["write_handle"] && fd["access"] == libc::O_WRONLY);
+            inherited_writer = siblings.iter().any(|fd| {
+                fd["fd"].as_i64().is_some_and(|fd| fd > 2)
+                    && fd["handle"] == window["write_handle"]
+                    && fd["access"] == libc::O_WRONLY
+            });
         }
         let report = json!({"injected":injected,"ready":ready_result,"a":a_result,
             "b":b_result,"challenge":challenge,"finish_error":finish.err(),
@@ -1344,8 +1346,10 @@ mod tests {
         if !output.success() {
             let preserved = directory.keep();
             panic!(
-                "causal pipe-window probe failed; evidence: {}",
-                preserved.display()
+                "causal pipe-window probe failed; evidence: {}\nstdout:\n{}\nstderr:\n{}",
+                preserved.display(),
+                fs::read_to_string(preserved.join("probe.stdout")).unwrap_or_default(),
+                fs::read_to_string(preserved.join("probe.stderr")).unwrap_or_default(),
             );
         }
     }
