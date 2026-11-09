@@ -238,9 +238,9 @@ dependencies = [
  "clap",
  "claude-wrapper",
  "codex-wrapper",
+ "due-core",
  "due-harness",
  "futures-util",
- "humantime",
  "libc",
  "serde",
  "serde_json",
@@ -252,6 +252,32 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "due-core"
+version = "0.2.1"
+dependencies = [
+ "claude-wrapper",
+ "codex-wrapper",
+ "humantime",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "uuid",
+ "which",
+]
+
+[[package]]
+name = "due-core-compare"
+version = "0.0.0"
+dependencies = [
+ "due-core",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

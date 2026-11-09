@@ -276,6 +276,8 @@ remains outside this implementation.
 
 ## Documentation
 
+- [Core library spike](docs/core-spike.md): experimental multi-provider Rust
+  interface, concurrent native workers, ownership and fake-provider validation.
 - [docs/cli.md](docs/cli.md): full CLI reference covering options, request
   fields, structured answers, tracing, native passthrough, results, and errors.
 - [JavaScript harness](docs/harness.md): supported session supervision, JSON results and evidence.

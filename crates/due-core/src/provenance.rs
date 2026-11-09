@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::result::ReportedSettings;
 
-pub(crate) fn claude_message(reported: &mut ReportedSettings, event: &Value) {
+pub fn claude_message(reported: &mut ReportedSettings, event: &Value) {
     // Include native child messages observed during this turn, without claiming
     // that any one ID is the selected root model. Reject malformed envelopes.
     // Init describes configuration; modelUsage can describe session accounting.

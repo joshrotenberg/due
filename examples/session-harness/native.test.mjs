@@ -20,7 +20,7 @@ test('Node supervises both native adapters using existing profiles and interrupt
     const dir = await mkdtemp(join(tmpdir(), 'due-node-native-'));
     t.after(() => rm(dir, { recursive: true, force: true }));
     const binary = join(dir, 'provider');
-    await copyFile(fileURLToPath(new URL('../../tests/fixtures/session-agent.sh', import.meta.url)), binary);
+    await copyFile(fileURLToPath(new URL('../../crates/due-core/tests/fixtures/session-agent.sh', import.meta.url)), binary);
     await chmod(binary, 0o700);
     const profile = provider === 'codex'
       ? JSON.parse(await readFile(new URL('../codex-workspace-profile.json', import.meta.url), 'utf8'))

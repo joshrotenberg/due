@@ -73,7 +73,11 @@ impl Client {
     fn with_stderr(early: bool, stderr: impl FnOnce(&std::path::Path) -> Stdio) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("provider");
-        fs::write(&binary, include_bytes!("fixtures/session-agent.sh")).unwrap();
+        fs::write(
+            &binary,
+            include_bytes!("../crates/due-core/tests/fixtures/session-agent.sh"),
+        )
+        .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         let mut child = spawn_rpc(
             Command::new(env!("CARGO_BIN_EXE_due"))

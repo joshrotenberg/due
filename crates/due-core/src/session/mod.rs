@@ -3,14 +3,14 @@
 mod claude;
 mod codex;
 mod items;
-pub(crate) mod profile;
+mod policy;
 
 use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -19,11 +19,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
-pub(crate) use items::{PushQueue, SessionItems};
+pub(crate) use items::ReadError as ItemReadError;
+pub use items::{PushQueue, SessionItems};
 
 use crate::{
-    cli::{Effort, Provider},
     result::{ErrorKind, ReportedSettings, RequestedSettings, RunError, RunResult},
+    types::{Effort, Provider},
 };
 
 const MAX_EVENTS: usize = 256;
@@ -56,13 +57,13 @@ impl OpenOptions {
     pub fn timeout_duration(&self) -> Result<Option<Duration>, String> {
         self.timeout
             .as_deref()
-            .map(crate::cli::parse_timeout)
+            .map(crate::types::parse_timeout)
             .transpose()
     }
 
-    fn validate(&mut self) -> Result<(), String> {
+    pub(crate) fn validate(&mut self) -> Result<(), String> {
         self.timeout_duration()?;
-        profile::validate_native_args(self.provider, &self.native_args)?;
+        policy::validate_native_args(self.provider, &self.native_args)?;
         for (name, value) in [("model", &self.model), ("resume", &self.resume)] {
             if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
                 return Err(format!("{name} must not be empty"));
@@ -89,14 +90,19 @@ impl OpenOptions {
 struct Turn {
     id: String,
     started: Instant,
-    result: Option<Value>,
+    result: Option<Arc<RunResult>>,
     reported: ReportedSettings,
     events: VecDeque<(u64, Value, usize)>,
     bytes: usize,
     cursor: u64,
     dropped: u64,
     last_dropped: u64,
-    interactions: BTreeMap<String, Value>,
+    interactions: BTreeMap<String, PendingInteraction>,
+}
+
+pub(crate) struct PendingInteraction {
+    pub cursor: u64,
+    pub request: Value,
 }
 
 struct State {
@@ -111,11 +117,16 @@ struct State {
 pub struct EventSink {
     state: Arc<Mutex<State>>,
     changed: Arc<Notify>,
+    revision: Arc<AtomicU64>,
     items: Arc<SessionItems>,
 }
 
 impl EventSink {
     fn new(provider: Provider, id: String, push: Option<Arc<PushQueue>>) -> Self {
+        Self::with_items(provider, Arc::new(SessionItems::new(id, push)))
+    }
+
+    fn with_items(provider: Provider, items: Arc<SessionItems>) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
                 provider,
@@ -125,8 +136,24 @@ impl EventSink {
                 turn: None,
             })),
             changed: Arc::new(Notify::new()),
-            items: Arc::new(SessionItems::new(id, push)),
+            revision: Arc::new(AtomicU64::new(0)),
+            items,
         }
+    }
+
+    fn notify(&self) {
+        self.revision.fetch_add(1, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    fn interaction_current(&self, turn_id: &str, request_id: &str, cursor: u64) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .turn
+            .as_ref()
+            .filter(|turn| turn.id == turn_id && turn.result.is_none())
+            .and_then(|turn| turn.interactions.get(request_id))
+            .is_some_and(|pending| pending.cursor == cursor)
     }
 
     /// Preserve a provider payload independently of the latest-turn event window.
@@ -159,12 +186,12 @@ impl EventSink {
             turn.events.push_back((turn.cursor, value, bytes));
         }
         drop(state);
-        self.changed.notify_waiters();
+        self.notify();
     }
 
     pub fn native_session(&self, id: String) {
         self.state.lock().unwrap().native_session_id = Some(id);
-        self.changed.notify_waiters();
+        self.notify();
     }
 
     fn claude_provenance(&self, turn_id: &str, event: &Value) {
@@ -174,35 +201,45 @@ impl EventSink {
             .as_mut()
             .filter(|turn| turn.id == turn_id && turn.result.is_none())
         {
-            crate::providers::provenance::claude_message(&mut turn.reported, event);
+            crate::provenance::claude_message(&mut turn.reported, event);
         }
     }
 
     pub fn interaction(&self, request_id: String, request: Value) {
         let mut state = self.state.lock().unwrap();
-        if let Some(turn) = state.turn.as_mut().filter(|t| t.result.is_none()) {
-            self.item(
+        if let Some(turn) = state.turn.as_mut().filter(|t| t.result.is_none())
+            && let Some(cursor) = self.items.record_with_cursor(
                 "interaction",
                 json!({"request_id":request_id,"request":request}),
                 Some(&turn.id),
-            );
-            turn.interactions.insert(request_id, request);
+            )
+        {
+            turn.interactions
+                .insert(request_id, PendingInteraction { cursor, request });
         }
         drop(state);
-        self.changed.notify_waiters();
+        self.notify();
     }
 
     pub fn resolved(&self, request_id: &str) {
+        self.resolved_generation(request_id, None);
+    }
+
+    fn resolved_generation(&self, request_id: &str, cursor: Option<u64>) {
         if let Some(turn) = self.state.lock().unwrap().turn.as_mut()
-            && turn.interactions.remove(request_id).is_some()
+            && turn
+                .interactions
+                .get(request_id)
+                .is_some_and(|pending| cursor.is_none_or(|cursor| cursor == pending.cursor))
         {
+            turn.interactions.remove(request_id);
             self.item(
                 "interaction_resolved",
                 json!({"request_id":request_id}),
                 Some(&turn.id),
             );
         }
-        self.changed.notify_waiters();
+        self.notify();
     }
 
     pub fn finished(&self, mut result: RunResult) {
@@ -231,16 +268,16 @@ impl EventSink {
                 .as_millis()
                 .try_into()
                 .unwrap_or(u64::MAX);
-            turn.result = Some(serde_json::to_value(result).expect("RunResult is serializable"));
+            turn.result = Some(Arc::new(result));
             turn.interactions.clear();
             self.item(
                 "turn_finished",
-                turn.result.clone().unwrap(),
+                serde_json::to_value(turn.result.as_deref().unwrap()).expect("serializable result"),
                 Some(&turn.id),
             );
         }
         drop(state);
-        self.changed.notify_waiters();
+        self.notify();
     }
 
     pub fn failed(&self, message: String) {
@@ -253,7 +290,7 @@ impl EventSink {
             state.provider
         };
         self.finished(RunResult::new(provider).fail(RunError::protocol(message)));
-        self.changed.notify_waiters();
+        self.notify();
     }
 
     fn closed(&self, outcome: Result<(), String>) -> Result<Value, String> {
@@ -289,6 +326,10 @@ impl EventSink {
     }
 
     fn begin(&self) -> Result<String, String> {
+        self.begin_with_id(uuid::Uuid::new_v4().to_string())
+    }
+
+    fn begin_with_id(&self, id: String) -> Result<String, String> {
         let mut state = self.state.lock().unwrap();
         if let Some(error) = &state.failure {
             return Err(format!("session is unavailable: {error}"));
@@ -296,7 +337,6 @@ impl EventSink {
         if state.turn.as_ref().is_some_and(|t| t.result.is_none()) {
             return Err("a turn is already running; read or interrupt it first".into());
         }
-        let id = uuid::Uuid::new_v4().to_string();
         state.turn = Some(Turn {
             id: id.clone(),
             started: Instant::now(),
@@ -309,6 +349,8 @@ impl EventSink {
             last_dropped: 0,
             interactions: BTreeMap::new(),
         });
+        drop(state);
+        self.notify();
         Ok(id)
     }
 
@@ -331,8 +373,8 @@ impl EventSink {
                 .map(|(seq, event, _)| json!({"cursor":seq,"event":event})).collect::<Vec<_>>(),
             "events_lost": after < turn.last_dropped,
             "dropped_events": turn.dropped,
-            "interactions": turn.interactions.iter().map(|(id, request)| json!({"request_id":id,"request":request})).collect::<Vec<_>>(),
-            "result": turn.result,
+            "interactions": turn.interactions.iter().map(|(id, request)| json!({"request_id":id,"request":request.request})).collect::<Vec<_>>(),
+            "result": turn.result.as_deref(),
             "session_error": state.failure,
         }))
     }
@@ -364,10 +406,15 @@ impl Backend {
             Self::Codex(b) => b.enqueue_interrupt(turn_id),
         }
     }
-    async fn reply(&mut self, id: &str, value: Value) -> Result<(), String> {
+    async fn reply(
+        &mut self,
+        id: &str,
+        value: Value,
+        expected: Option<(String, u64)>,
+    ) -> Result<(), String> {
         match self {
-            Self::Claude(b) => b.reply(id, value).await,
-            Self::Codex(b) => b.reply(id, value).await,
+            Self::Claude(b) => b.reply(id, value, expected).await,
+            Self::Codex(b) => b.reply(id, value, expected).await,
         }
     }
     async fn close(self) -> Result<(), String> {
@@ -390,16 +437,24 @@ struct ReadSession {
 }
 
 #[derive(Default)]
-pub(crate) struct Manager {
+pub struct Manager {
+    journal: Option<Arc<SessionItems>>,
     session: AsyncMutex<Option<Session>>,
     // Readers must not queue behind provider controls or native cleanup.
     read_session: Mutex<Option<ReadSession>>,
     stopping: AtomicBool,
-    pub(crate) push: Arc<PushQueue>,
+    pub push: Arc<PushQueue>,
 }
 
 impl Manager {
-    pub(crate) async fn open(&self, mut options: OpenOptions) -> Result<Value, String> {
+    pub(crate) fn with_items(items: Arc<SessionItems>) -> Self {
+        Self {
+            journal: Some(items),
+            ..Self::default()
+        }
+    }
+
+    pub async fn open(&self, mut options: OpenOptions) -> Result<Value, String> {
         options.validate()?;
         let mut slot = self.session.lock().await;
         if self.stopping.load(Ordering::Acquire) {
@@ -408,12 +463,19 @@ impl Manager {
         if slot.is_some() {
             return Err("close the current session before opening another".into());
         }
-        let id = uuid::Uuid::new_v4().to_string();
-        let sink = EventSink::new(
-            options.provider,
-            id.clone(),
-            options.stream.then(|| self.push.clone()),
-        );
+        let id = self
+            .journal
+            .as_ref()
+            .map(|items| items.id().to_owned())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let sink = match &self.journal {
+            Some(items) => EventSink::with_items(options.provider, Arc::clone(items)),
+            None => EventSink::new(
+                options.provider,
+                id.clone(),
+                options.stream.then(|| self.push.clone()),
+            ),
+        };
         sink.state.lock().unwrap().requested =
             RequestedSettings::new(options.model.as_deref(), options.effort);
         let backend = match Backend::open(&options, sink.clone()).await {
@@ -445,7 +507,16 @@ impl Manager {
         Ok(response)
     }
 
-    pub(crate) async fn start(&self, session_id: &str, prompt: String) -> Result<Value, String> {
+    pub async fn start(&self, session_id: &str, prompt: String) -> Result<Value, String> {
+        self.start_with_id(session_id, prompt, None).await
+    }
+
+    pub(crate) async fn start_with_id(
+        &self,
+        session_id: &str,
+        prompt: String,
+        id: Option<String>,
+    ) -> Result<Value, String> {
         if prompt.trim().is_empty() {
             return Err("prompt must not be empty".into());
         }
@@ -454,7 +525,10 @@ impl Manager {
             return Err("server is shutting down".into());
         }
         let session = Self::session(&mut slot, session_id)?;
-        let id = session.sink.begin()?;
+        let id = match id {
+            Some(id) => session.sink.begin_with_id(id)?,
+            None => session.sink.begin()?,
+        };
         session
             .sink
             .item("turn_started", json!({"prompt":prompt}), Some(&id));
@@ -465,7 +539,7 @@ impl Manager {
         Ok(json!({"turn_id":id,"session_id":session_id}))
     }
 
-    pub(crate) async fn read(
+    pub async fn read(
         &self,
         session_id: &str,
         turn_id: &str,
@@ -488,7 +562,111 @@ impl Manager {
         }
     }
 
-    pub(crate) async fn session_read(
+    pub(crate) async fn observe(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        after: Option<u64>,
+    ) -> Result<(Value, u64), String> {
+        let sink = self.read_sink(session_id)?;
+        loop {
+            let changed = sink.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let revision = sink.revision.load(Ordering::Acquire);
+            let snapshot = sink.snapshot(turn_id, 0)?;
+            if after != Some(revision)
+                || snapshot["state"] == "finished"
+                || snapshot["session_error"].is_string()
+            {
+                return Ok((snapshot, revision));
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) fn validate_response(provider: Provider, value: &Value) -> Result<(), String> {
+        if !value.is_object() {
+            return Err("native response must be a JSON object".into());
+        }
+        match provider {
+            Provider::Claude => claude::validate_response(value),
+            Provider::Codex => Ok(()),
+        }
+    }
+
+    pub(crate) fn result(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<Arc<RunResult>>, String> {
+        let sink = self.read_sink(session_id)?;
+        let state = sink.state.lock().unwrap();
+        let turn = state
+            .turn
+            .as_ref()
+            .filter(|turn| turn.id == turn_id)
+            .ok_or("unknown turn")?;
+        Ok(turn.result.clone())
+    }
+
+    pub(crate) fn interactions(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<(String, u64, Value)>, String> {
+        let sink = self.read_sink(session_id)?;
+        let state = sink.state.lock().unwrap();
+        let turn = state
+            .turn
+            .as_ref()
+            .filter(|turn| turn.id == turn_id)
+            .ok_or("unknown turn")?;
+        if turn.result.is_some() {
+            return Ok(Vec::new());
+        }
+        Ok(turn
+            .interactions
+            .iter()
+            .map(|(id, pending)| (id.clone(), pending.cursor, pending.request.clone()))
+            .collect())
+    }
+
+    pub(crate) fn failure(&self, session_id: &str) -> Result<Option<String>, String> {
+        let sink = self.read_sink(session_id)?;
+        let failure = sink.state.lock().unwrap().failure.clone();
+        Ok(failure)
+    }
+
+    pub(crate) async fn wait_result(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Arc<RunResult>, String> {
+        let sink = self.read_sink(session_id)?;
+        loop {
+            let changed = sink.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let state = sink.state.lock().unwrap();
+                let turn = state
+                    .turn
+                    .as_ref()
+                    .filter(|turn| turn.id == turn_id)
+                    .ok_or("unknown turn")?;
+                if let Some(result) = &turn.result {
+                    return Ok(Arc::clone(result));
+                }
+                if let Some(error) = &state.failure {
+                    return Err(error.clone());
+                }
+            }
+            changed.await;
+        }
+    }
+
+    pub async fn session_read(
         &self,
         session_id: &str,
         after: u64,
@@ -498,7 +676,7 @@ impl Manager {
         sink.items.read(after, limit)
     }
 
-    pub(crate) async fn interrupt(&self, session_id: &str, turn_id: &str) -> Result<Value, String> {
+    pub async fn interrupt(&self, session_id: &str, turn_id: &str) -> Result<Value, String> {
         let answer = {
             let mut slot = self.session.lock().await;
             let session = Self::session(&mut slot, session_id)?;
@@ -516,11 +694,23 @@ impl Manager {
         Ok(json!({"interrupt_requested":true,"turn_id":turn_id}))
     }
 
-    pub(crate) async fn reply(
+    pub async fn reply(
         &self,
         session_id: &str,
         turn_id: &str,
         request_id: &str,
+        response: Value,
+    ) -> Result<Value, String> {
+        self.reply_checked(session_id, turn_id, request_id, None, response)
+            .await
+    }
+
+    pub(crate) async fn reply_checked(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        request_id: &str,
+        cursor: Option<u64>,
         response: Value,
     ) -> Result<Value, String> {
         let mut slot = self.session.lock().await;
@@ -535,15 +725,26 @@ impl Manager {
                 .as_ref()
                 .filter(|t| t.id == turn_id && t.result.is_none())
                 .ok_or("unknown or finished turn")?;
-            if !turn.interactions.contains_key(request_id) {
-                return Err("unknown or resolved interaction".into());
+            let pending = turn
+                .interactions
+                .get(request_id)
+                .ok_or("unknown or resolved interaction")?;
+            if cursor.is_some_and(|cursor| cursor != pending.cursor) {
+                return Err("interaction is no longer current".into());
             }
         }
-        session.backend.reply(request_id, response).await?;
+        session
+            .backend
+            .reply(
+                request_id,
+                response,
+                cursor.map(|cursor| (turn_id.to_owned(), cursor)),
+            )
+            .await?;
         Ok(json!({"replied":true,"request_id":request_id}))
     }
 
-    pub(crate) async fn close(&self, session_id: Option<&str>) -> Result<Value, String> {
+    pub async fn close(&self, session_id: Option<&str>) -> Result<Value, String> {
         let mut slot = self.session.lock().await;
         if let Some(id) = session_id {
             Self::session(&mut slot, id)?;
@@ -557,7 +758,7 @@ impl Manager {
         response
     }
 
-    pub(crate) async fn shutdown(&self) -> Result<Value, String> {
+    pub async fn shutdown(&self) -> Result<Value, String> {
         // EOF must reject queued opens before waiting for any current operation.
         self.stopping.store(true, Ordering::Release);
         self.close(None).await
@@ -763,5 +964,41 @@ mod tests {
         stale.run_id = Some("previous-turn".into());
         sink.finished(stale);
         assert_eq!(sink.snapshot(&id, 3).unwrap()["state"], "running");
+    }
+    #[test]
+    fn a_late_reply_resolution_cannot_remove_a_reissued_request() {
+        let sink = EventSink::new(Provider::Claude, "test".into(), None);
+        let turn = sink.begin().unwrap();
+        sink.interaction("reused".into(), json!({"generation":1}));
+        let old = sink
+            .state
+            .lock()
+            .unwrap()
+            .turn
+            .as_ref()
+            .unwrap()
+            .interactions["reused"]
+            .cursor;
+        sink.interaction("reused".into(), json!({"generation":2}));
+        let current = sink
+            .state
+            .lock()
+            .unwrap()
+            .turn
+            .as_ref()
+            .unwrap()
+            .interactions["reused"]
+            .cursor;
+        assert!(!sink.interaction_current(&turn, "reused", old));
+        assert!(sink.interaction_current(&turn, "reused", current));
+        // Claude's permission callback can reissue between native submission
+        // and the actor's resolution bookkeeping. Preserve the new generation.
+        sink.resolved_generation("reused", Some(old));
+        assert_eq!(
+            sink.snapshot(&turn, 0).unwrap()["interactions"][0]["request"]["generation"],
+            2
+        );
+        sink.resolved_generation("reused", Some(current));
+        assert_eq!(sink.snapshot(&turn, 0).unwrap()["state"], "running");
     }
 }

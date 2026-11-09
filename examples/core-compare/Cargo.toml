@@ -1,0 +1,15 @@
+[package]
+name = "due-core-compare"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Example standalone consumer of due-core"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+due-core = { path = "../../crates/due-core" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = "3"

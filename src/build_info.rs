@@ -29,6 +29,7 @@ pub struct BuildInfoArgs {
 
 /// Due feature flags that change the commands and contracts of a build.
 const FEATURES: &[(&str, bool)] = &[
+    ("core", cfg!(feature = "core")),
     ("harness", cfg!(feature = "harness")),
     ("rpc", cfg!(feature = "rpc")),
 ];

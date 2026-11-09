@@ -8,29 +8,35 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace]
-members = [".", "crates/due-harness"]
+members = [".", "crates/due-core", "crates/due-harness", "examples/core-compare"]
 default-members = [".", "crates/due-harness"]
 exclude = ["examples/rpc-languages"]
 resolver = "3"
 
+[workspace.dependencies]
+claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
+codex-wrapper = "=0.4.9"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+
 [features]
 default = ["harness"]
 harness = ["rpc", "dep:due-harness"]
-rpc = ["codex-wrapper/app-server", "dep:tokio-util", "dep:futures-util", "tokio/io-std", "tokio/net", "tokio/sync"]
+core = ["due-core/resident"]
+rpc = ["core", "dep:tokio-util", "dep:futures-util", "tokio/io-std", "tokio/net", "tokio/sync"]
 
 [dependencies]
+due-core = { path = "crates/due-core", default-features = false }
 due-harness = { path = "crates/due-harness", default-features = false, features = ["js"], optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
-claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
-codex-wrapper = "=0.4.9"
+claude-wrapper.workspace = true
+codex-wrapper.workspace = true
 clap = { version = "4.5", features = ["derive"] }
-humantime = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "process", "io-util"] }
-toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+toml.workspace = true
 which = "8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

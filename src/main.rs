@@ -5,14 +5,16 @@ mod help;
 mod init;
 mod providers;
 mod request;
-mod result;
+use due::{diagnostics, result};
 #[cfg(feature = "rpc")]
 mod rpc;
 mod schema;
 #[cfg(feature = "harness")]
 mod script;
 #[cfg(feature = "rpc")]
-mod session;
+use due::session;
+#[cfg(feature = "rpc")]
+mod session_profile;
 mod skills;
 mod telemetry;
 mod trace_summary;
