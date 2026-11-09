@@ -13,6 +13,48 @@ struct Fixture {
     binary: PathBuf,
     provider: Provider,
 }
+
+#[test]
+fn worker_preflight_resolves_only_the_selected_provider_without_launching_it() {
+    for (provider, arguments) in [
+        (
+            Provider::Claude,
+            &[
+                "--restricted",
+                "--strict-mcp-config",
+                "--tools",
+                "Read,Edit",
+            ][..],
+        ),
+        (
+            Provider::Codex,
+            &[
+                "-c",
+                "sandbox_mode=\"read-only\"",
+                "-c",
+                "approval_policy=\"never\"",
+            ][..],
+        ),
+    ] {
+        let fixture = Fixture::new(provider);
+        let mut options = fixture.options();
+        options.native_args = arguments.iter().map(|value| (*value).into()).collect();
+        let validated = options.clone().validate().unwrap();
+        assert_eq!(validated.provider, provider);
+        assert_eq!(
+            validated.cwd,
+            fixture.directory.path().canonicalize().unwrap()
+        );
+        assert_eq!(validated.native_args, arguments);
+        options.native_args.push("--resume".into());
+        assert_eq!(
+            options.validate().unwrap_err().kind,
+            ErrorKind::InvalidInput
+        );
+        assert!(!fixture.directory.path().join("argv").exists());
+    }
+}
+
 impl Fixture {
     fn new(provider: Provider) -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -1293,6 +1335,27 @@ async fn streams_replay_full_native_payloads_across_turns_with_independent_curso
         let all = stream_through(&mut late, "session_stream_closed").await;
         assert_eq!(all.iter().filter(|i| i.kind == "run_finished").count(), 2);
         assert!(late.next().await.unwrap().is_none());
+        let mut reader = engine.subscribe(&session, 0).unwrap();
+        assert_eq!(
+            reader.read_available(0).unwrap_err(),
+            StreamError::InvalidLimit
+        );
+        assert_eq!(reader.cursor(), 0);
+        let mut paged = Vec::new();
+        loop {
+            let page = reader.read_available(3).unwrap();
+            assert!(page.closed);
+            assert_eq!(page.latest_cursor, late.cursor());
+            assert_eq!(page.cursor, reader.cursor());
+            paged.extend(page.items);
+            if page.cursor == page.latest_cursor {
+                break;
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(paged).unwrap(),
+            serde_json::to_value(all).unwrap()
+        );
         reaped(fixture.pid()).await;
     }
 }

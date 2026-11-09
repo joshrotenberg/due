@@ -7,6 +7,11 @@ the library first. It does not introduce an MCP adapter or JS client, remove
 
 ## Library boundary
 
+Use either provider on its own, or select a provider for each worker in a
+mixed workflow. Install and authenticate the native CLI for the providers
+you use. The engine shares run and session operations across providers.
+Native tool configuration and approval responses remain provider-specific.
+
 `due-core` is a separate workspace crate. Its default `resident` feature
 provides `due_core::Engine` and the native Claude `DuplexSession` and Codex
 `AppServer` backends. Each worker owns one resident native transport, and
@@ -51,11 +56,14 @@ contract.
 | `wait` | `engine.wait(&runs, WaitOptions { until, timeout }).await` |
 | `interrupt` | `engine.interrupt(&run).await`; targets the exact assignment and awaits terminal settlement |
 | `respond` | `engine.respond(&interaction.id, native_response).await`; answers one pending generation |
-| `subscribe` | `engine.subscribe(&session, after_cursor)`; independent full-item stream across turns |
+| `subscribe` | `engine.subscribe(&session, after_cursor)`; independent full-item reader across turns, with `next().await` or `read_available(limit)` |
 
 `WorkerOptions` fixes provider, canonical cwd, resolved executable, requested
 model/effort, ephemeral choice and audited native policy arguments at admission.
 Construct it with `WorkerOptions::new(provider, cwd)`, then set explicit fields.
+Use `WorkerOptions::validate()` to resolve paths and check the native policy
+before admitting a worker. It returns the resolved options without starting
+the provider. Admission also validates options supplied directly.
 There are no role, scheduling, verification or automatic retry decisions.
 
 Run and session references are distinct opaque IDs. Passing a handle to another
@@ -87,9 +95,11 @@ it sends no turn.
 Call `engine.shutdown().await` before releasing its Tokio runtime. Shutdown
 rejects new work, cancels active runs and closes every native worker. Repeated
 calls preserve cleanup failures; earlier successful assignment results remain
-unchanged. A shutdown wait expiring does not invent successful settlement, and
-the owner continues cleanup. Dropping a shutdown future also leaves its independent
-cleanup owner running. Run snapshots remain readable after shutdown.
+unchanged. If shutdown returns a settlement error while runs are still active,
+keep the runtime alive and retry once the runs have settled so idle workers
+can close too. Dropping a polled shutdown future leaves its independent
+cleanup owner running through its configured bounds. Run snapshots remain
+readable after shutdown.
 Drop requests best-effort cleanup on the captured runtime; it cannot report
 success and is not a substitute for awaited shutdown.
 
@@ -172,6 +182,13 @@ open while its worker is idle between turns. Save `stream.cursor()` and subscrib
 again from that exclusive cursor. Retained history is readable after shutdown.
 `None` means a closure marker has been delivered and retained items are drained,
 not merely that the current turn ended.
+
+For a nonblocking read, call `read_available(limit)` on the same reader. It
+returns up to 256 items within a 4 MiB page budget, an exclusive next cursor,
+the latest cursor at the time of reading, and whether the journal is closed. An empty page from an
+active session means it has caught up for now. Continue reading after closure
+until the page cursor reaches the latest cursor. Both read methods report
+retention gaps without advancing the reader.
 
 The shared journal retains at most 1024 items / 8 MiB per worker. An individual
 item over 4 MiB is replaced by an explicit `omitted` marker at the same cursor.

@@ -98,7 +98,7 @@ impl Engine {
 
     /// Admit a fresh worker assignment. Launch failures become terminal result data.
     pub async fn spawn(&self, assignment: Assignment) -> Result<RunRef, Error> {
-        let options = validate_worker(assignment.worker, None)?;
+        let options = assignment.worker.validate()?;
         self.admit(
             None,
             Some((options, None)),
@@ -721,6 +721,13 @@ fn validate_duration(value: Option<Duration>) -> Result<(), Error> {
     }
     Ok(())
 }
+impl WorkerOptions {
+    /// Validate the resident policy and resolve paths without starting a worker.
+    pub fn validate(self) -> Result<Self, Error> {
+        validate_worker(self, None)
+    }
+}
+
 fn validate_worker(
     mut worker: WorkerOptions,
     resume: Option<String>,

@@ -20,6 +20,13 @@ pub(super) fn validate_native_args(provider: Provider, arguments: &[String]) -> 
                     .map_or((token.as_str(), None), |(n, v)| (n, Some(v)));
                 (name, value)
             };
+        if provider == Provider::Claude && matches!(name, "--restricted" | "--strict-mcp-config") {
+            if attached.is_some() {
+                return Err(format!("native option {name} does not take a value"));
+            }
+            index += 1;
+            continue;
+        }
         let recognized = match provider {
             Provider::Codex => matches!(name, "-c" | "--config"),
             Provider::Claude => matches!(
@@ -29,6 +36,7 @@ pub(super) fn validate_native_args(provider: Provider, arguments: &[String]) -> 
                     | "--disallowedTools"
                     | "--disallowed-tools"
                     | "--permission-mode"
+                    | "--tools"
             ),
         };
         if !recognized {
@@ -47,7 +55,8 @@ pub(super) fn validate_native_args(provider: Provider, arguments: &[String]) -> 
                     .ok_or_else(|| format!("native option {name} needs a value"))?
             }
         };
-        if value.trim().is_empty() || value.starts_with('-') {
+        let empty_tools = provider == Provider::Claude && name == "--tools" && value.is_empty();
+        if !empty_tools && (value.trim().is_empty() || value.starts_with('-')) {
             return Err(format!("native option {name} needs a nonempty value"));
         }
         match provider {

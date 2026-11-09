@@ -24,6 +24,54 @@ struct Journal {
     closed: bool,
 }
 
+pub(crate) struct ItemPage {
+    pub items: Vec<Value>,
+    pub cursor: u64,
+    pub latest_cursor: u64,
+    pub closed: bool,
+}
+
+impl Journal {
+    fn check_cursor(&self, after: u64) -> Result<(), ReadError> {
+        if after > self.cursor {
+            return Err(ReadError::Ahead {
+                after,
+                latest: self.cursor,
+            });
+        }
+        if let Some((oldest, _, _)) = self.items.front()
+            && after < oldest.saturating_sub(1)
+        {
+            return Err(ReadError::Lagged {
+                after,
+                oldest: *oldest,
+                latest: self.cursor,
+            });
+        }
+        Ok(())
+    }
+
+    fn page(&self, after: u64, limit: usize) -> ItemPage {
+        let mut items = Vec::new();
+        let mut bytes = 0;
+        let mut cursor = after;
+        for (seq, value, size) in self.items.iter().filter(|(seq, _, _)| *seq > after) {
+            if items.len() >= limit || bytes + size > MAX_ITEM_BYTES {
+                break;
+            }
+            items.push(value.clone());
+            bytes += size;
+            cursor = *seq;
+        }
+        ItemPage {
+            items,
+            cursor,
+            latest_cursor: self.cursor,
+            closed: self.closed,
+        }
+    }
+}
+
 pub struct SessionItems {
     id: String,
     journal: Mutex<Journal>,
@@ -124,21 +172,7 @@ impl SessionItems {
             changed.as_mut().enable();
             {
                 let journal = self.journal.lock().unwrap();
-                if after > journal.cursor {
-                    return Err(ReadError::Ahead {
-                        after,
-                        latest: journal.cursor,
-                    });
-                }
-                if let Some((oldest, _, _)) = journal.items.front()
-                    && after < oldest.saturating_sub(1)
-                {
-                    return Err(ReadError::Lagged {
-                        after,
-                        oldest: *oldest,
-                        latest: journal.cursor,
-                    });
-                }
+                journal.check_cursor(after)?;
                 if let Some((_, value, _)) =
                     journal.items.iter().find(|(cursor, _, _)| *cursor > after)
                 {
@@ -168,6 +202,12 @@ impl SessionItems {
         self.changed.notify_waiters();
     }
 
+    pub(crate) fn page_after(&self, after: u64, limit: usize) -> Result<ItemPage, ReadError> {
+        let journal = self.journal.lock().unwrap();
+        journal.check_cursor(after)?;
+        Ok(journal.page(after, limit))
+    }
+
     pub fn read(&self, after: u64, limit: usize) -> Result<Value, String> {
         if !(1..=256).contains(&limit) {
             return Err("limit must be between 1 and 256".into());
@@ -176,20 +216,10 @@ impl SessionItems {
         if after > journal.cursor {
             return Err("after exceeds this session's item cursor".into());
         }
-        let mut items = Vec::new();
-        let mut bytes = 0;
-        let mut cursor = after;
-        for (seq, value, size) in journal.items.iter().filter(|(seq, _, _)| *seq > after) {
-            if items.len() >= limit || (!items.is_empty() && bytes + size > MAX_ITEM_BYTES) {
-                break;
-            }
-            items.push(value.clone());
-            bytes += size;
-            cursor = *seq;
-        }
+        let page = journal.page(after, limit);
         Ok(json!({
-            "session_id":self.id,"items":items,"cursor":cursor,
-            "latest_cursor":journal.cursor,"has_more":cursor < journal.cursor,
+            "session_id":self.id,"items":page.items,"cursor":page.cursor,
+            "latest_cursor":page.latest_cursor,"has_more":page.cursor < page.latest_cursor,
             "items_lost":after < journal.last_dropped,"dropped_items":journal.dropped,
         }))
     }
@@ -311,6 +341,19 @@ mod tests {
         for n in 0..MAX_ITEMS + 3 {
             items.record("native", json!(n), None);
         }
+        assert!(matches!(
+            items.page_after(0, 1),
+            Err(ReadError::Lagged {
+                after: 0,
+                oldest: 4,
+                ..
+            })
+        ));
+        let page = items.page_after(3, 2).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.cursor, 5);
+        assert_eq!(page.latest_cursor, (MAX_ITEMS + 3) as u64);
+        assert!(!page.closed);
         let first = items.read(0, 256).unwrap();
         assert_eq!(first["items"][0]["cursor"], 4);
         assert_eq!(first["items_lost"], true);
@@ -322,6 +365,14 @@ mod tests {
         assert_eq!(last["items"][0]["data"]["kind"], "native");
         assert_eq!(last["items_lost"], true);
         assert_eq!(last["cursor"], MAX_ITEMS + 4);
+        let current = (MAX_ITEMS + 4) as u64;
+        let page = items.page_after(current, 1).unwrap();
+        assert!(page.items.is_empty() && !page.closed);
+        items.finish(None);
+        let page = items.page_after(current, 1).unwrap();
+        assert!(page.closed);
+        assert_eq!(page.cursor, page.latest_cursor);
+        assert_eq!(page.items[0]["kind"], "session_stream_closed");
     }
 
     #[tokio::test]
