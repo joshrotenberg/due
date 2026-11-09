@@ -1,9 +1,8 @@
 # Core library spike
 
-Experimental implementation of the five-function design in
-[PR #147](https://github.com/joshrotenberg/due/pull/147). This branch implements
-the library first. It does not introduce an MCP adapter or JS client, remove
-`due rpc`/`due script`, or replace installed guidance/plugins.
+Experimental implementation of the scoped delegation design in
+[PR #147](https://github.com/joshrotenberg/due/pull/147). This guide describes
+the Rust library used by the comparison example and the stdio MCP adapter.
 
 ## Library boundary
 
@@ -41,6 +40,9 @@ future API revision can decide how much of that data belongs in the core
 result. This spike tests the package boundary while preserving the result
 contract.
 
+The [stdio MCP adapter](../crates/due-mcp/README.md) exposes live runs and
+nonblocking journal pages through tower-mcp.
+
 ## Interface
 
 | Function | Actual spike API |
@@ -51,7 +53,7 @@ contract.
 | `wait` | `engine.wait(&runs, WaitOptions { until, timeout }).await` |
 | `interrupt` | `engine.interrupt(&run).await`; targets the exact assignment and awaits terminal settlement |
 | `respond` | `engine.respond(&interaction.id, native_response).await`; answers one pending generation |
-| `subscribe` | `engine.subscribe(&session, after_cursor)`; independent full-item stream across turns |
+| `subscribe` | `engine.subscribe(&session, after_cursor)`; independent full-item stream across turns with `next().await` or nonblocking pages via `read_available(limit)` |
 
 `WorkerOptions` fixes provider, canonical cwd, resolved executable, requested
 model/effort, ephemeral choice and audited native policy arguments at admission.

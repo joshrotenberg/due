@@ -32,5 +32,5 @@ mod stream;
 mod types;
 
 pub use engine::Engine;
-pub use stream::{SessionItem, SessionStream, StreamError};
+pub use stream::{SessionItem, SessionPage, SessionStream, StreamError};
 pub use types::*;

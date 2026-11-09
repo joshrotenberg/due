@@ -1,0 +1,20 @@
+[package]
+name = "due-mcp"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Stdio MCP adapter for due-core"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+due-core = { path = "../due-core" }
+schemars = "1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower-mcp = { version = "=0.25.0", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "process", "time"] }

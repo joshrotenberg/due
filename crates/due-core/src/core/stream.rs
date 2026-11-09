@@ -23,6 +23,19 @@ pub struct SessionItem {
     pub interaction: Option<InteractionRef>,
 }
 
+/// Bounded replay of currently retained items.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionPage {
+    /// Items in cursor order, with full retained payloads.
+    pub items: Vec<SessionItem>,
+    /// Exclusive cursor for the next read.
+    pub cursor: u64,
+    /// Latest cursor at the time the page was read.
+    pub latest_cursor: u64,
+    /// Whether the journal is sealed. Retained items may still remain.
+    pub closed: bool,
+}
+
 /// An independent cursor over one bounded journal; dropping it never cancels work.
 pub struct SessionStream {
     pub(super) session: SessionRef,
@@ -48,10 +61,33 @@ impl SessionStream {
         else {
             return Ok(None);
         };
+        let item = self.decode(raw);
+        self.after = item.cursor;
+        Ok(Some(item))
+    }
+
+    /// Read up to 256 available items without waiting for the provider.
+    /// Pages share the journal's 4 MiB payload budget and report gaps explicitly.
+    /// An error leaves this reader's cursor unchanged.
+    pub fn read_available(&mut self, limit: usize) -> Result<SessionPage, StreamError> {
+        if !(1..=256).contains(&limit) {
+            return Err(StreamError::InvalidLimit);
+        }
+        let page = self.items.page_after(self.after, limit)?;
+        self.after = page.cursor;
+        Ok(SessionPage {
+            items: page.items.into_iter().map(|raw| self.decode(raw)).collect(),
+            cursor: page.cursor,
+            latest_cursor: page.latest_cursor,
+            closed: page.closed,
+        })
+    }
+
+    fn decode(&self, mut raw: Value) -> SessionItem {
         let cursor = raw["cursor"].as_u64().expect("journal cursor");
         let run = raw["turn_id"].as_str().map(|id| RunRef(id.into()));
         let kind = raw["kind"].as_str().expect("journal kind").to_owned();
-        let data = raw["data"].clone();
+        let data = raw["data"].take();
         let interaction = if kind == "interaction" {
             run.clone()
                 .zip(data["request_id"].as_str())
@@ -63,21 +99,23 @@ impl SessionStream {
         } else {
             None
         };
-        self.after = cursor;
-        Ok(Some(SessionItem {
+        SessionItem {
             session: self.session.clone(),
             run,
             cursor,
             kind,
             data,
             interaction,
-        }))
+        }
     }
 }
 
 /// Retention/invalid cursor errors. Oversized individual items use omission markers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamError {
+    /// Page size must be in 1..=256.
+    InvalidLimit,
     /// The requested cursor predates the oldest retained item.
     Lagged {
         /// Last delivered cursor.

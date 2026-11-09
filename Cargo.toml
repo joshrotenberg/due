@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace]
-members = [".", "crates/due-core", "crates/due-harness", "examples/core-compare"]
+members = [".", "crates/due-core", "crates/due-mcp", "crates/due-harness", "examples/core-compare"]
 default-members = [".", "crates/due-harness"]
 exclude = ["examples/rpc-languages"]
 resolver = "3"
