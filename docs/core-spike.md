@@ -44,8 +44,9 @@ contract.
 
 The [stdio MCP adapter](../crates/due-mcp/README.md) exposes live runs and
 nonblocking journal pages through tower-mcp. The [standalone RPC adapter](../crates/due-rpc/README.md)
-adds live item subscriptions and cursor replay over stdio. The [embedded JavaScript harness](../crates/due-js/README.md)
-uses the same engine in process.
+adds live item subscriptions and cursor replay over stdio. The optional embedded
+[JavaScript](../crates/due-js/README.md) and [Lua](../crates/due-lua/README.md)
+harnesses share an in-process engine bridge.
 
 ## Interface
 

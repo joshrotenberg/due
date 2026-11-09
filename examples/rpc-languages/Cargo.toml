@@ -11,7 +11,7 @@ resolver = "3"
 
 [features]
 default = ["lua", "js"]
-lua = ["dep:mlua"]
+lua = ["dep:mlua", "due-harness/lua"]
 js = ["due-harness/js"]
 
 [dependencies]

@@ -15,12 +15,13 @@ path = "src/main.rs"
 name = "due"
 
 [workspace]
-members = [".", "crates/due-core", "crates/due-mcp", "crates/due-rpc", "crates/due-js", "crates/due-harness", "examples/core-compare"]
+members = [".", "crates/due-core", "crates/due-mcp", "crates/due-rpc", "crates/due-js", "crates/due-lua", "crates/due-harness", "examples/core-compare"]
 default-members = [".", "crates/due-harness"]
 exclude = ["examples/rpc-languages"]
 resolver = "3"
 
 [workspace.dependencies]
+mlua = { version = "=0.12.2", default-features = false, features = ["lua54", "vendored", "serde"] }
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
 codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "e91e6279bc60bdb54ef85940a5bc7a9b03e944dc" }

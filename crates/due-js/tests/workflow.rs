@@ -1,34 +1,13 @@
 #![cfg(unix)]
 
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
-};
+use std::{fs, process::Command, time::Duration};
 
 use serde_json::{Value, json};
 
-fn fake_provider(directory: &Path) -> PathBuf {
-    fs::create_dir(directory).unwrap();
-    fs::write(
-        directory.join("native"),
-        include_bytes!("../../due-core/tests/fixtures/session-agent.sh"),
-    )
-    .unwrap();
-    let executable = directory.join("provider");
-    fs::write(
-        &executable,
-        r#"#!/bin/sh
-export DUE_SESSION_FIXTURE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-exec /bin/bash "$DUE_SESSION_FIXTURE_DIR/native" "$@"
-"#,
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-    executable
-}
+#[path = "../../due-harness/tests/support/fake_provider.rs"]
+mod support;
+
+use support::fake_provider;
 
 #[test]
 fn standalone_workflow_uses_both_providers_and_explicit_follow_up_approvals() {
