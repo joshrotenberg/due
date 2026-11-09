@@ -1,9 +1,12 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+mod profiles;
+
+use std::{path::Path, sync::Arc, time::Duration};
 
 use due_core::{
     Assignment, Engine, FollowUp, InteractionRef, Limits, Provider, RunRef, SessionRef,
-    WaitOptions, WaitUntil, WorkerOptions,
+    WaitOptions, WaitUntil,
 };
+use profiles::Workers;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -14,23 +17,32 @@ use tower_mcp::{
 
 struct App {
     engine: Engine,
-    cwd: PathBuf,
-    claude_binary: Option<PathBuf>,
-    codex_binary: Option<PathBuf>,
+    workers: Workers,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Spawn {
-    #[schemars(schema_with = "provider_schema")]
-    provider: Provider,
+    /// Native provider defaults. Supply either provider or profile.
+    #[schemars(with = "Option<ProviderName>")]
+    provider: Option<Provider>,
+    /// Name from the operator's profile catalog. Supply either provider or profile.
+    profile: Option<String>,
     prompt: String,
     /// Optional execution deadline in milliseconds, including native startup.
     timeout_ms: Option<u64>,
 }
 
-fn provider_schema(_: &mut SchemaGenerator) -> Schema {
-    json_schema!({"type": "string", "enum": [Provider::Claude.as_str(), Provider::Codex.as_str()]})
+struct ProviderName;
+
+impl JsonSchema for ProviderName {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Provider".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type": "string", "enum": [Provider::Claude.as_str(), Provider::Codex.as_str()]})
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -93,12 +105,11 @@ fn router(app: Arc<App>) -> McpRouter {
         .instructions("Spawn a worker, then use its run and session references to inspect, wait, follow up, or read items. Use inspect to find pending interactions and respond with an explicit provider-native decision.")
         .tool(
             ToolBuilder::new("spawn")
-                .description("Start a Claude or Codex worker in the server's working directory.")
+                .description("Start a worker. Supply a named profile when the server has a catalog, or a provider otherwise.")
                 .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Spawn>| async move {
-                    let mut worker = WorkerOptions::new(input.provider, &app.cwd);
-                    worker.binary = match input.provider {
-                        Provider::Claude => app.claude_binary.clone(),
-                        Provider::Codex => app.codex_binary.clone(),
+                    let worker = match app.workers.select(input.provider, input.profile.as_deref()) {
+                        Ok(worker) => worker,
+                        Err(message) => return tool_error(json!({"kind":"invalid_input","message":message})),
                     };
                     let assignment = Assignment {
                         worker,
@@ -203,11 +214,16 @@ fn outcome<T: Serialize>(result: Result<T, due_core::Error>) -> tower_mcp::Resul
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
+    let catalog = std::env::var_os("DUE_MCP_PROFILES");
+    let workers = Workers::load(
+        std::env::current_dir()?,
+        std::env::var_os("DUE_MCP_CLAUDE_BINARY").map(Into::into),
+        std::env::var_os("DUE_MCP_CODEX_BINARY").map(Into::into),
+        catalog.as_deref().map(Path::new),
+    )?;
     let app = Arc::new(App {
         engine: Engine::new(Limits::default())?,
-        cwd: std::env::current_dir()?,
-        claude_binary: std::env::var_os("DUE_MCP_CLAUDE_BINARY").map(Into::into),
-        codex_binary: std::env::var_os("DUE_MCP_CODEX_BINARY").map(Into::into),
+        workers,
     });
     let mut transport = StdioTransport::without_server_notifications(router(app.clone()))
         .max_concurrent_requests(16)

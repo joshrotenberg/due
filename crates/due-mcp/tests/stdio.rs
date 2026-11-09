@@ -19,22 +19,42 @@ struct Peer {
 }
 
 impl Peer {
-    fn start(root: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_due-mcp"))
+    fn start(root: &Path, catalog: Option<&Path>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_due-mcp"));
+        command
             .current_dir(root)
             .env("DUE_MCP_CLAUDE_BINARY", fake_provider(&root.join("claude")))
             .env("DUE_MCP_CODEX_BINARY", fake_provider(&root.join("codex")))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+            .env_remove("DUE_MCP_PROFILES");
+        if let Some(path) = catalog {
+            command.env("DUE_MCP_PROFILES", path);
+        }
+        let mut child = command.spawn().unwrap();
         Self {
             input: child.stdin.take().unwrap(),
             output: BufReader::new(child.stdout.take().unwrap()).lines(),
             child,
             next_id: 1,
         }
+    }
+
+    async fn initialize(&mut self) {
+        let initialized = self
+            .call(
+                "initialize",
+                json!({
+                    "protocolVersion":"2025-11-25","capabilities":{},
+                    "clientInfo":{"name":"due-mcp-test","version":"0.1"}
+                }),
+            )
+            .await;
+        assert_eq!(initialized["protocolVersion"], "2025-11-25");
+        assert_eq!(initialized["serverInfo"]["name"], "due-mcp");
+        self.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await;
     }
 
     async fn send(&mut self, message: Value) {
@@ -151,20 +171,8 @@ exec /bin/bash "$DUE_SESSION_FIXTURE_DIR/native" "$@"
 #[tokio::test]
 async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
     let workspace = tempfile::tempdir().unwrap();
-    let mut peer = Peer::start(workspace.path());
-    let initialized = peer
-        .call(
-            "initialize",
-            json!({
-                "protocolVersion":"2025-11-25","capabilities":{},
-                "clientInfo":{"name":"due-mcp-test","version":"0.1"}
-            }),
-        )
-        .await;
-    assert_eq!(initialized["protocolVersion"], "2025-11-25");
-    assert_eq!(initialized["serverInfo"]["name"], "due-mcp");
-    peer.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
-        .await;
+    let mut peer = Peer::start(workspace.path(), None);
+    peer.initialize().await;
     let listed = peer.call("tools/list", json!({})).await;
     let mut tools: Vec<_> = listed["tools"]
         .as_array()
@@ -320,5 +328,171 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
     );
     for provider in ["claude", "codex"] {
         assert!(workspace.path().join(provider).join("exited").is_file());
+    }
+}
+
+#[tokio::test]
+async fn profile_selection_freezes_native_options_across_follow_up() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path();
+    let catalog = root.join("profiles.json");
+    let profiles = json!({
+        "schema_version": 1,
+        "profiles": [
+            {"name":"worker","provider":"claude","model":"fixture-claude",
+             "native_args":["--restricted","--strict-mcp-config","--tools","Read,Edit"]},
+            {"name":"reviewer","provider":"codex","model":"fixture-codex",
+             "native_args":["-c","sandbox_mode=\"read-only\"","-c","approval_policy=\"never\""]}
+        ]
+    });
+    fs::write(&catalog, profiles.to_string()).unwrap();
+    let mut peer = Peer::start(root, Some(&catalog));
+    peer.initialize().await;
+    // Invalid selectors cannot spawn a process, even when a provider is valid.
+    for arguments in [
+        json!({"profile":"../worker","prompt":"first"}),
+        json!({"provider":"claude","prompt":"first"}),
+        json!({"provider":"claude","profile":"worker","prompt":"first"}),
+        json!({"prompt":"first"}),
+    ] {
+        let result = peer
+            .call("tools/call", json!({"name":"spawn","arguments":arguments}))
+            .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(
+            result["structuredContent"]["error"]["kind"],
+            "invalid_input"
+        );
+    }
+    for provider in ["claude", "codex"] {
+        assert!(!root.join(provider).join("argv").exists());
+    }
+    // The catalog belongs to the server for this connection and is loaded once.
+    fs::write(&catalog, "changed after initialization").unwrap();
+    for (profile, provider, arguments) in [
+        (
+            "worker",
+            "claude",
+            &[
+                "--restricted",
+                "--strict-mcp-config",
+                "--tools",
+                "Read,Edit",
+            ][..],
+        ),
+        (
+            "reviewer",
+            "codex",
+            &[
+                "-c",
+                "sandbox_mode=\"read-only\"",
+                "-c",
+                "approval_policy=\"never\"",
+            ][..],
+        ),
+    ] {
+        let started = peer
+            .tool("spawn", json!({"profile":profile,"prompt":"first"}))
+            .await;
+        assert_eq!(started["provider"], provider);
+        let first = peer
+            .tool("wait", json!({"runs":[started["run"]],"timeout_ms":10000}))
+            .await;
+        assert_eq!(first["runs"][0]["result"]["text"], "turn 1");
+        assert_eq!(
+            first["runs"][0]["saved_session"]["worker"]["native_args"],
+            json!(arguments)
+        );
+        let argv_path = root.join(provider).join("argv");
+        let argv = fs::read_to_string(&argv_path).unwrap();
+        let tokens: Vec<_> = argv.split_terminator('\0').collect();
+        assert!(
+            tokens
+                .windows(arguments.len())
+                .any(|window| window == arguments),
+            "{tokens:?}"
+        );
+
+        let followed = peer
+            .tool(
+                "follow_up",
+                json!({"session":started["session"],"prompt":"follow up"}),
+            )
+            .await;
+        let second = peer
+            .tool("wait", json!({"runs":[followed["run"]],"timeout_ms":10000}))
+            .await;
+        assert_ne!(followed["run"], started["run"]);
+        assert_eq!(followed["session"], started["session"]);
+        assert_eq!(
+            second["runs"][0]["result"]["session_id"],
+            first["runs"][0]["result"]["session_id"]
+        );
+        assert_eq!(
+            second["runs"][0]["saved_session"]["worker"]["native_args"],
+            json!(arguments)
+        );
+        assert_eq!(fs::read_to_string(argv_path).unwrap(), argv);
+    }
+    drop(peer.input);
+    assert!(
+        timeout(DEADLINE, peer.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
+async fn invalid_catalog_is_rejected_before_mcp_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog = root.path().join("profiles.json");
+    let worker = json!({"name":"worker","provider":"claude"});
+    for (profiles, expected) in [
+        (json!([]), "at least one profile"),
+        (json!([worker, worker]), "duplicate profile"),
+        (
+            json!([{"name":"../worker","provider":"claude"}]),
+            "profile names",
+        ),
+        (
+            json!([{"name":"worker","provider":"claude","binary":"/bin/sh"}]),
+            "unknown field",
+        ),
+        (
+            json!([{"name":"worker","provider":"claude","native_args":["--resume","other"]}]),
+            "unsupported by resident",
+        ),
+        (
+            json!([{"name":"worker","provider":"claude","native_args":["--restricted=false"]}]),
+            "does not take a value",
+        ),
+        (
+            json!([{"name":"reviewer","provider":"codex","native_args":["-c","sandbox_mode=\"invalid\""]}]),
+            "invalid value",
+        ),
+    ] {
+        fs::write(
+            &catalog,
+            json!({"schema_version":1,"profiles":profiles}).to_string(),
+        )
+        .unwrap();
+        let output = timeout(
+            DEADLINE,
+            Command::new(env!("CARGO_BIN_EXE_due-mcp"))
+                .current_dir(root.path())
+                .env("DUE_MCP_PROFILES", &catalog)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(expected), "{stderr}");
     }
 }

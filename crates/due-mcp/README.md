@@ -18,7 +18,7 @@ cargo test --locked -p due-mcp --test stdio
 
 | Tool | Arguments and behavior |
 | --- | --- |
-| `spawn` | `provider` (`claude` or `codex`), `prompt`, optional `timeout_ms`. Returns a run snapshot with a run and a live session reference. |
+| `spawn` | `profile` or `provider` (`claude` or `codex`), `prompt`, optional `timeout_ms`. Returns a run snapshot with a run and a live session reference. |
 | `follow_up` | `session`, `prompt`, optional `timeout_ms`. Starts the next turn in that live session. |
 | `inspect` | `run`. Returns the current snapshot with pending interactions or a terminal result. |
 | `wait` | `runs`, optional `any` and `timeout_ms`. Waits for all runs by default. The observation budget defaults to one second and is capped at ten seconds. Zero polls. |
@@ -42,3 +42,51 @@ MCP tool error with `error.kind = "lagged"` and an `oldest_available` cursor.
 Restart at `oldest_available - 1` to explicitly acknowledge the gap.
 Pages use the [core journal's size limits](../../docs/core-spike.md#full-session-item-stream).
 Results carry structured JSON and a compact JSON text representation.
+
+## Worker profiles
+
+Set `DUE_MCP_PROFILES` to an operator-owned JSON file when launching the
+server. Keep it outside the worker's checkout. The server reads it once,
+requires unique names and validates each entry with the core's resident
+worker policy before serving requests.
+
+```json
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "name": "worker",
+      "provider": "claude",
+      "native_args": ["--restricted", "--strict-mcp-config", "--permission-mode", "default", "--tools", "Read,Edit,Write,Glob,Grep"]
+    },
+    {
+      "name": "reviewer",
+      "provider": "codex",
+      "native_args": ["-c", "sandbox_mode=\"read-only\"", "-c", "approval_policy=\"never\""]
+    }
+  ]
+}
+```
+
+Each entry requires `name` and `provider`. Optional fields are `model`,
+`effort`, `ephemeral`, `native_args` and `interaction_mode` (`manual` by
+default or `reject`). The native CLI must support the selected options.
+Working directory and executable selection belong to the server launch.
+
+With a catalog, `spawn` requires a known `profile` and rejects bare
+provider selection. Without a catalog, supply `provider` as usual.
+Follow-ups use the live session's fixed profile. The client still decides
+how to answer pending interactions in manual mode.
+
+```js
+const started = await client.callTool({
+  name: "spawn",
+  arguments: { profile: "worker", prompt: "Fix the cancellation regression.", timeout_ms: 300000 },
+});
+const { run, session } = started.structuredContent;
+// Inspect or wait for run and handle any approvals before following up.
+await client.callTool({
+  name: "follow_up",
+  arguments: { session, prompt: "Address the review findings.", timeout_ms: 300000 },
+});
+```
