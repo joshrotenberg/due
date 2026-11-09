@@ -44,6 +44,101 @@ pub(crate) fn run(
     args: &str,
     async_mode: bool,
 ) -> Result<serde_json::Value, String> {
+    let check = Rc::clone(&host);
+    let fail = Rc::clone(&host);
+    evaluate(
+        source,
+        async_mode,
+        move || check.check(),
+        move |message| {
+            fail.fail(message);
+        },
+        |ctx| {
+            let bridge = Object::new(ctx.clone())?;
+            bridge.set("args", args)?;
+            let sender = Rc::clone(&host);
+            bridge.set(
+                "send",
+                Function::new(ctx.clone(), move |ctx: Ctx<'_>, line: String| {
+                    sender
+                        .send(&line)
+                        .map_err(|e| Exception::throw_message(&ctx, &e))
+                })?,
+            )?;
+            let receiver = Rc::clone(&host);
+            bridge.set(
+                "recv",
+                Function::new(ctx.clone(), move |ctx: Ctx<'_>, ms: f64| {
+                    if !ms.is_finite() || ms.fract() != 0.0 || !(0.0..=10000.0).contains(&ms) {
+                        return Err(Exception::throw_message(
+                            &ctx,
+                            "receive timeout must be an integer in 0..10000",
+                        ));
+                    }
+                    receiver
+                        .recv(ms as u64)
+                        .map(Frame)
+                        .map_err(|e| Exception::throw_message(&ctx, &e))
+                })?,
+            )?;
+            let clock = Rc::clone(&host);
+            bridge.set(
+                "now_ms",
+                Function::new(ctx.clone(), move || clock.now_ms())?,
+            )?;
+            bridge.set(
+                "log",
+                Function::new(ctx.clone(), |text: String| eprintln!("{text}"))?,
+            )?;
+            if async_mode {
+                let executor = Rc::clone(&host);
+                bridge.set(
+                    "exec_start",
+                    Function::new(ctx.clone(), move |ctx: Ctx<'_>, spec: String| {
+                        executor
+                            .exec_start(&spec)
+                            .map_err(|e| Exception::throw_message(&ctx, &e))
+                    })?,
+                )?;
+                let executor = Rc::clone(&host);
+                bridge.set(
+                    "exec_poll",
+                    Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u64| {
+                        executor
+                            .exec_poll(id)
+                            .map(Frame)
+                            .map_err(|e| Exception::throw_message(&ctx, &e))
+                    })?,
+                )?;
+                let executor = Rc::clone(&host);
+                bridge.set(
+                    "exec_cancel",
+                    Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u64| {
+                        executor
+                            .exec_cancel(id)
+                            .map_err(|e| Exception::throw_message(&ctx, &e))
+                    })?,
+                )?;
+            }
+            ctx.globals().set("bridge", bridge)?;
+            ctx.eval::<(), _>(include_str!("../clients/client.js"))?;
+            if async_mode {
+                ctx.eval::<(), _>(include_str!("../clients/async.js"))?;
+            }
+            Ok(())
+        },
+    )
+}
+
+/// Shared QuickJS evaluator for Due's embedded JavaScript adapters.
+/// The installer supplies the globals and, in async mode, the Due.run job pump.
+pub fn evaluate(
+    source: &str,
+    async_mode: bool,
+    check: impl Fn() -> Result<(), String> + 'static,
+    fail: impl Fn(String) + 'static,
+    install: impl for<'js> FnOnce(&Ctx<'js>) -> rquickjs::Result<()>,
+) -> Result<serde_json::Value, String> {
     let runtime = Runtime::new().map_err(|e| e.to_string())?;
     runtime.set_memory_limit(32 * 1024 * 1024);
     runtime.set_max_stack_size(512 * 1024);
@@ -52,7 +147,6 @@ pub(crate) fn run(
     let rejected: Rc<RefCell<HashMap<Persistent<Value<'static>>, String>>> = Rc::default();
     let promise_tracker = Rc::clone(&used_promise);
     let live_promises = Rc::clone(&promises);
-    let limits = Rc::clone(&host);
     runtime.set_promise_hook(Some(Box::new(move |ctx, kind, promise, _| {
         promise_tracker.set(true);
         if !async_mode {
@@ -63,7 +157,7 @@ pub(crate) fn run(
             PromiseHookType::Init => {
                 let mut live = live_promises.borrow_mut();
                 if live.len() >= 4096 {
-                    limits.fail("too many unsettled JavaScript Promises".into());
+                    fail("too many unsettled JavaScript Promises".into());
                 } else {
                     live.insert(saved);
                 }
@@ -92,83 +186,16 @@ pub(crate) fn run(
             },
         )));
     }
-    let interrupt = Rc::clone(&host);
-    runtime.set_interrupt_handler(Some(Box::new(move || interrupt.check().is_err())));
+    let check = Rc::new(check);
+    let interrupt = Rc::clone(&check);
+    runtime.set_interrupt_handler(Some(Box::new(move || interrupt().is_err())));
     let context = Context::full(&runtime).map_err(|e| e.to_string())?;
     let result = (|| {
         context.with(|ctx| {
             let execute = || -> rquickjs::Result<()> {
-                let bridge = Object::new(ctx.clone())?;
-                bridge.set("args", args)?;
-                let sender = Rc::clone(&host);
-                bridge.set(
-                    "send",
-                    Function::new(ctx.clone(), move |ctx: Ctx<'_>, line: String| {
-                        sender
-                            .send(&line)
-                            .map_err(|e| Exception::throw_message(&ctx, &e))
-                    })?,
-                )?;
-                let receiver = Rc::clone(&host);
-                bridge.set(
-                    "recv",
-                    Function::new(ctx.clone(), move |ctx: Ctx<'_>, ms: f64| {
-                        if !ms.is_finite() || ms.fract() != 0.0 || !(0.0..=10000.0).contains(&ms) {
-                            return Err(Exception::throw_message(
-                                &ctx,
-                                "receive timeout must be an integer in 0..10000",
-                            ));
-                        }
-                        receiver
-                            .recv(ms as u64)
-                            .map(Frame)
-                            .map_err(|e| Exception::throw_message(&ctx, &e))
-                    })?,
-                )?;
-                let clock = Rc::clone(&host);
-                bridge.set(
-                    "now_ms",
-                    Function::new(ctx.clone(), move || clock.now_ms())?,
-                )?;
-                bridge.set(
-                    "log",
-                    Function::new(ctx.clone(), |text: String| eprintln!("{text}"))?,
-                )?;
-                if async_mode {
-                    let executor = Rc::clone(&host);
-                    bridge.set(
-                        "exec_start",
-                        Function::new(ctx.clone(), move |ctx: Ctx<'_>, spec: String| {
-                            executor
-                                .exec_start(&spec)
-                                .map_err(|e| Exception::throw_message(&ctx, &e))
-                        })?,
-                    )?;
-                    let executor = Rc::clone(&host);
-                    bridge.set(
-                        "exec_poll",
-                        Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u64| {
-                            executor
-                                .exec_poll(id)
-                                .map(Frame)
-                                .map_err(|e| Exception::throw_message(&ctx, &e))
-                        })?,
-                    )?;
-                    let executor = Rc::clone(&host);
-                    bridge.set(
-                        "exec_cancel",
-                        Function::new(ctx.clone(), move |ctx: Ctx<'_>, id: u64| {
-                            executor
-                                .exec_cancel(id)
-                                .map_err(|e| Exception::throw_message(&ctx, &e))
-                        })?,
-                    )?;
-                }
-                ctx.globals().set("bridge", bridge)?;
-                ctx.eval::<(), _>(include_str!("../clients/client.js"))?;
-                if async_mode {
-                    ctx.eval::<(), _>(include_str!("../clients/async.js"))?;
-                }
+                ctx.eval::<(), _>(include_str!("../clients/json.js"))?;
+                install(&ctx)?;
+                ctx.globals().remove("__dueJson")?;
                 let result: Value = ctx.eval(source)?;
                 if !async_mode && (used_promise.get() || result.is_promise()) {
                     return Err(Exception::throw_message(
@@ -184,7 +211,7 @@ pub(crate) fn run(
             return Ok(serde_json::Value::Null);
         }
         loop {
-            host.check()?;
+            check()?;
             // A runaway microtask chain must not starve RPC items or process cancellation.
             for _ in 0..64 {
                 match runtime.execute_pending_job() {

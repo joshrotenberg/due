@@ -251,6 +251,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "due-js"
+version = "0.0.0"
+dependencies = [
+ "due-core",
+ "due-harness",
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "due-mcp"
 version = "0.0.0"
 dependencies = [
