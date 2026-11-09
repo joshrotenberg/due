@@ -2,7 +2,7 @@
 
 Experimental implementation of the scoped delegation design in
 [PR #147](https://github.com/joshrotenberg/due/pull/147). This guide describes
-the Rust library used by the comparison example and the stdio MCP adapter.
+the Rust library used by the comparison example and the stdio adapters.
 
 ## Library boundary
 
@@ -41,7 +41,8 @@ result. This spike tests the package boundary while preserving the result
 contract.
 
 The [stdio MCP adapter](../crates/due-mcp/README.md) exposes live runs and
-nonblocking journal pages through tower-mcp.
+nonblocking journal pages through tower-mcp. The [standalone RPC adapter](../crates/due-rpc/README.md)
+adds live item subscriptions and cursor replay over stdio.
 
 ## Interface
 
