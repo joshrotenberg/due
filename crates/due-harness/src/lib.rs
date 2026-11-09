@@ -5,6 +5,14 @@
 //! Call [`run_js`] from a synchronous thread, outside an async executor task.
 
 mod bridge;
+#[cfg(feature = "core")]
+#[doc(hidden)]
+pub mod core;
+#[cfg(feature = "lua")]
+mod lua;
+#[cfg(feature = "lua")]
+#[doc(hidden)]
+pub use lua::create as create_lua_runtime;
 #[cfg(feature = "js")]
 mod javascript;
 #[cfg(feature = "js")]

@@ -9,8 +9,13 @@ description = "Internal owned JavaScript workflow runtime for Due"
 [features]
 default = ["js"]
 js = ["dep:rquickjs"]
+core = ["dep:due-core", "dep:serde"]
+lua = ["dep:mlua"]
 
 [dependencies]
+due-core = { path = "../due-core", optional = true }
+mlua = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "sync", "time", "macros", "signal"] }
 rquickjs = { workspace = true, optional = true }

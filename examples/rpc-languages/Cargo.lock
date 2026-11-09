@@ -153,6 +153,7 @@ name = "due-harness"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "mlua",
  "rquickjs",
  "serde_json",
  "tokio",
