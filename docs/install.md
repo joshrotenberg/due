@@ -21,16 +21,16 @@ task-permission failures.
   repository access, provider availability, and host policy remain local choices.
 
 macOS and Linux are the CI targets. Windows process cleanup and installation have
-not been validated. Builds fetch the exact Git-pinned wrapper revisions plus
-locked crates; keep `Cargo.lock` and the wrapper pins unchanged.
+not been validated. Builds fetch the Claude wrapper from crates.io and the
+Codex wrapper from its pinned Git revision. Keep `Cargo.lock` and both wrapper
+pins unchanged.
 
 ## Build and install the CLI
 
-Clone into a normal local development directory with GitHub SSH access, or use
-`gh repo clone joshrotenberg/due` with your authenticated GitHub CLI:
+Clone the public repository into a normal local development directory:
 
 ```sh
-git clone git@github.com:joshrotenberg/due.git
+git clone https://github.com/joshrotenberg/due.git
 cd due
 git rev-parse HEAD
 cargo install --path . --locked

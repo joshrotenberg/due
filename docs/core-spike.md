@@ -255,4 +255,5 @@ turns and confirmed PID reaping. Cleanup failures remain separate and sticky.
 The existing CLI/RPC/harness suites remain regression coverage. CI adds the
 core-only build/test combination on Linux and macOS and a Rust 1.90 core-only
 check. Local fake-provider success is not evidence of every real native version,
-approval policy or platform. No dependencies or wrapper revisions are upgraded.
+approval policy or platform. See the workspace manifest and lockfile for the
+exact wrapper dependencies used by the build.
