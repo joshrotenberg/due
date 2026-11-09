@@ -77,16 +77,15 @@ authorization. See [install.md](install.md) for installation steps.
 
 ## Build dependencies
 
-The MVP pins full Git commits containing passthrough support
+Due uses wrapper versions with passthrough support
 ([claude-wrapper #817](https://github.com/joshrotenberg/claude-wrapper/pull/817),
 [codex-wrapper #148](https://github.com/joshrotenberg/codex-wrapper/pull/148)) and
 cooperative shutdown
 ([claude-wrapper #818](https://github.com/joshrotenberg/claude-wrapper/pull/818),
 [codex-wrapper #149](https://github.com/joshrotenberg/codex-wrapper/pull/149)).
-The first build needs GitHub and crates.io access. It does not depend on local
-wrapper checkouts. Keep the Git pins while the wrappers are exercised through
-Due; releases can follow once their behavior is settled. Keep `Cargo.lock`
-committed for reproducible application builds.
+The first build needs GitHub for the Git-pinned Claude wrapper and crates.io
+for the pinned Codex wrapper release and other registry dependencies. Keep
+`Cargo.lock` committed for reproducible application builds.
 
 ## Shared options
 
