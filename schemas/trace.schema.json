@@ -186,6 +186,10 @@
         },
         "truncated": {
           "type": "boolean"
+        },
+        "source": {
+          "const": "permission_check_input",
+          "description": "Bash input from a native Claude denial, which may reflect a hook rewrite."
         }
       },
       "description": "Opt-in content excerpt, capped at 240 UTF-8 bytes after terminal-control escaping. Absent by default. Excerpts may contain sensitive provider content."

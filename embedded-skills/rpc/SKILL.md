@@ -291,8 +291,9 @@ remains.
   successfully does not turn a failed turn into a success.
 - A session lives only in this process. Reconnecting after process loss is not
   provided; resume the native session in a new process instead.
-- Native permissions are inherited, and the worker's tool processes are the
-  provider's. Verify diffs, artifacts and any external effect yourself.
+- The worker uses the provider's ordinary settings and any explicit session
+  options. The caller's effective permission mode and temporary grants do not
+  transfer. Verify diffs, artifacts and any external effect yourself.
 
 ## Minimal client
 

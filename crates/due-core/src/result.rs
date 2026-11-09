@@ -19,6 +19,7 @@ pub struct RunResult {
     pub schema_version: u32,
     pub run_id: Option<String>,
     pub trace: Option<TraceSummary>,
+    pub permission_denials: PermissionDenials,
     /// Null only when a JSON request was rejected before resolving an invocation.
     pub provider: Option<Provider>,
     pub provenance: Provenance,
@@ -106,9 +107,25 @@ impl ReportedSettings {
     }
 }
 
+/// Bounded metadata from Claude's native terminal records.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct PermissionDenials {
+    pub items: Vec<PermissionDenial>,
+    pub incomplete: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PermissionDenial {
+    pub tool_name: String,
+    pub tool_use_id: String,
+}
+
 impl Serialize for RunResult {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let has_denials =
+            !self.permission_denials.items.is_empty() || self.permission_denials.incomplete;
         let count = 13
+            + usize::from(has_denials)
             + usize::from(self.run_id.is_some())
             + usize::from(self.trace.is_some())
             + usize::from(self.invocation.is_some());
@@ -119,6 +136,9 @@ impl Serialize for RunResult {
         }
         if let Some(trace) = &self.trace {
             fields.serialize_field("trace", trace)?;
+        }
+        if has_denials {
+            fields.serialize_field("permission_denials", &self.permission_denials)?;
         }
         fields.serialize_field("provider", &self.provider)?;
         fields.serialize_field("provenance", &self.provenance)?;
@@ -250,6 +270,7 @@ impl RunResult {
             schema_version: 1,
             run_id: None,
             trace: None,
+            permission_denials: PermissionDenials::default(),
             provider,
             provenance: Provenance {
                 requested: provider.map(|_| RequestedSettings::default()),

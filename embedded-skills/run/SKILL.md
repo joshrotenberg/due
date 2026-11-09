@@ -129,11 +129,28 @@ Due has no implicit last-session selection or private session database.
 
 ## Native permissions and options
 
-Provider authentication, settings and permissions remain in force. Due does not
-make Claude and Codex permission policies equivalent, grant new authorization or
-disable native subagents by default. State whether delegation is allowed.
-Profiles can carry task-scoped native controls; see `profiles` for examples and
-the narrower resident-session allowlist.
+By default, the worker starts with the provider's ordinary user, project and
+managed settings for the selected cwd and noninteractive mode. Leave native
+permission options unset unless the assignment calls for explicit controls.
+Due cannot read the calling session's effective permission mode, temporary
+grants or approvals. Carry the user's authorization into the prompt and state
+whether delegation is allowed. A prompt sets scope but cannot enforce a tool
+restriction. Profiles can carry explicit native controls when needed.
+
+Claude matches command rules against the input submitted for permission
+checking. A PreToolUse hook can rewrite that input before rules match, so
+`Bash(git push:*)` might miss `rtk git push ...`. To verify a required block,
+probe the exact assignment profile, cwd and hook setup with a harmless
+equivalent, such as `git push --dry-run` against a disposable local remote.
+A `due run --dry-run` only previews arguments. For a one-shot comparison, use
+`--settings '{"disableAllHooks":true}'` after `--` if disabling hooks for that
+run is authorized and supported by the provider. Keep managed policy in force.
+
+A Claude tool denial can occur in a successful turn. Inspect
+`result.permission_denials` in JSON output for reported tool names and IDs.
+Detailed trace records can show the requested command and, when Claude reports
+a Bash denial with input, the input that was checked. Verify required effects
+independently. The trace does not audit what a hook ultimately executed.
 
 Use shared flags for prompt, output, cwd and session selection. Additional native
 options follow `--`, without an implicit shell:

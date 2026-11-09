@@ -8,13 +8,30 @@ printf '%s\0' "$@" > "$DUE_TRACE_DIR/argv"
 printf '%s\n' "$$" > "$DUE_TRACE_DIR/processes"
 printf 'SECRET_PROVIDER_STDERR\n' >&2
 last_message=''
+output_format=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --output-format) shift; output_format="$1" ;;
         --output-last-message|-o) shift; last_message="$1" ;;
         --output-last-message=*) last_message="${1#*=}" ;;
     esac
     shift
 done
+
+if [ "$DUE_TRACE_PROVIDER" = claude ] && [ "$DUE_TRACE_MODE" = permission_denials ]; then
+    start='{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-denied","name":"Bash","input":{}}}}'
+    request='{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-denied","name":"Bash","input":{"command":"SECRET_REQUESTED_COMMAND"}}]}}'
+    denied='{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-denied","is_error":true,"content":"SECRET_TOOL_OUTPUT"}]}}'
+    first='{"type":"result","subtype":"success","session_id":"trace-session","is_error":false,"result":"first","permission_denials":[{"tool_name":"Bash","tool_use_id":"tool-denied","tool_input":{"command":"rtk SECRET_REWRITTEN_COMMAND","description":"SECRET_DESCRIPTION"}}]}'
+    continuation='{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"continued"}]}}'
+    last='{"type":"result","subtype":"success","session_id":"trace-session","is_error":false,"result":"finished","permission_denials":[]}'
+    if [ "$output_format" = stream-json ]; then
+        printf '%s\n' "$start" "$request" "$denied" "$first" "$continuation" "$last"
+    else
+        printf '[%s,%s,%s,%s,%s]\n' "$request" "$denied" "$first" "$continuation" "$last"
+    fi
+    exit 0
+fi
 
 if [ "$DUE_TRACE_PROVIDER" = claude ] && [ "$DUE_TRACE_MODE" = oauth_expired ]; then
     printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$DUE_TRACE_SESSION"

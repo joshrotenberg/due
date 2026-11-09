@@ -21,6 +21,11 @@ provider permissions do not constrain host commands started by the script.
 Prepare a self-contained assignment: selected provider, authorized workspace,
 deliverables, scope, acceptance checks and a stopping condition. Use existing
 versioned JSON profiles for native configuration (`due skills show profiles`).
+Workers use the provider's ordinary settings unless the assignment supplies
+explicit native controls. The caller's effective session mode and temporary
+grants do not transfer. Verify any required tool restriction with the actual
+profile and hooks. Interaction callbacks only receive requests surfaced by the
+provider. An absent callback does not establish that an action was blocked.
 Do not derive host verifier programs or arguments from worker output or widen
 permissions to make a check pass.
 

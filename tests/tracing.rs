@@ -1113,6 +1113,50 @@ fn unread_trace_stderr_does_not_block_cancellation_cleanup_or_final_stdout() {
 }
 
 #[test]
+fn claude_permission_denials_survive_both_transports_without_leaking_inputs() {
+    for (args, detailed) in [
+        (&[][..], false),
+        (&["--trace=json"][..], false),
+        (&["--trace=json", "--trace-detail"][..], true),
+    ] {
+        let fixture = Fixture::new("claude");
+        let output = run(fixture.command("permission_denials").args(args));
+        let value = result(&output, 0, "succeeded");
+        assert_eq!(value["text"], "finished");
+        assert_eq!(
+            value["permission_denials"],
+            serde_json::json!({
+                "items": [{"tool_name": "Bash", "tool_use_id": "tool-denied"}],
+                "incomplete": false
+            })
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SECRET_"));
+        if !detailed {
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("SECRET_REWRITTEN_COMMAND"));
+            continue;
+        }
+        let events = records(&output.stderr);
+        let tool = |event: &&Value| event["activity_id"] == "tool-denied";
+        assert!(events.iter().filter(tool).any(|event| {
+            event["event"] == "activity_started" && event.get("detail").is_none()
+        }));
+        assert!(events.iter().filter(tool).any(|event| {
+            event["event"] == "activity_detail"
+                && event["detail"]["text"] == "SECRET_REQUESTED_COMMAND"
+                && event["detail"].get("source").is_none()
+        }));
+        assert!(events.iter().filter(tool).any(|event| {
+            event["event"] == "activity_detail"
+                && event["detail"]["text"] == "rtk SECRET_REWRITTEN_COMMAND"
+                && event["detail"]["source"] == "permission_check_input"
+        }));
+        let trace = String::from_utf8(output.stderr).unwrap();
+        assert!(!trace.contains("SECRET_DESCRIPTION"));
+        assert!(!trace.contains("SECRET_TOOL_OUTPUT"));
+    }
+}
+
+#[test]
 fn detail_is_opt_in_bounded_and_excludes_reasoning_prompts_and_results() {
     for provider in ["claude", "codex"] {
         let fixture = Fixture::new(provider);

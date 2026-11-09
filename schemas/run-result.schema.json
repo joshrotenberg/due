@@ -45,6 +45,28 @@
         }
       }
     },
+    "permission_denials": {
+      "type": "object",
+      "description": "Optional bounded metadata from Claude one-shot terminal results. Absence does not establish that an action was permitted.",
+      "additionalProperties": false,
+      "required": ["items", "incomplete"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tool_name", "tool_use_id"],
+            "properties": {
+              "tool_name": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9_.:/-]+$" },
+              "tool_use_id": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9_.:/-]+$" }
+            }
+          }
+        },
+        "incomplete": { "type": "boolean" }
+      }
+    },
     "provider": {
       "enum": [
         "claude",
