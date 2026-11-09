@@ -4,6 +4,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
+    name = "due",
     version,
     about = "Delegate and supervise coding work with Claude Code or Codex",
     after_help = crate::help::SHORT,
@@ -214,6 +215,24 @@ pub struct RunArgs {
     pub trace_interval: Option<Duration>,
     pub trace_detail: bool,
     pub native_args: Vec<String>,
+}
+
+impl RunArgs {
+    pub fn execution_options(&self) -> due_core::oneshot::RunOptions {
+        due_core::oneshot::RunOptions {
+            provider: self.provider,
+            model: self.model.clone(),
+            effort: self.effort,
+            cwd: self.cwd.clone(),
+            timeout: self.timeout,
+            schema: self.schema.clone(),
+            resume: self.resume.clone(),
+            ephemeral: self.ephemeral,
+            dry_run: self.dry_run,
+            binary: self.binary.clone(),
+            native_args: self.native_args.clone(),
+        }
+    }
 }
 
 fn provider_parser() -> impl clap::builder::TypedValueParser<Value = Provider> {

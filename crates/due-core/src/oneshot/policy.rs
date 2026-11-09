@@ -1,10 +1,8 @@
-use crate::{
-    cli::{Provider, RunArgs},
-    result::RunError,
-};
+use super::RunOptions;
+use crate::{result::RunError, types::Provider};
 
 /// Validate only the frontend-owned boundary; the provider owns other option syntax.
-pub fn native_args(run: &RunArgs) -> Result<(), RunError> {
+pub fn native_args(run: &RunOptions) -> Result<(), RunError> {
     let args = &run.native_args;
     if args.iter().any(|arg| arg == "--") {
         return Err(RunError::invalid(
@@ -105,7 +103,7 @@ pub fn native_args(run: &RunArgs) -> Result<(), RunError> {
     Ok(())
 }
 
-fn claude_conflict(run: &RunArgs, name: &str, token: &str) -> Option<&'static str> {
+fn claude_conflict(run: &RunOptions, name: &str, token: &str) -> Option<&'static str> {
     match name {
         "--print"
         | "--output-format"
@@ -142,7 +140,7 @@ fn claude_conflict(run: &RunArgs, name: &str, token: &str) -> Option<&'static st
     }
 }
 
-fn codex_conflict(run: &RunArgs, name: &str, token: &str) -> Option<&'static str> {
+fn codex_conflict(run: &RunOptions, name: &str, token: &str) -> Option<&'static str> {
     match name {
         "--json" | "--output-last-message" => Some("is reserved for due's output transport"),
         "--last" | "--all" | "--ephemeral" | "--session-id" | "--resume" => {
@@ -248,7 +246,7 @@ fn arity(provider: Provider, name: &str) -> Arity {
     }
 }
 
-fn check_config(run: &RunArgs, value: &str) -> Result<(), RunError> {
+fn check_config(run: &RunOptions, value: &str) -> Result<(), RunError> {
     let Some((key, _)) = value.split_once('=') else {
         return Ok(()); // Leave malformed native configuration to the provider.
     };

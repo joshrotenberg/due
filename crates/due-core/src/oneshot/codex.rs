@@ -5,11 +5,10 @@ use codex_wrapper::{
     TerminationSignal, TokenUsage,
 };
 
-use super::{Context, output};
+use super::{ActivityKind, ActivityStatus, Context, Progress, RunOptions, output};
 use crate::{
-    cli::{Provider, RunArgs},
     result::{ErrorKind, RunError, RunResult, Usage},
-    telemetry::{ActivityKind, ActivityStatus, Progress},
+    types::Provider,
 };
 
 enum Turn {
@@ -18,7 +17,7 @@ enum Turn {
 }
 
 impl Turn {
-    fn new(run: &RunArgs, prompt: &str, output_path: &str, schema_path: Option<&str>) -> Self {
+    fn new(run: &RunOptions, prompt: &str, output_path: &str, schema_path: Option<&str>) -> Self {
         // The wrapper has separate typed builders because native exec/resume
         // accept different option sets. Keep that distinction at this boundary.
         if let Some(id) = &run.resume {
@@ -64,7 +63,7 @@ impl Turn {
     }
 
     // App Server adds larger native error variants; keep the run adapter unchanged.
-    #[cfg_attr(feature = "rpc", allow(clippy::result_large_err))]
+    #[cfg_attr(feature = "resident", allow(clippy::result_large_err))]
     async fn execute<C>(
         &self,
         client: &Codex,
@@ -79,7 +78,7 @@ impl Turn {
         }
     }
 
-    #[cfg_attr(feature = "rpc", allow(clippy::result_large_err))]
+    #[cfg_attr(feature = "resident", allow(clippy::result_large_err))]
     async fn stream<C, F>(&self, client: &Codex, cancel: C, handler: F) -> codex_wrapper::Result<()>
     where
         C: Future<Output = ()> + Send,
@@ -93,7 +92,7 @@ impl Turn {
 }
 
 pub async fn execute<C>(
-    run: &RunArgs,
+    run: &RunOptions,
     context: &Context,
     prompt: &str,
     progress: &Progress,
@@ -653,22 +652,12 @@ fn failure(error: Error, output_path: &Path) -> RunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     #[test]
     fn schema_path_is_forwarded_for_fresh_and_resumed_turns() {
         for resume in [false, true] {
-            let mut args = vec!["due", "run", "--provider", "codex", "--prompt", "prompt"];
-            if resume {
-                args.extend(["--resume", "thread-1"]);
-            }
-            let crate::cli::Cli {
-                command: crate::cli::Command::Run(run),
-            } = crate::cli::Cli::try_parse_from(args).unwrap()
-            else {
-                panic!("expected run command");
-            };
-            let run = crate::request::resolve(*run).unwrap();
+            let mut run = RunOptions::new(Provider::Codex);
+            run.resume = resume.then(|| "thread-1".into());
             let command = Turn::new(&run, "prompt", "/tmp/final-message", Some("/tmp/schema"));
             let argv = command.args();
             let schema = argv
@@ -737,7 +726,7 @@ mod tests {
                 .unwrap(),
             );
             for event in events {
-                state.observe(event, &Progress::default());
+                state.observe(event, &(Arc::new(()) as Progress));
             }
             assert!(state.last_assistant.is_empty());
             std::fs::write(&path, "final answer\n").unwrap();
@@ -862,7 +851,7 @@ mod tests {
                 &path,
             );
             let mut state = StreamState::default();
-            state.observe(event, &Progress::default());
+            state.observe(event, &(Arc::new(()) as Progress));
             let streamed = state.fail(
                 Error::CommandFailed {
                     command: "unused".into(),
@@ -917,7 +906,10 @@ mod tests {
             );
             let mut state = StreamState::default();
             for event in events {
-                state.observe(serde_json::from_value(event).unwrap(), &Progress::default());
+                state.observe(
+                    serde_json::from_value(event).unwrap(),
+                    &(Arc::new(()) as Progress),
+                );
             }
             let streamed = state.fail(
                 Error::CommandFailed {

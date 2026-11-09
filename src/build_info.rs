@@ -84,7 +84,7 @@ fn current() -> BuildInfo {
     BuildInfo {
         schema_version: SCHEMA_VERSION,
         package: Package {
-            name: env!("CARGO_PKG_NAME"),
+            name: env!("CARGO_BIN_NAME"),
             version: env!("CARGO_PKG_VERSION"),
         },
         source: Source {
