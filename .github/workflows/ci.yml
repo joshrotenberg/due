@@ -110,6 +110,8 @@ jobs:
           python-version: '3.13'
       - run: cargo clippy --locked -p due --all-targets --no-default-features -- -D warnings
       - run: cargo test --locked -p due --no-default-features
+      - run: cargo clippy --locked -p due --all-targets --no-default-features --features core -- -D warnings
+      - run: cargo test --locked -p due-core -p due-core-compare
       - run: cargo clippy --locked -p due --all-targets --no-default-features --features rpc -- -D warnings
       - run: cargo test --locked -p due --no-default-features --features rpc --test rpc
       - run: node --test examples/session-harness/native.test.mjs
@@ -125,5 +127,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90
       - run: cargo check --locked --workspace
+      - run: cargo check --locked -p due-core-compare
       - run: cargo check --locked -p due --no-default-features
+      - run: cargo check --locked -p due --no-default-features --features core
       - run: cargo check --locked -p due --no-default-features --features rpc

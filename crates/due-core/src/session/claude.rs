@@ -18,8 +18,8 @@ use tokio::task::JoinHandle;
 
 use super::{EventSink, MAX_EVENT_BYTES, MAX_EVENTS, OpenOptions};
 use crate::{
-    cli::Provider,
     result::{ErrorKind, RunError, RunResult, Usage},
+    types::Provider,
 };
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,6 +39,7 @@ enum Command {
     Respond {
         id: String,
         response: Value,
+        expected: Option<(String, u64)>,
         reply: Reply,
     },
     Close,
@@ -113,9 +114,9 @@ impl Backend {
         }
         if let Some(effort) = options.effort {
             opts = opts.effort(match effort {
-                crate::cli::Effort::Low => claude_wrapper::Effort::Low,
-                crate::cli::Effort::Medium => claude_wrapper::Effort::Medium,
-                crate::cli::Effort::High => claude_wrapper::Effort::High,
+                crate::types::Effort::Low => claude_wrapper::Effort::Low,
+                crate::types::Effort::Medium => claude_wrapper::Effort::Medium,
+                crate::types::Effort::High => claude_wrapper::Effort::High,
             });
         }
         if let Some(id) = &options.resume {
@@ -165,12 +166,18 @@ impl Backend {
         Ok(answer)
     }
 
-    pub async fn reply(&mut self, request_id: &str, response: Value) -> Result<(), String> {
+    pub async fn reply(
+        &mut self,
+        request_id: &str,
+        response: Value,
+        expected: Option<(String, u64)>,
+    ) -> Result<(), String> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Respond {
                 id: request_id.into(),
                 response,
+                expected,
                 reply,
             })
             .await
@@ -331,11 +338,11 @@ async fn drive_turn(
             ),
             command = commands.recv() => match command {
                 Some(Command::Start { reply, .. }) => { let _ = reply.send(Err("A turn is already running".into())); }
-                Some(Command::Respond { id: request_id, response, reply }) => {
-                    let result = respond(session, pending, &request_id, response.clone());
+                Some(Command::Respond { id: request_id, response, expected, reply }) => {
+                    let result = respond(session, pending, &request_id, response.clone(), expected.as_ref(), sink);
                     if result.is_ok() {
                         sink.item("interaction_reply", json!({"request_id":request_id,"response":response}), Some(&id));
-                        sink.resolved(&request_id);
+                        sink.resolved_generation(&request_id, expected.as_ref().map(|(_, cursor)| *cursor));
                     }
                     let _ = reply.send(result);
                 }
@@ -424,11 +431,26 @@ enum Decision {
     Deny { message: String },
 }
 
+pub(crate) fn validate_response(value: &Value) -> Result<(), String> {
+    let decision: Decision = serde_json::from_value(value.clone())
+        .map_err(|error| format!("Invalid Claude permission response: {error}"))?;
+    if let Decision::Allow {
+        updated_input: Some(input),
+    } = decision
+        && !input.is_object()
+    {
+        return Err("updated_input must be an object".into());
+    }
+    Ok(())
+}
+
 fn respond(
     session: &DuplexSession,
     pending: &Pending,
     id: &str,
     response: Value,
+    expected: Option<&(String, u64)>,
+    sink: &EventSink,
 ) -> Result<(), String> {
     let decision = match serde_json::from_value::<Decision>(response)
         .map_err(|e| format!("Invalid Claude permission response: {e}"))?
@@ -445,6 +467,9 @@ fn respond(
         Decision::Deny { message } => PermissionDecision::Deny { message },
     };
     let mut ids = pending.lock().unwrap();
+    if expected.is_some_and(|(turn, cursor)| !sink.interaction_current(turn, id, *cursor)) {
+        return Err("interaction is no longer current".into());
+    }
     if !ids.contains(id) {
         return Err("Unknown or resolved interaction".into());
     }
@@ -604,7 +629,7 @@ fn partial_text(events: &[Value]) -> String {
 fn normalize_turn(native: Value, events: &[Value], interrupted: bool) -> RunResult {
     let mut result = normalize(native);
     for event in events {
-        crate::providers::provenance::claude_message(&mut result.provenance.reported, event);
+        crate::provenance::claude_message(&mut result.provenance.reported, event);
     }
     if result.text.is_empty() && (interrupted || result.error.is_some()) {
         result.text = partial_text(events);

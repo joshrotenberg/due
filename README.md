@@ -64,9 +64,9 @@ due --version
 ```
 
 `cargo build --release --locked` builds `./target/release/due` without
-installing it. The wrapper crates are pinned to Git commits, so the first build
-needs access to GitHub and crates.io. `Cargo.lock` is committed and `--locked`
-uses it as is.
+installing it. The first build needs access to GitHub for the Claude wrapper
+and crates.io for the Codex wrapper and other registry dependencies.
+`Cargo.lock` is committed and `--locked` uses it as is.
 
 `due build-info --output json` reports the installed executable's package
 version, source revision, dirty/unknown state and enabled features. It reads no
@@ -276,8 +276,10 @@ remains outside this implementation.
 
 ## Documentation
 
-- [Core delegation interface design](docs/delegation-interface.md): core library,
-  CLI, MCP and JS client direction, reuse/retirement map; documentation only.
+- [Core library spike](docs/core-spike.md): experimental multi-provider Rust
+  interface, concurrent native workers, ownership and fake-provider validation.
+- [Delegation design](docs/delegation-interface.md): worker ownership, run and
+  session identity, and the boundary between Due and its callers.
 - [docs/cli.md](docs/cli.md): full CLI reference covering options, request
   fields, structured answers, tracing, native passthrough, results, and errors.
 - [JavaScript harness](docs/harness.md): supported session supervision, JSON results and evidence.

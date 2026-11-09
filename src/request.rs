@@ -2,7 +2,6 @@
 
 use std::{io, path::PathBuf};
 
-use clap::ValueEnum;
 use serde::{Deserialize, Deserializer};
 
 use crate::{

@@ -22,8 +22,8 @@ use tokio::{
 
 use super::{EventSink, OpenOptions};
 use crate::{
-    cli::Provider,
     result::{ErrorKind, RunError, RunResult, Usage},
+    types::Provider,
 };
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -131,6 +131,7 @@ enum Command {
     Respond {
         id: String,
         response: Value,
+        expected: Option<(String, u64)>,
         reply: Reply,
     },
     Close,
@@ -408,10 +409,16 @@ impl Backend {
         Ok(answer)
     }
 
-    pub async fn reply(&mut self, request_id: &str, response: Value) -> Result<(), String> {
+    pub async fn reply(
+        &mut self,
+        request_id: &str,
+        response: Value,
+        expected: Option<(String, u64)>,
+    ) -> Result<(), String> {
         self.call(|reply| Command::Respond {
             id: request_id.to_owned(),
             response,
+            expected,
             reply,
         })
         .await
@@ -614,8 +621,10 @@ async fn own(
                         let _ = reply.send(Err("Unknown or finished Due turn to interrupt".into()));
                     }
                 }
-                Some(Command::Respond { id, response, reply }) => {
-                    let result = if !response.is_object() {
+                Some(Command::Respond { id, response, expected, reply }) => {
+                    let result = if expected.as_ref().is_some_and(|(turn, cursor)| !sink.interaction_current(turn, &id, *cursor)) {
+                        Err("interaction is no longer current".into())
+                    } else if !response.is_object() {
                         Err("Codex interaction response must be a JSON object".into())
                     } else if let Some(turn) = active.as_mut() {
                         if let Some(native_id) = turn.requests.get(&id) {

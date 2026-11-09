@@ -6,24 +6,8 @@ use std::{
 
 pub(super) const STREAM_LIMIT: usize = 64 * 1024 * 1024;
 pub(super) const FINAL_LIMIT: usize = 4 * 1024 * 1024;
-pub(super) const DIAGNOSTIC_LIMIT: usize = 16 * 1024;
-const MARKER: &str = " [truncated]";
 
-pub(crate) fn diagnostic(text: &str) -> String {
-    diagnostic_with_limit(text, DIAGNOSTIC_LIMIT)
-}
-
-fn diagnostic_with_limit(text: &str, limit: usize) -> String {
-    // Precondition: limit can hold MARKER; callers use the fixed 16 KiB budget.
-    if text.len() <= limit {
-        return text.to_owned();
-    }
-    let mut end = limit.saturating_sub(MARKER.len()).min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{}", &text[..end], MARKER)
-}
+pub(crate) use crate::diagnostics::diagnostic;
 
 pub(super) fn final_message(path: &Path) -> io::Result<String> {
     read_final_with_limit(path, FINAL_LIMIT)
@@ -61,12 +45,6 @@ fn read_final_with_limit(path: &Path, limit: usize) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn utf8_diagnostic_boundary() {
-        assert_eq!(diagnostic_with_limit("ééé", 6), "ééé");
-        let short = diagnostic_with_limit(&"é".repeat(20), 17);
-        assert!(short.len() <= 17 && short.ends_with(MARKER));
-    }
     #[test]
     fn final_file_boundary() {
         let dir = tempfile::tempdir().unwrap();

@@ -18,7 +18,7 @@ fn async_clients_supervise_both_native_adapters() {
             let native = dir.path().join("native");
             fs::write(
                 &native,
-                include_bytes!("../../../tests/fixtures/session-agent.sh"),
+                include_bytes!("../../../crates/due-core/tests/fixtures/session-agent.sh"),
             )
             .unwrap();
             fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
@@ -131,7 +131,7 @@ fn both_clients_use_both_native_adapters() {
             let native = dir.path().join("native");
             fs::write(
                 &native,
-                include_bytes!("../../../tests/fixtures/session-agent.sh"),
+                include_bytes!("../../../crates/due-core/tests/fixtures/session-agent.sh"),
             )
             .unwrap();
             fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();

@@ -55,6 +55,9 @@ fn json(output: &Output) -> Value {
 
 fn expected_features() -> Vec<&'static str> {
     let mut features = Vec::new();
+    if cfg!(feature = "core") {
+        features.push("core");
+    }
     if cfg!(feature = "harness") {
         features.push("harness");
     }

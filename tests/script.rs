@@ -51,7 +51,11 @@ impl Fixture {
 
     fn provider(&self, provider: &str) -> Value {
         let native = self.directory.path().join("native");
-        fs::write(&native, include_bytes!("fixtures/session-agent.sh")).unwrap();
+        fs::write(
+            &native,
+            include_bytes!("../crates/due-core/tests/fixtures/session-agent.sh"),
+        )
+        .unwrap();
         fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
         let workspace = self.directory.path().join("workspace");
         fs::create_dir(&workspace).unwrap();

@@ -123,15 +123,17 @@ impl Bridge {
             let _entered = runtime.enter();
             // Install cancellation listeners before launching an owned child.
             let signal_future = listen_for_signal(Arc::clone(&state))?;
-            let child = Command::new(program)
-                .arg("rpc")
-                .current_dir(cwd)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| format!("spawn Due RPC: {e}"))?;
+            let child = crate::with_spawn_lock(|| {
+                Command::new(program)
+                    .arg("rpc")
+                    .current_dir(cwd)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .map_err(|e| format!("spawn Due RPC: {e}"))
+            })?;
             (child, signal_future)
         };
         let pid = child.id().ok_or("spawned child has no PID")?;

@@ -75,7 +75,7 @@ The [native control audit](docs/native-control-audit.md) and
 caller observations. Extracting them onto this stable branch does not revalidate
 them on current provider versions or replace an installed build automatically.
 
-Keep Cargo.lock committed and preserve the exact wrapper Git revisions. Review
+Keep Cargo.lock committed and preserve the exact wrapper dependency pins. Review
 dependency updates separately. The crate has `publish = false`; source readiness
 does not authorize a crates.io release or wrapper release.
 
