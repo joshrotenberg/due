@@ -21,9 +21,8 @@ task-permission failures.
   repository access, provider availability, and host policy remain local choices.
 
 macOS and Linux are the CI targets. Windows process cleanup and installation have
-not been validated. Builds fetch the Git-pinned Claude wrapper and the locked
-crates from crates.io, including the Codex wrapper. Keep `Cargo.lock` and the
-wrapper pins unchanged.
+not been validated. Builds fetch both wrappers and the other locked dependencies
+from crates.io. Keep `Cargo.lock` and the wrapper pins unchanged.
 
 ## Build and install the CLI
 

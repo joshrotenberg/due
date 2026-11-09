@@ -21,7 +21,7 @@ exclude = ["examples/rpc-languages"]
 resolver = "3"
 
 [workspace.dependencies]
-claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
+claude-wrapper = { version = "=0.14.11", default-features = false, features = ["async", "json"] }
 codex-wrapper = "=0.4.9"
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 
