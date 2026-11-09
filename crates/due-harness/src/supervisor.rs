@@ -155,6 +155,8 @@ pub(crate) struct Supervisor {
     next_id: u64,
     failure: Option<String>,
     finished: Option<Result<(), String>>,
+    #[cfg(all(test, target_os = "macos"))]
+    spawn_observer: Option<tests::SpawnObserver>,
 }
 
 impl Supervisor {
@@ -182,6 +184,8 @@ impl Supervisor {
             next_id: 0,
             failure: None,
             finished: None,
+            #[cfg(all(test, target_os = "macos"))]
+            spawn_observer: None,
         })
     }
 
@@ -210,8 +214,18 @@ impl Supervisor {
         }
         let (cancel, receiver) = watch::channel(false);
         let journal = Arc::clone(&self.journal);
+        #[cfg(all(test, target_os = "macos"))]
+        let spawn_observer = self.spawn_observer.clone();
         let task = self.runtime.spawn(async move {
-            let mut outcome = execute(id, spec, receiver, &journal).await;
+            let mut outcome = execute(
+                id,
+                spec,
+                receiver,
+                &journal,
+                #[cfg(all(test, target_os = "macos"))]
+                spawn_observer,
+            )
+            .await;
             if let Err(error) = record(
                 &journal,
                 json!({"kind":"exec_finished","id":id,"result":outcome.value,
@@ -439,6 +453,7 @@ async fn execute(
     spec: Spec,
     mut cancel: watch::Receiver<bool>,
     journal: &Mutex<Journal>,
+    #[cfg(all(test, target_os = "macos"))] spawn_observer: Option<tests::SpawnObserver>,
 ) -> Outcome {
     let mut output = Output::default();
     let failed = |error| Outcome {
@@ -456,7 +471,7 @@ async fn execute(
     command.process_group(0);
     #[cfg(not(unix))]
     command.kill_on_drop(true);
-    let spawned = crate::with_spawn_lock(|| {
+    let spawn = || {
         // Cancellation may arrive while another synchronous spawn holds the lock.
         if *cancel.borrow() {
             return Ok(None);
@@ -465,7 +480,14 @@ async fn execute(
             .spawn()
             .map(Some)
             .map_err(|error| format!("spawn exec: {error}"))
-    });
+    };
+    #[cfg(all(test, target_os = "macos"))]
+    let spawned = match spawn_observer {
+        Some(observer) => observer.spawn(spawn),
+        None => crate::with_spawn_lock(spawn),
+    };
+    #[cfg(not(all(test, target_os = "macos")))]
+    let spawned = crate::with_spawn_lock(spawn);
     let mut child = match spawned {
         Ok(Some(child)) => child,
         Ok(None) => {
@@ -767,6 +789,48 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, thread};
     use tempfile::TempDir;
     use tokio::runtime::{Builder, Runtime};
+
+    // Scoped to one synchronous spawn on one worker, never shared across tests.
+    #[cfg(target_os = "macos")]
+    #[derive(Clone)]
+    pub(super) struct SpawnObserver {
+        sender: std::sync::mpsc::Sender<SpawnBoundary>,
+        unlocked_control: bool,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Debug, PartialEq)]
+    enum SpawnBoundary {
+        Contended,
+        UnlockedControl,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl SpawnObserver {
+        pub(super) fn spawn<T>(
+            self,
+            spawn: impl FnOnce() -> Result<T, String>,
+        ) -> Result<T, String> {
+            if self.unlocked_control {
+                self.send(SpawnBoundary::UnlockedControl)?;
+                return spawn();
+            }
+            match crate::PROCESS_SPAWN.try_lock() {
+                Err(std::sync::TryLockError::WouldBlock) => self.send(SpawnBoundary::Contended)?,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err("observed spawn boundary poisoned".into());
+                }
+                Ok(_) => return Err("expected spawn boundary contention".into()),
+            }
+            crate::with_spawn_lock(spawn)
+        }
+
+        fn send(&self, event: SpawnBoundary) -> Result<(), String> {
+            self.sender
+                .send(event)
+                .map_err(|_| "spawn observer disconnected".into())
+        }
+    }
 
     fn setup() -> (Runtime, TempDir, Supervisor) {
         let runtime = Builder::new_multi_thread()
@@ -1215,6 +1279,27 @@ mod tests {
         let root = PathBuf::from(std::env::var_os("DUE19_EVIDENCE_DIR").unwrap());
         let program = PathBuf::from(std::env::var_os("DUE19_CHILD").unwrap());
         let injected = std::env::var("DUE19_INJECT").as_deref() == Ok("1");
+        // Drop releases R before Supervisor::drop tries to join blocked jobs.
+        struct ReleaseWindow(Option<File>);
+        impl ReleaseWindow {
+            fn release(&mut self) -> std::io::Result<()> {
+                if let Some(fifo) = &mut self.0 {
+                    fifo.write_all(b"R")?;
+                }
+                self.0.take();
+                Ok(())
+            }
+        }
+        impl Drop for ReleaseWindow {
+            fn drop(&mut self) {
+                let _ = self.release();
+            }
+        }
+        let unlocked_control = std::env::var("DUE19_NO_LOCK_CONTROL").as_deref() == Ok("1");
+        assert!(
+            !unlocked_control || injected,
+            "no-lock control requires injection"
+        );
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("parent.pid"), format!("{}\n", std::process::id())).unwrap();
         let runtime = Builder::new_multi_thread()
@@ -1223,6 +1308,27 @@ mod tests {
             .build()
             .unwrap();
         let mut supervisor = Supervisor::new(runtime.handle().clone(), &root, &root).unwrap();
+        let mut window_release = ReleaseWindow(if injected {
+            use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+            let path = root.join("window.release");
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe { libc::mkfifo(name.as_ptr(), 0o600) },
+                0,
+                "create R release FIFO: {}",
+                std::io::Error::last_os_error()
+            );
+            Some(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(path)
+                    .unwrap(),
+            )
+        } else {
+            None
+        });
         let spec = |role: &str| {
             json!({
                 "program":program,"args":[root,role],"timeout_ms":15000
@@ -1239,10 +1345,48 @@ mod tests {
             let window: Value =
                 serde_json::from_str(&wait_file(&root.join("window.json"))).unwrap();
             assert_eq!(window["write_flags"], 0, "injection must precede CLOEXEC");
+            assert_eq!(window["pid"], std::process::id());
+            assert_eq!(window["read_flags"], 0, "injection must precede CLOEXEC");
+            assert!(window["read_info_bytes"].as_i64().unwrap() > 0, "{window}");
+            assert!(window["write_info_bytes"].as_i64().unwrap() > 0, "{window}");
+            assert_ne!(window["write_handle"], "0", "{window}");
         } else {
             wait_file(&root.join("r.ready"));
         }
+        let (sender, boundary) = std::sync::mpsc::channel();
+        if injected {
+            supervisor.spawn_observer = Some(SpawnObserver {
+                sender,
+                unlocked_control,
+            });
+        }
         let b = supervisor.start(&spec("b")).unwrap();
+        supervisor.spawn_observer = None;
+        if injected {
+            let observed = boundary
+                .recv_timeout(Duration::from_secs(3))
+                .expect("B never attempted the spawn boundary while R held its pre-CLOEXEC pipe");
+            fs::write(root.join("b.boundary"), format!("{observed:?}\n")).unwrap();
+            assert!(
+                !root.join("window-returned").exists(),
+                "R returned before explicit release"
+            );
+            if unlocked_control {
+                assert_eq!(observed, SpawnBoundary::UnlockedControl);
+                // Deliberately spawn B inside R's real window for the failing control.
+                wait_file(&root.join("b.ready"));
+            } else {
+                assert_eq!(observed, SpawnBoundary::Contended);
+                assert!(
+                    !root.join("b.started").exists(),
+                    "B spawned through R's lock"
+                );
+            }
+            // Fixed case: release R BEFORE starting the B readiness watchdog.
+            window_release
+                .release()
+                .expect("release R's pre-CLOEXEC window");
+        }
         let ready_deadline = std::time::Instant::now() + Duration::from_secs(3);
         let b_pid: i32 = loop {
             if let Ok(value) = fs::read_to_string(root.join("b.ready"))
@@ -1261,6 +1405,12 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         };
         let ready_result = settle(&mut supervisor, ready);
+        if injected {
+            assert_eq!(
+                wait_file(&root.join("window-returned")),
+                "explicit-release\n"
+            );
+        }
         // Capture evidence and join A while B is still an active sibling.
         supervisor.cancel(a).unwrap();
         let a_result = settle(&mut supervisor, a);
@@ -1286,9 +1436,10 @@ mod tests {
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect();
             assert!(
-                readiness
-                    .iter()
-                    .any(|fd| fd["fd"] == 1 && fd["handle"] == window["write_handle"]),
+                readiness.iter().any(|fd| fd["fd"] == 1
+                    && fd["handle"] == window["write_handle"]
+                    && fd["peer"] == window["read_handle"]
+                    && fd["access"] == libc::O_WRONLY),
                 "probe must identify readiness stdout"
             );
             let siblings: Vec<Value> = fs::read_to_string(root.join("b.fds.jsonl"))
@@ -1302,7 +1453,8 @@ mod tests {
                     && fd["access"] == libc::O_WRONLY
             });
         }
-        let report = json!({"injected":injected,"ready":ready_result,"a":a_result,
+        let report = json!({"injected":injected,"unlocked_control":unlocked_control,
+            "ready":ready_result,"a":a_result,
             "b":b_result,"challenge":challenge,"finish_error":finish.err(),
             "same_writer_in_sibling":inherited_writer});
         fs::write(root.join("report.json"), format!("{report:#}\n")).unwrap();
@@ -1354,6 +1506,7 @@ mod tests {
             .env("DUE19_EVIDENCE_DIR", root)
             .env("DUE19_CHILD", &child)
             .env("DUE19_INJECT", "1")
+            .env_remove("DUE19_NO_LOCK_CONTROL")
             .env("DYLD_INSERT_LIBRARIES", &library)
             .stdout(File::create(root.join("probe.stdout")).unwrap())
             .stderr(File::create(root.join("probe.stderr")).unwrap())
@@ -1387,9 +1540,29 @@ mod tests {
     fn cancellation_before_spawn_boundary_release_skips_the_child() {
         let (_runtime, directory, mut supervisor) = setup();
         let guard = crate::PROCESS_SPAWN.lock().unwrap();
-        let id = shell(&mut supervisor, "echo unexpected > launched", json!({}));
-        supervisor.cancel(id).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        supervisor.spawn_observer = Some(SpawnObserver {
+            sender,
+            unlocked_control: false,
+        });
+        let started =
+            supervisor.start(r#"{"program":"/bin/sh","args":["-c","echo unexpected > launched"]}"#);
+        let id = match started {
+            Ok(id) => id,
+            Err(error) => {
+                drop(guard);
+                panic!("start child behind owned spawn lock: {error}");
+            }
+        };
+        let contended = receiver.recv_timeout(Duration::from_secs(3));
+        let cancelled = supervisor.cancel(id);
+        // Release even on watchdog/cancellation failure, before any assertion or join.
         drop(guard);
+        assert_eq!(
+            contended.expect("child never contended on the owned spawn lock"),
+            SpawnBoundary::Contended
+        );
+        cancelled.unwrap();
         let outcome = settle(&mut supervisor, id);
         assert_eq!(outcome["status"], "cancelled", "{outcome}");
         assert!(!directory.path().join("launched").exists());
