@@ -22,6 +22,7 @@ const MANIFEST: &str = include_str!("../plugin/due/plugin.json");
 const SKILL: &[u8] = include_bytes!("../plugin/due/skills/delegate/SKILL.md");
 const HOST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_OUTPUT: u64 = 64 * 1024;
+const KILLED_OUTPUT_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Host {
@@ -453,6 +454,25 @@ async fn bounded_output(
     }
 }
 
+/// Collects output still buffered after a kill. A process outside the owned
+/// group can hold a pipe open, so EOF is not guaranteed and `grace` bounds the
+/// wait; bytes read before it expires are kept.
+async fn drain_killed_output(
+    stdout: impl tokio::io::AsyncRead + Unpin,
+    stdout_bytes: &mut Vec<u8>,
+    stderr: impl tokio::io::AsyncRead + Unpin,
+    stderr_bytes: &mut Vec<u8>,
+    grace: Duration,
+) {
+    let _ = tokio::time::timeout(grace, async {
+        tokio::join!(
+            bounded_output(stdout, stdout_bytes),
+            bounded_output(stderr, stderr_bytes)
+        )
+    })
+    .await;
+}
+
 async fn run_host(
     command: &HostCommand,
     limit: Duration,
@@ -485,26 +505,19 @@ async fn run_host(
             return result;
         }
     };
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
+    // The attempt below only borrows the readers, so losing the select cannot discard the pipes.
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
     let attempt = tokio::select! {
         biased;
         _ = cancel => None,
         attempt = tokio::time::timeout(limit, async {
-            tokio::try_join!(bounded_output(stdout, &mut stdout_bytes), bounded_output(stderr, &mut stderr_bytes))?;
+            tokio::try_join!(bounded_output(&mut stdout, &mut stdout_bytes), bounded_output(&mut stderr, &mut stderr_bytes))?;
             child.wait().await
         }) => Some(attempt),
     };
-    result.stdout_truncated = stdout_bytes.len() as u64 > MAX_OUTPUT;
-    result.stderr_truncated = stderr_bytes.len() as u64 > MAX_OUTPUT;
-    result.stdout =
-        String::from_utf8_lossy(&stdout_bytes[..stdout_bytes.len().min(MAX_OUTPUT as usize)])
-            .into_owned();
-    result.stderr =
-        String::from_utf8_lossy(&stderr_bytes[..stderr_bytes.len().min(MAX_OUTPUT as usize)])
-            .into_owned();
     match attempt {
         Some(Ok(Ok(status))) => {
             result.success = status.success();
@@ -522,6 +535,14 @@ async fn run_host(
                 }
             }
             let _ = tokio::time::timeout(Duration::from_secs(2), child.kill()).await;
+            drain_killed_output(
+                stdout,
+                &mut stdout_bytes,
+                stderr,
+                &mut stderr_bytes,
+                KILLED_OUTPUT_GRACE,
+            )
+            .await;
             result.error = Some(match failure {
                 Some(Err(_)) => {
                     format!("native setup command exceeded {} seconds", limit.as_secs())
@@ -535,6 +556,14 @@ async fn run_host(
             });
         }
     }
+    result.stdout_truncated = stdout_bytes.len() as u64 > MAX_OUTPUT;
+    result.stderr_truncated = stderr_bytes.len() as u64 > MAX_OUTPUT;
+    result.stdout =
+        String::from_utf8_lossy(&stdout_bytes[..stdout_bytes.len().min(MAX_OUTPUT as usize)])
+            .into_owned();
+    result.stderr =
+        String::from_utf8_lossy(&stderr_bytes[..stderr_bytes.len().min(MAX_OUTPUT as usize)])
+            .into_owned();
     result
 }
 
@@ -774,6 +803,67 @@ mod tests {
         assert!(step.stdout_truncated);
         assert!(!step.stdout.is_empty());
         assert!(step.stdout.len() <= MAX_OUTPUT as usize);
+    }
+
+    #[tokio::test]
+    async fn cancellation_captures_output_written_before_any_pipe_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let ready = temp.path().join("ready");
+        let watched = ready.clone();
+        let step = run_host(
+            &shell(
+                "printf 'setup started'; printf 'awaiting native setup' >&2; : > \"$1\"; exec /bin/sleep 30",
+                &[ready.to_str().unwrap()],
+            ),
+            Duration::from_secs(30),
+            async move {
+                // The ready file follows both markers. Blocking the thread without yielding to
+                // the runtime resolves the biased select before its read branch is ever polled.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !watched.exists() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "fixture never wrote its markers"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            },
+        )
+        .await;
+        assert!(!step.success);
+        assert!(step.cancelled);
+        assert!(step.error.unwrap().contains("interrupted"));
+        assert_eq!(step.stdout, "setup started");
+        assert_eq!(step.stderr, "awaiting native setup");
+        assert!(!step.stdout_truncated);
+        assert!(!step.stderr_truncated);
+    }
+
+    #[tokio::test]
+    async fn killed_output_drain_is_bounded_when_pipes_stay_open() {
+        use tokio::io::AsyncWriteExt;
+        let (mut stdout_writer, stdout_reader) = tokio::io::duplex(1024);
+        let (mut stderr_writer, stderr_reader) = tokio::io::duplex(1024);
+        stdout_writer.write_all(b"setup started").await.unwrap();
+        stderr_writer.write_all(b"awaiting").await.unwrap();
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        // The writers stay alive across the drain, so neither reader can see EOF.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_killed_output(
+                stdout_reader,
+                &mut stdout_bytes,
+                stderr_reader,
+                &mut stderr_bytes,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("drain must not wait for EOF");
+        assert_eq!(stdout_bytes, b"setup started");
+        assert_eq!(stderr_bytes, b"awaiting");
+        drop((stdout_writer, stderr_writer));
     }
 
     #[tokio::test]
