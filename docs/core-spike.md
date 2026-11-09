@@ -12,12 +12,14 @@ provides `due_core::Engine` and the native Claude `DuplexSession` and Codex
 an engine can supervise several workers. The crate has no dependency on
 the Due CLI, its wire server, or a scripting interpreter.
 
-The existing `due` package is the CLI application. It uses the shared
-provider and result types for foreground execution. Its `core` feature
-enables `due-core/resident`, and the existing `rpc` and `harness` features
-continue to build on that. The current single-session RPC adapter uses a
-hidden compatibility export. New applications can use the public engine
-API directly. Profiles, command parsing, and wire schemas live in Due.
+The `due-cli` package builds the `due` executable. Its foreground command
+uses `due_core::oneshot::execute` for native option validation, process
+execution, and result normalization. The CLI resolves its inputs, renders
+the result, and translates observer callbacks into its trace format. Its
+`core` feature enables `due-core/resident`, and `rpc` and `harness` build on
+that feature. The current single-session RPC command uses the hidden
+compatibility export. Profiles, command parsing, and wire schemas live
+in the application.
 
 The [comparison example](../examples/core-compare) is a second executable
 that depends on `due-core` and Tokio. It runs the same prompt in independent

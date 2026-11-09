@@ -1,11 +1,18 @@
 [package]
-name = "due"
+name = "due-cli"
 version = "0.2.1"
 edition = "2024"
 rust-version = "1.90"
 description = "One command-line interface for Claude Code and Codex"
 license = "MIT OR Apache-2.0"
 publish = false
+
+[[bin]]
+name = "due"
+path = "src/main.rs"
+
+[lib]
+name = "due"
 
 [workspace]
 members = [".", "crates/due-core", "crates/due-mcp", "crates/due-rpc", "crates/due-harness", "examples/core-compare"]
@@ -25,22 +32,22 @@ core = ["due-core/resident"]
 rpc = ["core", "dep:tokio-util", "dep:futures-util", "tokio/io-std", "tokio/net", "tokio/sync"]
 
 [dependencies]
-due-core = { path = "crates/due-core", default-features = false }
+due-core = { path = "crates/due-core", default-features = false, features = ["oneshot"] }
 due-harness = { path = "crates/due-harness", default-features = false, features = ["js"], optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
-claude-wrapper.workspace = true
-codex-wrapper.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "process", "io-util"] }
-toml.workspace = true
 which = "8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

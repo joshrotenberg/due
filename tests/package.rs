@@ -57,7 +57,9 @@ fn plugin_identity_version_and_entry_skill_match_the_source_package() {
     let cargo: toml::Value = toml::from_str(&document(&root, "Cargo.toml")).unwrap();
     let plugin_root = contained(&root, "plugin/due");
     let manifest = json(&plugin_root, "plugin.json");
-    assert_eq!(manifest["name"].as_str(), cargo["package"]["name"].as_str());
+    let binary_name = cargo["bin"].as_array().unwrap()[0]["name"].as_str();
+    assert_eq!(manifest["name"].as_str(), binary_name);
+    assert_eq!(binary_name, Some("due"));
     assert_eq!(
         manifest["version"].as_str(),
         cargo["package"]["version"].as_str()
@@ -112,7 +114,7 @@ fn local_marketplace_resolves_the_real_contained_plugin() {
         .expect("marketplace plugins array");
     let matching: Vec<_> = entries
         .iter()
-        .filter(|entry| entry["name"] == env!("CARGO_PKG_NAME"))
+        .filter(|entry| entry["name"] == "due")
         .collect();
     assert_eq!(
         matching.len(),

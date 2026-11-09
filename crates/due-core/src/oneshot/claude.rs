@@ -14,15 +14,14 @@ use claude_wrapper::{
 };
 use serde_json::Value;
 
-use super::{Context, output};
+use super::{ActivityKind, ActivityStatus, Context, Progress, RunOptions, output};
 use crate::{
-    cli::{Effort, Provider, RunArgs},
     result::{ErrorKind, ReportedSettings, RunError, RunResult, Usage},
-    telemetry::{ActivityKind, ActivityStatus, Progress},
+    types::{Effort, Provider},
 };
 
 pub async fn execute<C>(
-    run: &RunArgs,
+    run: &RunOptions,
     context: &Context,
     prompt: &str,
     progress: &Progress,
@@ -110,7 +109,7 @@ struct StreamState {
     terminal: Option<Value>,
     invalid_terminal: Option<Value>,
     segments: ResultSegments,
-    progress: Progress,
+    progress: Option<Progress>,
     // Latest complete text-bearing top-level message, for failures without a
     // terminal result. This is neither a transcript nor native structured data.
     last_assistant: String,
@@ -123,7 +122,7 @@ struct StreamState {
 impl StreamState {
     fn observe(&mut self, event: StreamEvent, progress: &Progress) {
         super::provenance::claude_message(&mut self.reported, &event.data);
-        self.progress = progress.clone();
+        self.progress = Some(progress.clone());
         let root = event
             .data
             .get("parent_tool_use_id")
@@ -390,7 +389,9 @@ impl StreamState {
         }
         if self.terminal.is_some() && !self.segments.continuation {
             if result.error.is_none() {
-                self.progress.phase("turn_completed");
+                if let Some(progress) = &self.progress {
+                    progress.phase("turn_completed");
+                }
             } else if self.terminal.as_ref().is_some_and(|terminal| {
                 parse_result(terminal).error.as_ref().is_some_and(|error| {
                     matches!(
@@ -406,8 +407,9 @@ impl StreamState {
                     error.kind,
                     ErrorKind::Protocol | ErrorKind::Cancelled | ErrorKind::Timeout | ErrorKind::Io
                 )
-            }) {
-                self.progress.phase("turn_failed");
+            }) && let Some(progress) = &self.progress
+            {
+                progress.phase("turn_failed");
             }
         }
         if self.segments.count > 1 {
@@ -862,7 +864,10 @@ mod tests {
         let buffered = failure(process_error(records.to_string()));
         let mut state = StreamState::default();
         for data in records.as_array().unwrap() {
-            state.observe(StreamEvent { data: data.clone() }, &Progress::default());
+            state.observe(
+                StreamEvent { data: data.clone() },
+                &(Arc::new(()) as Progress),
+            );
         }
         let streamed = state.finish(Err(process_error(String::new())));
         for result in [buffered, streamed] {
@@ -880,7 +885,7 @@ mod tests {
             StreamEvent {
                 data: records[0].clone(),
             },
-            &Progress::default(),
+            &(Arc::new(()) as Progress),
         );
         let result = state.finish(Err(Error::Cancelled));
         assert_eq!(result.provenance.reported.models, ["native-a"]);
@@ -1126,7 +1131,7 @@ mod tests {
             StreamEvent {
                 data: final_result.clone(),
             },
-            &Progress::default(),
+            &(Arc::new(()) as Progress),
         );
         let streamed = state.finish(Ok(output()));
         assert_eq!(streamed.diagnostics, "native diagnostic");
