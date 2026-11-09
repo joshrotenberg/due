@@ -15,7 +15,7 @@ resolver = "3"
 
 [workspace.dependencies]
 claude-wrapper = { git = "https://github.com/joshrotenberg/claude-wrapper", rev = "79ffb151fd422468ef4ae988e64a20329e3bf454", default-features = false, features = ["async", "json"] }
-codex-wrapper = { git = "https://github.com/joshrotenberg/codex-wrapper", rev = "e91e6279bc60bdb54ef85940a5bc7a9b03e944dc" }
+codex-wrapper = "=0.4.9"
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 
 [features]

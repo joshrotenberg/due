@@ -20,6 +20,20 @@ use std::{
 };
 use supervisor::Supervisor;
 
+#[cfg(target_os = "macos")]
+static PROCESS_SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// Darwin sets CLOEXEC after creating a pipe. Keep cooperating spawn calls
+// together through pipe setup and exec so a sibling cannot inherit the writer.
+// The guard must end before any async I/O, cancellation waits or child lifetime.
+fn with_spawn_lock<T>(spawn: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_SPAWN
+        .lock()
+        .map_err(|_| "process spawn boundary poisoned".to_owned())?;
+    spawn()
+}
+
 /// Maximum UTF-8 source, argument document, or serialized workflow result size.
 pub const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 

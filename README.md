@@ -64,9 +64,9 @@ due --version
 ```
 
 `cargo build --release --locked` builds `./target/release/due` without
-installing it. The wrapper crates are pinned to Git commits, so the first build
-needs access to GitHub and crates.io. `Cargo.lock` is committed and `--locked`
-uses it as is.
+installing it. The first build needs access to GitHub for the Claude wrapper
+and crates.io for the Codex wrapper and other registry dependencies.
+`Cargo.lock` is committed and `--locked` uses it as is.
 
 `due build-info --output json` reports the installed executable's package
 version, source revision, dirty/unknown state and enabled features. It reads no
