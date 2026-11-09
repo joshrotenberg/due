@@ -1,10 +1,10 @@
-#![cfg(all(feature = "core", unix))]
+#![cfg(all(feature = "resident", unix))]
 
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration};
 
-use due::{
-    core::*,
+use due_core::{
     result::{ErrorKind as RunErrorKind, Status},
+    *,
 };
 use tempfile::TempDir;
 

@@ -7,23 +7,39 @@ the library first. It does not introduce an MCP adapter or JS client, remove
 
 ## Library boundary
 
-The existing `due` package now also builds a Rust library. Enable `core` without
-the `rpc` or `harness` features to use it without a wire server or interpreter:
+`due-core` is a separate workspace crate. Its default `resident` feature
+provides `due_core::Engine` and the native Claude `DuplexSession` and Codex
+`AppServer` backends. Each worker owns one resident native transport, and
+an engine can supervise several workers. The crate has no dependency on
+the Due CLI, its wire server, or a scripting interpreter.
+
+The existing `due` package is the CLI application. It uses the shared
+provider and result types for foreground execution. Its `core` feature
+enables `due-core/resident`, and the existing `rpc` and `harness` features
+continue to build on that. The current single-session RPC adapter uses a
+hidden compatibility export. New applications can use the public engine
+API directly. Profiles, command parsing, and wire schemas live in Due.
+
+The [comparison example](../examples/core-compare) is a second executable
+that depends on `due-core` and Tokio. It runs the same prompt in independent
+Claude and Codex workers, sends a follow-up to both, and reads each session's
+journal after cleanup.
 
 ```sh
-cargo test --locked -p due --no-default-features --features core --test core
+cargo test --locked -p due-core -p due-core-compare
+cargo run --locked -p due-core-compare -- 'Describe this repository in two sentences.'
 ```
 
-The spike reuses the pinned Claude `DuplexSession` and Codex `AppServer` backends
-directly. Each logical worker owns a native resident transport; an engine owns
-N workers. It does not invoke a child `due rpc` or synthesize CLI arguments for
-Due. Provider types, results, duration parsing and resident policy validation
-are shared Rust code outside Clap parsing. The package still contains the CLI
-dependencies; this is a library target, not a separately published core crate.
+The test uses fake native executables. The `cargo run` example starts the
+real provider CLIs using the caller's native settings. For explicit
+executables, set `COMPARE_CLAUDE_BINARY` and `COMPARE_CODEX_BINARY`. The
+example rejects interactions and gives each turn a two-minute budget.
 
-The old RPC adapter temporarily uses a hidden single-session compatibility
-module. New library callers use `core::Engine`. Transport/profile-file adapters
-remain separate from core execution; no MCP tool/schema contract is implied.
+The second consumer uses the same `RunResult` as the CLI. Fields for CLI
+invocation, tracing and schema validation remain on that shared type. A
+future API revision can decide how much of that data belongs in the core
+result. This spike tests the package boundary while preserving the result
+contract.
 
 ## Interface
 
@@ -171,7 +187,7 @@ A conservative Claude caller can stream and decline any request it has not
 chosen to grant:
 
 ```rust,no_run
-use due::core::*;
+use due_core::*;
 use serde_json::json;
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -207,7 +223,7 @@ historical #19 case. The paused harness fix is not pulled into this branch.
 
 ## Verification
 
-`tests/core.rs` uses the existing resident protocol fixture in independently
+`crates/due-core/tests/core.rs` uses the existing resident protocol fixture in independently
 configured temporary directories. It launches fake native executables directly,
 without Due RPC, credentials, permission bypasses or a real model. Tests cover
 both providers' fresh/live/saved continuity, identity, ephemeral behavior,

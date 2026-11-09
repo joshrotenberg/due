@@ -1,23 +1,17 @@
-//! Experimental transport-independent delegation core.
+//! Shared types and compatibility exports for Due.
 //!
-//! Enable `core` without `rpc` or `harness` to use the library without a wire
-//! adapter or embedded interpreter. Existing CLI contracts remain independent.
+//! New Rust consumers can depend on the `due-core` crate directly.
 
 #[doc(hidden)]
-pub mod diagnostics;
-pub mod result;
-pub mod types;
+pub use due_core::diagnostics;
+pub use due_core::{result, types};
 
 #[cfg(feature = "core")]
-pub mod core;
-
-// Temporary compatibility boundary for the existing RPC adapter. New clients
-// use core::Engine, not this single-session manager.
-#[cfg(feature = "core")]
-#[doc(hidden)]
-pub mod session;
-
-#[cfg(feature = "core")]
-mod providers {
-    pub(crate) mod provenance;
+pub mod core {
+    pub use due_core::*;
 }
+
+// Temporary compatibility boundary for the existing single-session adapter.
+#[cfg(feature = "rpc")]
+#[doc(hidden)]
+pub use due_core::legacy as session;

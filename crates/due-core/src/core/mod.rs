@@ -6,7 +6,7 @@
 //! wait timeout leaves work running; an assignment timeout stops that run.
 //!
 //! ```no_run
-//! use due::core::{Assignment, Engine, InteractionMode, Limits, Provider, WaitOptions, WorkerOptions};
+//! use due_core::{Assignment, Engine, InteractionMode, Limits, Provider, WaitOptions, WorkerOptions};
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let engine = Engine::new(Limits::default())?;
@@ -31,7 +31,6 @@ mod engine;
 mod stream;
 mod types;
 
-pub use crate::types::{Effort, Provider};
 pub use engine::Engine;
 pub use stream::{SessionItem, SessionStream, StreamError};
 pub use types::*;

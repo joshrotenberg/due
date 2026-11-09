@@ -201,7 +201,7 @@ impl EventSink {
             .as_mut()
             .filter(|turn| turn.id == turn_id && turn.result.is_none())
         {
-            crate::providers::provenance::claude_message(&mut turn.reported, event);
+            crate::provenance::claude_message(&mut turn.reported, event);
         }
     }
 

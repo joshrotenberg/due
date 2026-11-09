@@ -629,7 +629,7 @@ fn partial_text(events: &[Value]) -> String {
 fn normalize_turn(native: Value, events: &[Value], interrupted: bool) -> RunResult {
     let mut result = normalize(native);
     for event in events {
-        crate::providers::provenance::claude_message(&mut result.provenance.reported, event);
+        crate::provenance::claude_message(&mut result.provenance.reported, event);
     }
     if result.text.is_empty() && (interrupted || result.error.is_some()) {
         result.text = partial_text(events);
