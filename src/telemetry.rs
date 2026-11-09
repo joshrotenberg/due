@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde::Serialize;
+use due_core::oneshot::{ActivityKind, ActivityStatus, RunObserver};
 use serde_json::{Map, Value, json};
 use tracing::{
     Subscriber,
@@ -30,29 +30,6 @@ use crate::{
 
 const TARGET: &str = "due::progress";
 const QUEUE_CAPACITY: usize = 1024;
-
-/// Categories describe observed native activity, not equal units of work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivityKind {
-    Command,
-    FileChange,
-    McpCall,
-    WebSearch,
-    PlanUpdate,
-    StatusUpdate,
-    ToolCall,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivityStatus {
-    Succeeded,
-    Failed,
-    Cancelled,
-    Unknown,
-}
 
 /// The sole source of trace records. Only explicit, bounded detail labels may enter.
 #[derive(Clone, Default)]
@@ -191,14 +168,6 @@ pub fn start(run: &RunArgs) -> Result<(Progress, Option<TraceGuard>), RunError> 
 }
 
 impl Progress {
-    pub fn enabled(&self) -> bool {
-        self.0.is_some()
-    }
-
-    pub fn detail_enabled(&self) -> bool {
-        self.0.as_ref().is_some_and(|run| run.detail)
-    }
-
     pub fn run_id(&self) -> Option<&str> {
         self.0.as_ref().map(|run| run.id.as_str())
     }
@@ -220,105 +189,12 @@ impl Progress {
         });
     }
 
-    pub fn spawned(&self, pid: u32, pgid: Option<u32>) {
-        self.emit("process_started", true, |state, _| {
-            state.pid = Some(pid);
-            state.pgid = pgid;
-        });
-    }
-
-    pub fn session(&self, id: &str) {
-        let Some(run) = &self.0 else { return };
-        let id = identifier(id);
-        let mut state = run.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.session.as_ref() == Some(&id) {
-            return;
-        }
-        state.session = Some(id);
-        self.emit_locked(run, &mut state, "session_started", true, Map::new());
-    }
-
-    pub fn phase(&self, event: &'static str) {
-        self.emit(event, true, |_, _| ());
-    }
-
-    pub fn activity_started(
-        &self,
-        id: Option<&str>,
-        kind: ActivityKind,
-        tool: Option<&str>,
-        detail: Option<&str>,
-    ) {
-        self.emit("activity_started", true, |state, fields| {
-            activity_fields(fields, id, kind, tool);
-            self.detail_fields(fields, detail);
-            state.activities_started += 1;
-            if let Some(id) = id
-                && state.active_activities.len() < 1024
-            {
-                state
-                    .active_activities
-                    .insert(identifier(id), Instant::now());
-            }
-        });
-    }
-
-    pub fn activity_completed(
-        &self,
-        id: Option<&str>,
-        kind: ActivityKind,
-        status: ActivityStatus,
-        tool: Option<&str>,
-        detail: Option<&str>,
-    ) {
-        self.emit("activity_completed", true, |state, fields| {
-            activity_fields(fields, id, kind, tool);
-            self.detail_fields(fields, detail);
-            fields.insert("status".into(), json!(status));
-            state.activities_completed += 1;
-            if status == ActivityStatus::Failed {
-                state.activities_failed += 1;
-            }
-            if let Some(start) = id.and_then(|id| state.active_activities.remove(&identifier(id))) {
-                fields.insert(
-                    "activity_duration_ms".into(),
-                    json!(millis(start.elapsed())),
-                );
-            }
-        });
-    }
-
-    /// Late native tool inputs can supply a label after the start event. This
-    /// is supplemental metadata, not another start or completion.
-    pub fn activity_detail(
-        &self,
-        id: Option<&str>,
-        kind: ActivityKind,
-        tool: Option<&str>,
-        detail: &str,
-    ) {
-        if self.detail_enabled() && !detail.is_empty() {
-            self.emit("activity_detail", true, |_, fields| {
-                activity_fields(fields, id, kind, tool);
-                self.detail_fields(fields, Some(detail));
-            });
-        }
-    }
-
     fn detail_fields(&self, fields: &mut Map<String, Value>, detail: Option<&str>) {
         if self.detail_enabled()
             && let Some(detail) = detail.filter(|text| !text.is_empty())
         {
             fields.insert("detail".into(), safe_detail(detail));
         }
-    }
-
-    pub fn assistant(&self, bytes: usize, detail: Option<&str>) {
-        self.emit("message_completed", true, |state, fields| {
-            state.messages += 1;
-            fields.insert("message_bytes".into(), json!(bytes));
-            self.detail_fields(fields, detail);
-        });
     }
 
     pub fn heartbeat(&self) {
@@ -603,5 +479,108 @@ impl TraceGuard {
             incomplete: !drained || self.failed.load(Ordering::Relaxed) || dropped_records > 0,
             dropped_records,
         }
+    }
+}
+
+impl RunObserver for Progress {
+    fn enabled(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn detail_enabled(&self) -> bool {
+        self.0.as_ref().is_some_and(|run| run.detail)
+    }
+
+    fn spawned(&self, pid: u32, pgid: Option<u32>) {
+        self.emit("process_started", true, |state, _| {
+            state.pid = Some(pid);
+            state.pgid = pgid;
+        });
+    }
+
+    fn session(&self, id: &str) {
+        let Some(run) = &self.0 else { return };
+        let id = identifier(id);
+        let mut state = run.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.session.as_ref() == Some(&id) {
+            return;
+        }
+        state.session = Some(id);
+        self.emit_locked(run, &mut state, "session_started", true, Map::new());
+    }
+
+    fn phase(&self, event: &'static str) {
+        self.emit(event, true, |_, _| ());
+    }
+
+    fn activity_started(
+        &self,
+        id: Option<&str>,
+        kind: ActivityKind,
+        tool: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        self.emit("activity_started", true, |state, fields| {
+            activity_fields(fields, id, kind, tool);
+            self.detail_fields(fields, detail);
+            state.activities_started += 1;
+            if let Some(id) = id
+                && state.active_activities.len() < 1024
+            {
+                state
+                    .active_activities
+                    .insert(identifier(id), Instant::now());
+            }
+        });
+    }
+
+    fn activity_completed(
+        &self,
+        id: Option<&str>,
+        kind: ActivityKind,
+        status: ActivityStatus,
+        tool: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        self.emit("activity_completed", true, |state, fields| {
+            activity_fields(fields, id, kind, tool);
+            self.detail_fields(fields, detail);
+            fields.insert("status".into(), json!(status));
+            state.activities_completed += 1;
+            if status == ActivityStatus::Failed {
+                state.activities_failed += 1;
+            }
+            if let Some(start) = id.and_then(|id| state.active_activities.remove(&identifier(id))) {
+                fields.insert(
+                    "activity_duration_ms".into(),
+                    json!(millis(start.elapsed())),
+                );
+            }
+        });
+    }
+
+    /// Late native tool inputs can supply a label after the start event. This
+    /// is supplemental metadata, not another start or completion.
+    fn activity_detail(
+        &self,
+        id: Option<&str>,
+        kind: ActivityKind,
+        tool: Option<&str>,
+        detail: &str,
+    ) {
+        if self.detail_enabled() && !detail.is_empty() {
+            self.emit("activity_detail", true, |_, fields| {
+                activity_fields(fields, id, kind, tool);
+                self.detail_fields(fields, Some(detail));
+            });
+        }
+    }
+
+    fn assistant(&self, bytes: usize, detail: Option<&str>) {
+        self.emit("message_completed", true, |state, fields| {
+            state.messages += 1;
+            fields.insert("message_bytes".into(), json!(bytes));
+            self.detail_fields(fields, detail);
+        });
     }
 }

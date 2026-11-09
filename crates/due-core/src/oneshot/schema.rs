@@ -6,8 +6,8 @@ use std::{io::Write, path::Path};
 use serde_json::Value;
 
 use crate::{
-    cli::Provider,
     result::{RunError, RunResult},
+    types::Provider,
 };
 
 pub struct Schema {
