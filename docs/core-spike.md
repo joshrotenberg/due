@@ -2,7 +2,7 @@
 
 Experimental implementation of the scoped delegation design in
 [PR #147](https://github.com/joshrotenberg/due/pull/147). This guide describes
-the Rust library used by the comparison example and the stdio adapters.
+the Rust library used by the comparison example, the stdio adapters, and the JavaScript harness.
 
 ## Library boundary
 
@@ -44,7 +44,8 @@ contract.
 
 The [stdio MCP adapter](../crates/due-mcp/README.md) exposes live runs and
 nonblocking journal pages through tower-mcp. The [standalone RPC adapter](../crates/due-rpc/README.md)
-adds live item subscriptions and cursor replay over stdio.
+adds live item subscriptions and cursor replay over stdio. The [embedded JavaScript harness](../crates/due-js/README.md)
+uses the same engine in process.
 
 ## Interface
 

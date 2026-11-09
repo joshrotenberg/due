@@ -7,6 +7,9 @@
 mod bridge;
 #[cfg(feature = "js")]
 mod javascript;
+#[cfg(feature = "js")]
+#[doc(hidden)]
+pub use javascript::evaluate as evaluate_js_runtime;
 mod supervisor;
 
 use bridge::Bridge;
