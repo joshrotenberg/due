@@ -60,7 +60,7 @@ library. Each exposes the operations and lifecycle its interface can support.
 | `due-mcp` | A reusable library that maps MCP tools and schemas onto the core. The CLI can expose its stdio server with an opt-in `mcp-stdio` feature. |
 | `due-rpc` | A proposed reusable JSON-RPC library with caller-supplied I/O. A future extraction starts with the shipped `due rpc` protocol and its compatibility tests. |
 | `due-harness` | The embedded language runtime and workflow API. Today JavaScript launches a Due RPC child. A future in-process core backend could make the CLI's harness feature independent of RPC. |
-| Plugin | The CLI can gate `due init` and bundled installer assets with a default-on feature. Installed guides remain available in the base build. |
+| `due-plugin` | Proposed library for package assets and installation. The CLI retains the `due init` command and its output contract. |
 
 The default CLI build includes RPC and JavaScript. A build with no default
 features retains the one-shot command and offline discovery.
@@ -73,13 +73,10 @@ point before Due commits to a published API. Track that commitment in
 
 ## MCP stdio first
 
-Advance the [MCP adapter](https://github.com/joshrotenberg/due/pull/149) first.
-Reuse its tool schemas, core operation mapping, and stdio fixtures on current
-main. The current core already supplies cursor reads and typed worker
-validation. Move configuration and tool construction into the library. Use a small
-CLI entry point to supply the workspace, provider configuration, stdio, and
-shutdown signal. Evaluate the [validated profile catalog](https://github.com/joshrotenberg/due/pull/155)
-as host-supplied configuration for this adapter.
+The [stdio adapter](https://github.com/joshrotenberg/due/pull/165) and
+[named profiles](https://github.com/joshrotenberg/due/pull/166) are on main.
+The library accepts host-supplied streams and configuration. The opt-in
+`due mcp` command supplies the workspace, stdio, and shutdown signal.
 
 One stdio connection owns one engine with multiple workers. Clients can start
 a worker, wait or inspect by run reference, follow up by session reference,
@@ -97,3 +94,42 @@ decisions about client identity, session ownership across requests, and
 disconnect or expiry behavior. RPC extraction, harness changes, and a packaged
 external JavaScript client follow separate decisions. Detached services and
 live session registration remain [separate experiments](https://github.com/joshrotenberg/due/issues/130).
+
+## Plugin crate and host registration
+
+Extract the current package assets, host manifest rendering, install plan, and
+managed installation into `due-plugin`. Keep Clap arguments, terminal output,
+and the process exit code in `due-cli`. Pass the Due executable path and a
+shutdown signal to the library. Keep the existing managed tree, locking, and
+setup receipt compatible with installed packages.
+
+| Configuration | Behavior |
+| --- | --- |
+| Default `due-cli/plugin` and `due-plugin/cli` | `due init` installs the delegate skill. Ordinary assignments use `due run`. |
+| Minimal CLI with the proposed `plugin` feature disabled | `due run`, help, and installed guides are available. |
+| CLI with `mcp-stdio` | `due mcp` is available for an explicitly configured host. |
+| Proposed optional `due-plugin/mcp` | Adds MCP package rendering alongside the delegate skill for a host and workspace the operator selects. A Due binary that packages its own server also needs `mcp-stdio`. |
+
+The first extraction should move the current CLI package and installer
+together. Keep the plugin crate independent of worker execution. Prove the
+same package files, dry-run plan, and fake-host registration results before
+adding an MCP packaging option.
+
+Both installed CLIs advertise direct stdio registration through `mcp add`.
+Claude Code exposes local, project, and user scopes. It also discovers
+plugin-root `.mcp.json` or entries in its plugin manifest. Codex supports
+direct registration in its MCP configuration and has portable and compatibility
+plugin formats with distinct MCP configuration files. Treat direct
+registration and plugin packaging as separate installation paths.
+[Claude Code MCP](https://code.claude.com/docs/en/mcp) ·
+[Claude Code plugin manifests](https://code.claude.com/docs/en/plugins-reference#mcpservers) ·
+[OpenAI Docs for Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) ·
+[OpenAI Docs for plugin packaging](https://developers.openai.com/plugins/build/plugins)
+
+Before enabling MCP packaging, test one fixture package per host in a disposable
+configuration. Verify manifest discovery, the actual launch arguments and
+workspace, duplicate-name handling, and removal. Check which configuration
+resident Claude and Codex workers inherit so a host-level Due server does not
+accidentally become a recursive delegation route. The observed evidence for
+this design is the documentation and local help for Claude Code 2.1.317 and
+Codex CLI 0.165.0. Host registration and plugin loading still need validation.
