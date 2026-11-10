@@ -18,6 +18,16 @@ cargo test --locked -p due-mcp
 cargo test --locked -p due-cli --no-default-features --features mcp-stdio --test mcp --test skills --test build_info
 ```
 
+The macOS and Linux CI jobs also run the same MCP tests against an installed
+binary. To repeat the check, install into a disposable directory and pass the
+path to the fixture client.
+
+```sh
+install_root=$(mktemp -d)
+cargo install --path . --locked --debug --no-default-features --features mcp-stdio --root "$install_root"
+DUE_MCP_TEST_BINARY="$install_root/bin/due" cargo test --locked -p due-cli --no-default-features --features mcp-stdio --test mcp
+```
+
 The earlier source-trial requirements are retired. Development does not require
 Due-only delegation, reporting every successful call, or periodic A/B runs.
 Follow the current task's authorized tools, provider choices and reporting scope.

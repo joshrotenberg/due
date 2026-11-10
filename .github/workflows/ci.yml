@@ -128,6 +128,21 @@ jobs:
           DUE_RPC_BINARY: ${{ github.workspace }}/target/debug/due
       - run: cargo clippy --locked -p due-cli --all-targets --no-default-features --features mcp-stdio -- -D warnings
       - run: cargo test --locked -p due-cli --no-default-features --features mcp-stdio --test mcp --test skills --test build_info
+      - name: Smoke-test installed MCP command
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          install_root=$(mktemp -d "$RUNNER_TEMP/due-mcp-install.XXXXXX")
+          trap 'rm -rf "$install_root"' EXIT
+          cargo install --path . --locked --offline --debug --no-default-features --features mcp-stdio --root "$install_root"
+          binary="$install_root/bin/due"
+          (
+            cd "$install_root"
+            PATH='' "$binary" mcp --help
+            PATH='' "$binary" skills show mcp
+          )
+          DUE_MCP_TEST_BINARY="$binary" cargo test --locked -p due-cli --no-default-features --features mcp-stdio --test mcp
   msrv:
     runs-on: ubuntu-latest
     steps:
