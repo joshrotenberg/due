@@ -62,6 +62,9 @@ pub trait RunObserver: Send + Sync + 'static {
         _detail: &str,
     ) {
     }
+    /// Reports a native Claude Bash denial's input, which can reflect a hook rewrite.
+    /// Delivered only when `detail_enabled` is true.
+    fn permission_check_input(&self, _tool_use_id: &str, _command: &str) {}
 }
 
 /// Use the buffered path without callbacks.

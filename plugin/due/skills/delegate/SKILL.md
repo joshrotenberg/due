@@ -16,8 +16,11 @@ provider is enough, and a fresh session of the same provider can review work it
 did not write. State the workspace, deliverables, constraints and stopping
 condition, and carry the user's existing authorization into the task without
 widening it. Delegation does not grant external actions or recursive delegation.
-A worker's success report is evidence to check against the actual diff,
-artifacts and tests, not proof.
+Workers use their provider's normal settings by default. The calling session's
+effective permission mode and temporary approvals do not transfer. Leave native
+permission flags unset unless the assignment needs explicit controls. If a
+restriction matters, verify it on the actual worker setup as described in
+`due skills show run`. Check success against the diff, artifacts and tests.
 
 Prefer doing the work directly when it is small or depends on this conversation's
 context. Delegate when it can be written as a self-contained assignment.

@@ -70,7 +70,12 @@ labels and user-facing assistant messages where the provider exposes them. It
 requires `--trace` or `--trace-file`. Details may include paths, arguments, or
 provider content; reasoning/thinking, prompts, and raw tool results are excluded.
 Truncated details are marked, and text rendering escapes terminal controls.
-Default traces remain metadata-only.
+Default traces remain metadata-only. Claude may emit an `activity_started`
+record before it supplies the requested Bash command in a later
+`activity_detail` record with the same `activity_id`. A detail with
+`source: "permission_check_input"` comes from a native denial and may show a
+rewritten command. Claude can complete a tool call without exposing a hook's
+final command, so the requested label is not execution evidence.
 
 Summarize an existing JSONL log offline:
 

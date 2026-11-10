@@ -13,6 +13,11 @@ explicitly, and every surface reads the same format:
 - `scope.open({request: "FILE"})` in a `due script` workflow
 - `session.open` with `"request": "FILE"` in a raw `due rpc` client
 
+Omit permission options to use the provider's ordinary user, project and
+managed settings for the worker. Profiles do not copy the calling session's
+effective permission mode or temporary grants. Add native controls only when
+the assignment calls for them.
+
 Keep profiles in a caller-owned location. If a profile carries permission
 settings, store it outside every directory the worker can write, so the worker
 cannot edit its own limits.
@@ -201,8 +206,9 @@ before a one-shot run; there is no dry run for `session.open`.
 ## Checklist
 
 1. Start from `{"schema_version":1,"provider":"..."}` and add only what you need.
-2. Put permission settings in `native_args` and keep the file caller-owned.
+2. If the assignment needs explicit permission settings, use `native_args`.
 3. Preview a `due run` merge with `--dry-run --output json`.
-4. Verify the profile on the surface that will use it; resident sessions reject
-   options that `due run` accepts.
+4. Check required restrictions with a harmless probe on the actual surface,
+   including its cwd and hooks. Resident sessions reject some options that
+   `due run` accepts. See the native permissions section of `run`.
 5. See `due skills show run`, `supervise` and `rpc` for each surface in depth.

@@ -16,7 +16,10 @@ use serde_json::Value;
 
 use super::{ActivityKind, ActivityStatus, Context, Progress, RunOptions, output};
 use crate::{
-    result::{ErrorKind, ReportedSettings, RunError, RunResult, Usage},
+    result::{
+        ErrorKind, PermissionDenial, PermissionDenials, ReportedSettings, RunError, RunResult,
+        Usage,
+    },
     types::{Effort, Provider},
 };
 
@@ -216,7 +219,7 @@ impl StreamState {
                 }
             }
             Some("result") if root => {
-                if self.segments.admit(&event.data) {
+                if self.segments.admit(&event.data, Some(progress)) {
                     self.terminal = Some(event.data);
                     self.last_assistant.clear();
                 } else if self.segments.count == 0 {
@@ -297,7 +300,7 @@ impl StreamState {
             .terminal
             .as_ref()
             .or(self.invalid_terminal.as_ref())
-            .map(parse_document);
+            .map(parse_result);
         let missing_terminal = self.terminal.is_none();
         let process_failed = outcome.is_err();
         let mut result = match outcome {
@@ -386,6 +389,7 @@ impl StreamState {
         }
         if self.segments.count > 0 {
             result.usage = self.segments.usage;
+            result.permission_denials = self.segments.permission_denials;
         }
         if self.terminal.is_some() && !self.segments.continuation {
             if result.error.is_none() {
@@ -427,8 +431,7 @@ fn tool_detail<'a>(name: Option<&'a str>, input: Option<&'a Value>) -> Option<&'
     match name {
         Some("Bash") => input
             .and_then(|input| input.get("command"))
-            .and_then(Value::as_str)
-            .or(name),
+            .and_then(Value::as_str),
         Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => input
             .and_then(|input| {
                 input
@@ -478,7 +481,14 @@ fn merge_diagnostics(prefix: &str, stderr: &str) -> String {
 
 fn parse_document(document: &Value) -> RunResult {
     let Value::Array(records) = document else {
-        return parse_result(document);
+        let mut result = parse_result(document);
+        if !matches!(
+            result.error.as_ref().map(|error| error.kind),
+            Some(ErrorKind::Protocol)
+        ) {
+            collect_permission_denials(&mut result.permission_denials, document, None);
+        }
+        return result;
     };
     let mut segments = ResultSegments::default();
     let mut terminal = None;
@@ -493,7 +503,7 @@ fn parse_document(document: &Value) -> RunResult {
             continue;
         }
         if record.get("type").and_then(Value::as_str) == Some("result") {
-            if segments.admit(record) {
+            if segments.admit(record, None) {
                 terminal = Some(record);
             } else if segments.count == 0 {
                 invalid_terminal = Some(record);
@@ -522,6 +532,7 @@ fn parse_document(document: &Value) -> RunResult {
     }
     if segments.count > 0 {
         result.usage = segments.usage;
+        result.permission_denials = segments.permission_denials;
     }
     if segments.count > 1 {
         result.diagnostics =
@@ -544,6 +555,7 @@ struct ResultSegments {
     count: u64,
     continuation: bool,
     usage: Option<Usage>,
+    permission_denials: PermissionDenials,
     error: Option<RunError>,
 }
 
@@ -558,7 +570,7 @@ impl ResultSegments {
             })
     }
 
-    fn admit(&mut self, value: &Value) -> bool {
+    fn admit(&mut self, value: &Value, progress: Option<&Progress>) -> bool {
         if self.count > 0 && !self.continuation {
             self.error.get_or_insert_with(|| {
                 RunError::protocol("adjacent Claude root results without continuation")
@@ -623,8 +635,69 @@ impl ResultSegments {
             self.usage = None;
         }
         self.count = count;
+        collect_permission_denials(&mut self.permission_denials, value, progress);
         true
     }
+}
+
+fn collect_permission_denials(
+    summary: &mut PermissionDenials,
+    terminal: &Value,
+    progress: Option<&Progress>,
+) {
+    const LIMIT: usize = 64;
+    let Some(native) = terminal.get("permission_denials") else {
+        return;
+    };
+    let Some(entries) = native.as_array() else {
+        summary.incomplete = true;
+        return;
+    };
+    summary.incomplete |= entries.len() > LIMIT;
+    for entry in entries.iter().take(LIMIT) {
+        let (Some(tool_name), Some(tool_use_id)) = (
+            entry
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .filter(|name| valid_denial_identifier(name)),
+            entry
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .filter(|id| valid_denial_identifier(id)),
+        ) else {
+            summary.incomplete = true;
+            continue;
+        };
+        if summary
+            .items
+            .iter()
+            .any(|item| item.tool_use_id == tool_use_id)
+        {
+            continue;
+        }
+        if summary.items.len() == LIMIT {
+            summary.incomplete = true;
+            break;
+        }
+        summary.items.push(PermissionDenial {
+            tool_name: tool_name.into(),
+            tool_use_id: tool_use_id.into(),
+        });
+        if let Some(progress) = progress.filter(|progress| progress.detail_enabled())
+            && tool_name == "Bash"
+            && let Some(command) = entry.pointer("/tool_input/command").and_then(Value::as_str)
+        {
+            progress.permission_check_input(tool_use_id, command);
+        }
+    }
+}
+
+fn valid_denial_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.:/".contains(&byte))
 }
 
 fn parse_result(value: &Value) -> RunResult {
@@ -743,6 +816,7 @@ fn failure(error: Error) -> RunResult {
                 result.cost_usd = parsed.cost_usd;
                 result.usage = parsed.usage;
                 result.structured_output = parsed.structured_output;
+                result.permission_denials = parsed.permission_denials;
                 result.provenance = parsed.provenance;
                 result.diagnostics = parsed.diagnostics;
             }
@@ -844,6 +918,44 @@ fn failure(error: Error) -> RunResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn permission_denials_are_bounded_and_omit_empty_evidence() {
+        let mut native = json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "finished",
+            "permission_denials": []
+        });
+        let envelope = |value: &Value| serde_json::to_value(parse_document(value)).unwrap();
+        assert!(envelope(&native).get("permission_denials").is_none());
+
+        native["permission_denials"] = json!([{
+            "tool_name": "Bash",
+            "tool_use_id": "malformed id",
+            "tool_input": {"command": "private"}
+        }]);
+        assert_eq!(
+            envelope(&native)["permission_denials"],
+            json!({"items": [], "incomplete": true})
+        );
+
+        native["permission_denials"] = Value::Array(
+            (0..65)
+                .map(|i| json!({"tool_name": "Bash", "tool_use_id": format!("tool-{i}")}))
+                .collect(),
+        );
+        let result = envelope(&native);
+        assert_eq!(
+            result["permission_denials"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert_eq!(result["permission_denials"]["incomplete"], true);
+    }
 
     #[test]
     fn provenance_survives_buffered_and_streamed_failures() {

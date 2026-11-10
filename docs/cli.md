@@ -734,7 +734,11 @@ In CLI permission rules, `/receipt.py` is anchored to Claude's starting director
 the shell. Arguments after `--` replace a profile's **whole** native argument list.
 
 `dontAsk` denies actions that would need approval; ordinary permitted reads and
-inherited allows still apply. Existing deny/ask rules take precedence over allows.
+inherited allows still apply. Matching deny and ask rules are evaluated against
+the input Claude checks. A PreToolUse hook can rewrite that input before
+matching, so test any required block with the actual worker settings and a
+harmless command. A Due dry run previews arguments only. See
+`due skills show run` for the permission probe and denial evidence.
 `--permission-prompts none` also tells Claude nobody can answer prompts or approve
 retries; it requires Claude Code 2.1.259 or later. Check the installed native CLI
 before reusing a profile on another machine. See Claude's

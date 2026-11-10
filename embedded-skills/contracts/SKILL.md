@@ -94,6 +94,11 @@ validate constraints, convert incompatible schemas, repair answers, or retry.
   The field describes Due's
   independent validation, not native enforcement. Validate the answer separately
   when validity gates further work; neither presence nor execution success proves it.
+- `permission_denials` is optional metadata from admitted Claude one-shot
+  terminal results. It contains up to 64 unique `items` with `tool_name` and
+  `tool_use_id`. `incomplete` is true when the bound or invalid native entries
+  prevent full reporting. The field is omitted when no denial evidence was
+  retained. It carries no tool inputs and does not change turn status.
 - `session_id` is the native Claude session or Codex thread ID, not a Due session.
 - `provenance` separates merged common request fields from native observations.
   `requested` is `{ "model": "sonnet", "effort": "high" }`, for example;

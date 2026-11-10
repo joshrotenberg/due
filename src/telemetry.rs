@@ -189,6 +189,26 @@ impl Progress {
         });
     }
 
+    fn emit_activity_detail(
+        &self,
+        id: Option<&str>,
+        kind: ActivityKind,
+        tool: Option<&str>,
+        detail: &str,
+        source: Option<&'static str>,
+    ) {
+        if self.detail_enabled() && !detail.is_empty() {
+            self.emit("activity_detail", true, |_, fields| {
+                activity_fields(fields, id, kind, tool);
+                let mut detail = safe_detail(detail);
+                if let Some(source) = source {
+                    detail["source"] = json!(source);
+                }
+                fields.insert("detail".into(), detail);
+            });
+        }
+    }
+
     fn detail_fields(&self, fields: &mut Map<String, Value>, detail: Option<&str>) {
         if self.detail_enabled()
             && let Some(detail) = detail.filter(|text| !text.is_empty())
@@ -568,12 +588,17 @@ impl RunObserver for Progress {
         tool: Option<&str>,
         detail: &str,
     ) {
-        if self.detail_enabled() && !detail.is_empty() {
-            self.emit("activity_detail", true, |_, fields| {
-                activity_fields(fields, id, kind, tool);
-                self.detail_fields(fields, Some(detail));
-            });
-        }
+        self.emit_activity_detail(id, kind, tool, detail, None);
+    }
+
+    fn permission_check_input(&self, tool_use_id: &str, command: &str) {
+        self.emit_activity_detail(
+            Some(tool_use_id),
+            ActivityKind::Command,
+            Some("Bash"),
+            command,
+            Some("permission_check_input"),
+        );
     }
 
     fn assistant(&self, bytes: usize, detail: Option<&str>) {

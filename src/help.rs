@@ -132,7 +132,7 @@ ERRORS AND PARAMETERS
   -32001 too many in-flight requests. Failed native turns are result data.
   session.read limit is 1..256 (default 64); turn.read wait_ms is 0..10000
   (default 0). Retained items/events and output queues are bounded.
-  Authentication and native permissions are inherited; no automatic approvals.
+  Provider authentication and settings apply. Caller session grants do not transfer.
 
 LEARN MORE
   due skills show rpc         Full wire contract, parameters and permission shapes
