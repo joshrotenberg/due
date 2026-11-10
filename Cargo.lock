@@ -266,6 +266,7 @@ dependencies = [
  "due-core",
  "due-harness",
  "due-mcp",
+ "due-plugin",
  "futures-util",
  "libc",
  "serde",
@@ -277,7 +278,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "which",
 ]
 
 [[package]]
@@ -327,6 +327,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-mcp",
+]
+
+[[package]]
+name = "due-plugin"
+version = "0.2.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "which",
 ]
 
 [[package]]

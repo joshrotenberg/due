@@ -15,7 +15,7 @@ path = "src/main.rs"
 name = "due"
 
 [workspace]
-members = [".", "crates/due-core", "crates/due-harness", "crates/due-mcp", "examples/core-compare"]
+members = [".", "crates/due-core", "crates/due-harness", "crates/due-mcp", "crates/due-plugin", "examples/core-compare"]
 default-members = [".", "crates/due-harness"]
 exclude = ["examples/rpc-languages"]
 resolver = "3"
@@ -36,19 +36,19 @@ rpc = ["core", "dep:tokio-util", "dep:futures-util", "tokio/io-std", "tokio/net"
 due-core = { path = "crates/due-core", default-features = false, features = ["oneshot"] }
 due-harness = { path = "crates/due-harness", default-features = false, features = ["js"], optional = true }
 due-mcp = { path = "crates/due-mcp", optional = true }
+due-plugin = { path = "crates/due-plugin" }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "process", "io-util"] }
-which = "8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+tempfile = "3"
 toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]
