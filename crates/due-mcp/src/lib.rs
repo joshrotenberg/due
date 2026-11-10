@@ -1,6 +1,10 @@
 //! Host Due workers over one MCP connection using newline-delimited I/O.
 
-use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
+mod profiles;
+
+use std::{collections::BTreeMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
+
+pub use profiles::ProfileCatalog;
 
 use due_core::{
     Assignment, Engine, FollowUp, InteractionRef, Limits, Provider, RunRef, SessionRef,
@@ -25,6 +29,8 @@ pub struct Config {
     pub codex_binary: Option<PathBuf>,
     /// Resource limits for this connection's engine.
     pub limits: Limits,
+    /// Require callers to select a named worker from this catalog when set.
+    pub profiles: Option<ProfileCatalog>,
 }
 
 impl Config {
@@ -35,20 +41,45 @@ impl Config {
             claude_binary: None,
             codex_binary: None,
             limits: Limits::default(),
+            profiles: None,
         }
+    }
+
+    fn worker(&self, provider: Provider) -> WorkerOptions {
+        let mut worker = WorkerOptions::new(provider, &self.cwd);
+        worker.binary = match provider {
+            Provider::Claude => self.claude_binary.clone(),
+            Provider::Codex => self.codex_binary.clone(),
+        };
+        worker
     }
 }
 
 struct App {
     engine: Engine,
     config: Config,
+    profiles: Option<BTreeMap<String, WorkerOptions>>,
+}
+
+impl App {
+    fn select_worker(&self, input: &Spawn) -> Result<WorkerOptions, &'static str> {
+        match (&self.profiles, input.provider, input.profile.as_deref()) {
+            (Some(profiles), None, Some(name)) => {
+                profiles.get(name).cloned().ok_or("unknown worker profile")
+            }
+            (Some(_), _, _) => Err("supply a profile from the server catalog"),
+            (None, Some(provider), None) => Ok(self.config.worker(provider)),
+            (None, _, _) => Err("supply a provider when the server has no profile catalog"),
+        }
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Spawn {
     #[schemars(schema_with = "provider_schema")]
-    provider: Provider,
+    provider: Option<Provider>,
+    profile: Option<String>,
     prompt: String,
     /// Optional execution deadline in milliseconds, including native startup.
     timeout_ms: Option<u64>,
@@ -113,17 +144,35 @@ struct Read {
 }
 
 fn router(app: Arc<App>) -> McpRouter {
+    let mut spawn_schema =
+        serde_json::to_value(schemars::schema_for!(Spawn)).expect("spawn schema serializes");
+    let properties = spawn_schema["properties"]
+        .as_object_mut()
+        .expect("spawn properties");
+    let selector = if let Some(profiles) = &app.profiles {
+        properties.remove("provider");
+        properties.insert(
+            "profile".into(),
+            json!({"type":"string","enum":profiles.keys().collect::<Vec<_>>()}),
+        );
+        "profile"
+    } else {
+        properties.remove("profile");
+        "provider"
+    };
+    spawn_schema["required"] = json!(["prompt", selector]);
+
     McpRouter::new()
         .server_info("due-mcp", env!("CARGO_PKG_VERSION"))
         .instructions("Spawn a worker, then use its run and session references to inspect, wait, follow up, or read items. Use inspect to find pending interactions and respond with an explicit provider-native decision.")
         .tool(
             ToolBuilder::new("spawn")
-                .description("Start a Claude or Codex worker in the server's working directory.")
+                .description(format!("Start a worker in the server's working directory using {selector}."))
+                .input_schema(spawn_schema)
                 .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Spawn>| async move {
-                    let mut worker = WorkerOptions::new(input.provider, &app.config.cwd);
-                    worker.binary = match input.provider {
-                        Provider::Claude => app.config.claude_binary.clone(),
-                        Provider::Codex => app.config.codex_binary.clone(),
+                    let worker = match app.select_worker(&input) {
+                        Ok(worker) => worker,
+                        Err(message) => return tool_error(json!({"kind":"invalid_input","message":message})),
                     };
                     let assignment = Assignment {
                         worker,
@@ -266,10 +315,16 @@ pub async fn serve_stdio(
     run(&app.engine, transport.run(), handle.stopping(), shutdown).await
 }
 
-fn connection(config: Config) -> Result<(Arc<App>, StdioTransport), BoxError> {
+fn connection(mut config: Config) -> Result<(Arc<App>, StdioTransport), BoxError> {
+    let profiles = config
+        .profiles
+        .take()
+        .map(|catalog| catalog.resolve(&config))
+        .transpose()?;
     let app = Arc::new(App {
         engine: Engine::new(config.limits.clone())?,
         config,
+        profiles,
     });
     let transport = StdioTransport::without_server_notifications(router(app.clone()))
         .max_concurrent_requests(16)

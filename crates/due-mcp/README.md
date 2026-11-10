@@ -28,3 +28,9 @@ overrides `DUE_MCP_CLAUDE_BINARY` and `DUE_MCP_CODEX_BINARY` from its environmen
 Read the [MCP guide](../../embedded-skills/mcp/SKILL.md) for tools, run references,
 follow-ups, and approvals. The same guide is available in the feature-enabled
 binary with `due skills show mcp`.
+
+Hosts can parse a version-1 JSON catalog with
+`ProfileCatalog::from_json` and assign it to `Config::profiles`. The adapter
+validates each worker against the connection configuration before opening the
+transport. The CLI reads the catalog from a regular JSON file supplied with
+`due mcp --profiles FILE`. See the [catalog example](../../embedded-skills/mcp/SKILL.md#named-worker-profiles).
