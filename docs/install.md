@@ -104,8 +104,8 @@ the symlink and restore the saved executable or use the regular Cargo install.
 
 ## Install the bundled plugin
 
-The binary contains the portable manifest, host compatibility manifests and
-complete delegate skill. Once `due` is on PATH, run from any directory:
+The binary embeds the portable manifest, host compatibility manifests, and
+delegate skill through the [`due-plugin` library](../crates/due-plugin/README.md). Once `due` is on PATH, run from any directory:
 
 ```sh
 due init --dry-run
