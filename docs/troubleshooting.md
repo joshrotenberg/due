@@ -167,6 +167,24 @@ enable task networking, copy certificates/credentials, or change global proxy
 settings as a generic repair. Preserve evidence and request the relevant host or
 network correction when confirmed.
 
+### Claude Desktop command-tool connection failures
+
+Claude Desktop's Code-tab terminal and the agent's Bash tool can have different
+launch environments and network policies. If a Claude child reports
+`ECONNREFUSED` or times out before answering, compare direct Claude and
+`due run --provider claude` through the same command tool under the same policy.
+Use the same executable, workspace, short prompt and native options. Use
+`due run --dry-run --output json` with the intended flags to inspect the native
+argv. Success in the terminal establishes that context only.
+
+The Claude wrapper removes `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` from the
+child environment. Other settings, such as `ANTHROPIC_BASE_URL`, can still be
+inherited. A direct invocation may encounter Claude's nested-session guard before
+it reaches the network. Record whether the two commands reach a reply, the exit
+or timeout, and relevant environment variable names without their values. The
+[desktop report in #146](https://github.com/joshrotenberg/due/issues/146) tracks
+this comparison.
+
 ## Repair an existing checkout build through its existing symlink
 
 <a id="repair-a-frozen-checkout-build-through-its-existing-symlink"></a>
