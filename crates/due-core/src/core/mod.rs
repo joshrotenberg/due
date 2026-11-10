@@ -4,6 +4,8 @@
 //! five-function interface, without MCP, raw RPC or an
 //! interpreter. Call [`Engine::shutdown`] before dropping the runtime. A
 //! wait timeout leaves work running; an assignment timeout stops that run.
+//! On a long-lived engine, call [`Engine::release_session`] after collecting an
+//! idle worker's results and items to reclaim its session and run slots.
 //!
 //! ```no_run
 //! use due_core::{Assignment, Engine, InteractionMode, Limits, Provider, WaitOptions, WorkerOptions};

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout, Command},
-    time::{sleep, timeout},
+    time::{interval, sleep, timeout},
 };
 
 const DEADLINE: Duration = Duration::from_secs(15);
@@ -188,6 +188,13 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
         json!(["prompt", "provider"])
     );
     assert!(spawn["inputSchema"]["properties"].get("profile").is_none());
+    let release = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "release_session")
+        .unwrap();
+    assert_eq!(release["inputSchema"]["required"], json!(["session"]));
     let mut tools: Vec<_> = listed["tools"]
         .as_array()
         .unwrap()
@@ -202,6 +209,7 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
             "inspect",
             "interrupt",
             "read_items",
+            "release_session",
             "respond",
             "spawn",
             "wait"
@@ -352,6 +360,83 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
 }
 
 #[tokio::test]
+async fn stdio_releases_settled_workers_and_handles_eof_during_release() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut peer = Peer::start(workspace.path(), None);
+    peer.initialize().await;
+    let first = peer
+        .tool("spawn", json!({"provider":"claude","prompt":"first"}))
+        .await;
+    let other = peer
+        .tool("spawn", json!({"provider":"codex","prompt":"first"}))
+        .await;
+    let done = peer
+        .tool(
+            "wait",
+            json!({"runs":[first["run"],other["run"]],"timeout_ms":10000}),
+        )
+        .await;
+    assert_eq!(done["condition_met"], true, "{done}");
+    let release = peer
+        .tool("release_session", json!({"session":first["session"]}))
+        .await;
+    assert_eq!(release, json!({"released":true}));
+    assert!(workspace.path().join("claude/exited").is_file());
+    for (name, arguments, kind) in [
+        ("inspect", json!({"run":first["run"]}), "unknown_run"),
+        (
+            "read_items",
+            json!({"session":first["session"]}),
+            "unknown_session",
+        ),
+    ] {
+        let result = peer
+            .call("tools/call", json!({"name":name,"arguments":arguments}))
+            .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(
+            result["structuredContent"]["error"]["kind"], kind,
+            "{result}"
+        );
+    }
+
+    let follow = peer
+        .tool(
+            "follow_up",
+            json!({"session":other["session"],"prompt":"second"}),
+        )
+        .await;
+    let done = peer
+        .tool("wait", json!({"runs":[follow["run"]],"timeout_ms":10000}))
+        .await;
+    assert_eq!(done["runs"][0]["result"]["text"], "turn 2");
+    let fixture = workspace.path().join("codex");
+    fs::write(fixture.join("hold-close"), "").unwrap();
+    peer.request(
+        "tools/call",
+        json!({"name":"release_session","arguments":{"session":other["session"]}}),
+    )
+    .await;
+    timeout(DEADLINE, async {
+        while !fixture.join("close-waiting").is_file() {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("release did not close provider stdin");
+    drop(peer.input);
+    fs::write(fixture.join("release-close"), "").unwrap();
+    assert!(
+        timeout(DEADLINE, peer.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(fixture.join("exited").is_file());
+}
+
+#[tokio::test]
 async fn broken_stdout_settles_a_worker_with_stdin_open() {
     let workspace = tempfile::tempdir().unwrap();
     let mut peer = Peer::start(workspace.path(), None);
@@ -362,18 +447,26 @@ async fn broken_stdout_settles_a_worker_with_stdin_open() {
     peer.awaiting_input(&run["run"]).await;
 
     drop(peer.output);
-    let ping = json!({"jsonrpc":"2.0","id":peer.next_id,"method":"ping"});
-    timeout(
-        DEADLINE,
-        peer.input.write_all(format!("{ping}\n").as_bytes()),
-    )
+    // A sibling spawn can briefly retain a copy of the read end on Darwin.
+    // Keep making the server write until it observes that all readers are gone.
+    let status = timeout(DEADLINE, async {
+        let mut probes = interval(Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                status = peer.child.wait() => break status.unwrap(),
+                _ = probes.tick() => {
+                    let ping = json!({"jsonrpc":"2.0","id":peer.next_id,"method":"ping"});
+                    peer.next_id += 1;
+                    if let Err(error) = peer.input.write_all(format!("{ping}\n").as_bytes()).await {
+                        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+                        break peer.child.wait().await.unwrap();
+                    }
+                }
+            }
+        }
+    })
     .await
-    .unwrap()
-    .unwrap();
-    let status = timeout(DEADLINE, peer.child.wait())
-        .await
-        .expect("server did not stop after the stdout failure")
-        .unwrap();
+    .expect("server did not stop after the stdout failure");
     assert_eq!(status.code(), Some(1));
     assert!(workspace.path().join("codex/exited").is_file());
 }

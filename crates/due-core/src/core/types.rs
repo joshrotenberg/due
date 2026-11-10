@@ -233,11 +233,11 @@ pub struct WaitResult {
 /// Fixed per-engine resource limits; no automatic eviction or retries.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    /// Total admitted runs retained until this engine is released.
+    /// Total admitted runs retained until their session or this engine is released.
     pub max_runs: usize,
     /// Total logical sessions owned by the engine.
     pub max_sessions: usize,
-    /// Bound for interrupt settlement and explicit shutdown waiting.
+    /// Bound for interrupt, session release, and explicit shutdown settlement.
     pub settlement_timeout: Duration,
 }
 impl Default for Limits {
@@ -269,7 +269,7 @@ pub enum ErrorKind {
     UnknownRun,
     /// Session does not belong to this engine or is unusable.
     UnknownSession,
-    /// A turn is already reserved for this session.
+    /// A turn or release is already reserved for this session.
     Busy,
     /// The owner is shutting down or closed.
     Closed,

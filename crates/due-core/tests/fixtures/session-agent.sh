@@ -314,3 +314,9 @@ while IFS= read -r line; do
   fi
 
 done
+
+# Let lifecycle tests keep the worker alive after its input closes.
+if [ -f "$DUE_SESSION_FIXTURE_DIR/hold-close" ]; then
+  : > "$DUE_SESSION_FIXTURE_DIR/close-waiting"
+  while [ ! -f "$DUE_SESSION_FIXTURE_DIR/release-close" ]; do /bin/sleep 0.01; done
+fi

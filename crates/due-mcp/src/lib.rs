@@ -132,6 +132,14 @@ struct Respond {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct Release {
+    /// Session to release after collecting its results and items.
+    #[schemars(with = "String")]
+    session: SessionRef,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Read {
     #[schemars(with = "String")]
     session: SessionRef,
@@ -164,7 +172,7 @@ fn router(app: Arc<App>) -> McpRouter {
 
     McpRouter::new()
         .server_info("due-mcp", env!("CARGO_PKG_VERSION"))
-        .instructions("Spawn a worker, then use its run and session references to inspect, wait, follow up, or read items. Use inspect to find pending interactions and respond with an explicit provider-native decision.")
+        .instructions("Spawn a worker, then use its run and session references to inspect, wait, follow up, or read items. Use inspect to find pending interactions and respond with an explicit provider-native decision. Release idle sessions after collecting their results and items.")
         .tool(
             ToolBuilder::new("spawn")
                 .description(format!("Start a worker in the server's working directory using {selector}."))
@@ -234,6 +242,14 @@ fn router(app: Arc<App>) -> McpRouter {
                 .description("Submit a provider-native decision to an exact pending interaction.")
                 .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Respond>| async move {
                     outcome(app.engine.respond(&input.interaction, Value::Object(input.response)).await)
+                })
+                .build(),
+        )
+        .tool(
+            ToolBuilder::new("release_session")
+                .description("Close an idle or ended worker and discard its retained runs and items. Read them before release.")
+                .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Release>| async move {
+                    outcome(app.engine.release_session(&input.session).await.map(|()| json!({"released":true})))
                 })
                 .build(),
         )
