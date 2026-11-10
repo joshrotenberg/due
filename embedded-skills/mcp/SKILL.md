@@ -29,12 +29,18 @@ connection configured by the host operator. For an ordinary one-turn task, use
 | `read_items` | Read a page of session items. Start with `after: 0` and pass back the returned cursor. |
 | `respond` | Submit a provider-native `response` object for an exact pending `interaction`. |
 | `interrupt` | Interrupt the specified active `run` and wait for its outcome. |
+| `release_session` | Close an idle or ended `session` and free its session and retained run slots. |
 
 Save the run and session references from `spawn`. A session reference is scoped
 to the connection. Use separate sessions for independent author and reviewer
 work. The caller checks the actual work before accepting it. If a worker needs
 approval, inspect the pending request and respond only within your authority.
-Closing the connection settles active assignments and closes idle workers.
+For a long-lived connection, save any results and items you need before calling
+`release_session` with `{"session":"<session reference>"}`. Success returns
+`{"released":true}`. The old session and all its run references then expire.
+If a run is active, wait for it to finish or interrupt it first. If settlement
+fails, the records and capacity stay reserved. Closing the connection settles
+active assignments and closes idle workers.
 
 ## Named worker profiles
 

@@ -188,6 +188,13 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
         json!(["prompt", "provider"])
     );
     assert!(spawn["inputSchema"]["properties"].get("profile").is_none());
+    let release = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "release_session")
+        .unwrap();
+    assert_eq!(release["inputSchema"]["required"], json!(["session"]));
     let mut tools: Vec<_> = listed["tools"]
         .as_array()
         .unwrap()
@@ -202,6 +209,7 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
             "inspect",
             "interrupt",
             "read_items",
+            "release_session",
             "respond",
             "spawn",
             "wait"
@@ -349,6 +357,83 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
             workspace.path().join("worker-cwd").canonicalize().unwrap()
         );
     }
+}
+
+#[tokio::test]
+async fn stdio_releases_settled_workers_and_handles_eof_during_release() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut peer = Peer::start(workspace.path(), None);
+    peer.initialize().await;
+    let first = peer
+        .tool("spawn", json!({"provider":"claude","prompt":"first"}))
+        .await;
+    let other = peer
+        .tool("spawn", json!({"provider":"codex","prompt":"first"}))
+        .await;
+    let done = peer
+        .tool(
+            "wait",
+            json!({"runs":[first["run"],other["run"]],"timeout_ms":10000}),
+        )
+        .await;
+    assert_eq!(done["condition_met"], true, "{done}");
+    let release = peer
+        .tool("release_session", json!({"session":first["session"]}))
+        .await;
+    assert_eq!(release, json!({"released":true}));
+    assert!(workspace.path().join("claude/exited").is_file());
+    for (name, arguments, kind) in [
+        ("inspect", json!({"run":first["run"]}), "unknown_run"),
+        (
+            "read_items",
+            json!({"session":first["session"]}),
+            "unknown_session",
+        ),
+    ] {
+        let result = peer
+            .call("tools/call", json!({"name":name,"arguments":arguments}))
+            .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(
+            result["structuredContent"]["error"]["kind"], kind,
+            "{result}"
+        );
+    }
+
+    let follow = peer
+        .tool(
+            "follow_up",
+            json!({"session":other["session"],"prompt":"second"}),
+        )
+        .await;
+    let done = peer
+        .tool("wait", json!({"runs":[follow["run"]],"timeout_ms":10000}))
+        .await;
+    assert_eq!(done["runs"][0]["result"]["text"], "turn 2");
+    let fixture = workspace.path().join("codex");
+    fs::write(fixture.join("hold-close"), "").unwrap();
+    peer.request(
+        "tools/call",
+        json!({"name":"release_session","arguments":{"session":other["session"]}}),
+    )
+    .await;
+    timeout(DEADLINE, async {
+        while !fixture.join("close-waiting").is_file() {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("release did not close provider stdin");
+    drop(peer.input);
+    fs::write(fixture.join("release-close"), "").unwrap();
+    assert!(
+        timeout(DEADLINE, peer.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(fixture.join("exited").is_file());
 }
 
 #[tokio::test]

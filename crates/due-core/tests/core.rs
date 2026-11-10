@@ -207,6 +207,177 @@ async fn reaped(pid: i32) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn release_reclaims_both_limits_without_affecting_another_worker() {
+    let claude = Fixture::new(Provider::Claude);
+    let codex = Fixture::new(Provider::Codex);
+    let engine = Engine::new(Limits {
+        max_sessions: 2,
+        max_runs: 3,
+        ..Limits::default()
+    })
+    .unwrap();
+
+    let first = engine.spawn(claude.assignment("first")).await.unwrap();
+    let first_snapshot = finished(&engine, &first).await;
+    let session = first_snapshot.session;
+    let mut reader = engine.subscribe(&session, 0).unwrap();
+    let other = engine.spawn(codex.assignment("first")).await.unwrap();
+    let other_snapshot = finished(&engine, &other).await;
+    assert_eq!(
+        engine
+            .spawn(claude.assignment("first"))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::Capacity
+    );
+
+    let last = engine
+        .follow_up(session.clone(), FollowUp::new("native-exit"))
+        .await
+        .unwrap();
+    finished(&engine, &last).await;
+    reaped(claude.pid()).await;
+    assert_eq!(
+        engine
+            .follow_up(other_snapshot.session.clone(), FollowUp::new("second"))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::Capacity
+    );
+
+    engine.release_session(&session).await.unwrap();
+    assert_eq!(
+        engine.inspect(&first).unwrap_err().kind,
+        ErrorKind::UnknownRun
+    );
+    assert_eq!(
+        engine.inspect(&last).unwrap_err().kind,
+        ErrorKind::UnknownRun
+    );
+    assert_eq!(
+        engine.release_session(&session).await.unwrap_err().kind,
+        ErrorKind::UnknownSession
+    );
+    assert!(
+        matches!(engine.subscribe(&session, 0), Err(error) if error.kind == ErrorKind::UnknownSession)
+    );
+    let page = reader.read_available(256).unwrap();
+    assert!(page.closed);
+    assert!(page.items.iter().any(|item| item.kind == "run_finished"));
+
+    let replacement = engine.spawn(claude.assignment("first")).await.unwrap();
+    assert_ne!(finished(&engine, &replacement).await.session, session);
+    let follow_up = engine
+        .follow_up(other_snapshot.session, FollowUp::new("second"))
+        .await
+        .unwrap();
+    let result = finished(&engine, &follow_up).await.result.unwrap();
+    assert_eq!(result.text, "turn 2");
+    assert!(engine.inspect(&other).is_ok());
+    let error = engine
+        .follow_up(session, FollowUp::new("stale"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::UnknownSession);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn release_reserves_the_session_and_survives_a_dropped_caller() {
+    let fixture = Fixture::new(Provider::Claude);
+    let engine = Arc::new(engine());
+    let run = engine.spawn(fixture.assignment("hold")).await.unwrap();
+    running(&engine, &run).await;
+    let session = engine.inspect(&run).unwrap().session;
+    assert_eq!(
+        engine.release_session(&session).await.unwrap_err().kind,
+        ErrorKind::Busy
+    );
+    engine.interrupt(&run).await.unwrap();
+
+    let dir = fixture.directory.path();
+    fs::write(dir.join("hold-close"), "").unwrap();
+    let caller = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let session = session.clone();
+        async move { engine.release_session(&session).await }
+    });
+    exists(dir.join("close-waiting")).await;
+    assert_eq!(
+        engine.release_session(&session).await.unwrap_err().kind,
+        ErrorKind::Busy
+    );
+    assert_eq!(
+        engine
+            .follow_up(session.clone(), FollowUp::new("second"))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::Busy
+    );
+    assert!(engine.inspect(&run).is_ok());
+
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    fs::write(dir.join("release-close"), "").unwrap();
+    reaped(fixture.pid()).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while engine.inspect(&run).is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn release_keeps_capacity_reserved_if_settlement_times_out() {
+    let fixture = Fixture::new(Provider::Claude);
+    let engine = Engine::new(Limits {
+        max_sessions: 1,
+        max_runs: 2,
+        settlement_timeout: Duration::from_millis(100),
+    })
+    .unwrap();
+    let run = engine.spawn(fixture.assignment("first")).await.unwrap();
+    let session = finished(&engine, &run).await.session;
+    let dir = fixture.directory.path();
+    fs::write(dir.join("hold-close"), "").unwrap();
+
+    let result = engine.release_session(&session).await;
+    fs::write(dir.join("release-close"), "").unwrap();
+    reaped(fixture.pid()).await;
+    assert_eq!(result.unwrap_err().kind, ErrorKind::Settlement);
+    assert!(engine.inspect(&run).is_ok());
+    assert!(
+        engine
+            .subscribe(&session, 0)
+            .unwrap()
+            .read_available(256)
+            .unwrap()
+            .closed
+    );
+    assert_eq!(
+        engine
+            .follow_up(session, FollowUp::new("second"))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnknownSession
+    );
+    let error = engine.spawn(fixture.assignment("fresh")).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Capacity);
+    assert_eq!(error.message, "worker limit reached");
+    assert_eq!(
+        engine.shutdown().await.unwrap_err().kind,
+        ErrorKind::Settlement
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn both_providers_keep_live_context_and_immutable_earlier_results() {
     for provider in [Provider::Claude, Provider::Codex] {

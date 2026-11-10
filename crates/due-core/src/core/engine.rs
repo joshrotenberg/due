@@ -45,6 +45,7 @@ struct Worker {
 struct Session {
     worker: Arc<Worker>,
     active: Option<RunRef>,
+    releasing: bool,
 }
 struct Run {
     snapshot: RunSnapshot,
@@ -190,6 +191,42 @@ impl Engine {
         if state.closing {
             return Err(Error::new(ErrorKind::Closed, "engine is shutting down"));
         }
+        if let Some(id) = &session {
+            let entry = state.sessions.get(id).ok_or_else(|| {
+                Error::new(ErrorKind::UnknownSession, "unknown session in this engine")
+            })?;
+            if entry.releasing {
+                return Err(Error::new(
+                    ErrorKind::Busy,
+                    "session release is in progress",
+                ));
+            }
+            if entry.worker.unavailable.load(Ordering::Acquire) {
+                return Err(Error::new(
+                    ErrorKind::UnknownSession,
+                    "native worker is unavailable; use saved history in a new worker",
+                ));
+            }
+            if let Some(handle) = entry.worker.handle.lock().unwrap().as_deref()
+                && !entry
+                    .worker
+                    .manager
+                    .failure(handle)
+                    .is_ok_and(|failure| failure.is_none())
+            {
+                entry.worker.unavailable.store(true, Ordering::Release);
+                return Err(Error::new(
+                    ErrorKind::UnknownSession,
+                    "native worker failed between assignments",
+                ));
+            }
+            if entry.active.is_some() {
+                return Err(Error::new(
+                    ErrorKind::Busy,
+                    "a run is already active for this session",
+                ));
+            }
+        }
         if state.runs.len() >= self.inner.limits.max_runs {
             return Err(Error::new(
                 ErrorKind::Capacity,
@@ -224,39 +261,13 @@ impl Engine {
                             items,
                         }),
                         active: None,
+                        releasing: false,
                     },
                 );
                 id
             }
         };
-        let entry = state.sessions.get_mut(&session).ok_or_else(|| {
-            Error::new(ErrorKind::UnknownSession, "unknown session in this engine")
-        })?;
-        if entry.worker.unavailable.load(Ordering::Acquire) {
-            return Err(Error::new(
-                ErrorKind::UnknownSession,
-                "native worker is unavailable; use saved history in a new worker",
-            ));
-        }
-        if let Some(handle) = entry.worker.handle.lock().unwrap().as_deref()
-            && !entry
-                .worker
-                .manager
-                .failure(handle)
-                .is_ok_and(|failure| failure.is_none())
-        {
-            entry.worker.unavailable.store(true, Ordering::Release);
-            return Err(Error::new(
-                ErrorKind::UnknownSession,
-                "native worker failed between assignments",
-            ));
-        }
-        if entry.active.is_some() {
-            return Err(Error::new(
-                ErrorKind::Busy,
-                "a run is already active for this session",
-            ));
-        }
+        let entry = state.sessions.get_mut(&session).unwrap();
         let worker = Arc::clone(&entry.worker);
         let run = RunRef(uuid::Uuid::new_v4().to_string());
         entry.active = Some(run.clone());
@@ -556,6 +567,65 @@ impl Engine {
         Ok(result.runs.into_iter().next().unwrap())
     }
 
+    /// Settle an idle session's native worker and discard its retained runs and journal.
+    ///
+    /// Read any results you need first. After success, new lookups by the old
+    /// references fail. Existing journal readers can drain to closure, and
+    /// saved native history remains available under the provider's own rules.
+    /// An active run or concurrent release returns Busy. Cleanup failure
+    /// leaves the records and capacity reserved. Dropping the caller's future
+    /// after admission leaves settlement with the engine.
+    pub async fn release_session(&self, session: &SessionRef) -> Result<(), Error> {
+        let worker = {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.closing {
+                return Err(Error::new(ErrorKind::Closed, "engine is shutting down"));
+            }
+            let entry = state.sessions.get_mut(session).ok_or_else(|| {
+                Error::new(ErrorKind::UnknownSession, "unknown session in this engine")
+            })?;
+            if entry.active.is_some() || entry.releasing {
+                return Err(Error::new(
+                    ErrorKind::Busy,
+                    "session has an active run or release in progress",
+                ));
+            }
+            entry.releasing = true;
+            Arc::clone(&entry.worker)
+        };
+        let inner = Arc::clone(&self.inner);
+        let session = session.clone();
+        self.inner
+            .runtime
+            .spawn(async move {
+                let cleanup = close_worker(&worker, inner.limits.settlement_timeout).await;
+                worker.items.finish(cleanup.as_ref().err().cloned());
+                let mut state = inner.state.lock().unwrap();
+                match cleanup {
+                    Ok(()) => {
+                        state.sessions.remove(&session);
+                        state
+                            .runs
+                            .retain(|_, entry| entry.snapshot.session != session);
+                        drop(state);
+                        inner.changed.notify_waiters();
+                        Ok(())
+                    }
+                    Err(error) => {
+                        state.sessions.get_mut(&session).unwrap().releasing = false;
+                        Err(Error::new(ErrorKind::Settlement, error))
+                    }
+                }
+            })
+            .await
+            .map_err(|error| {
+                Error::new(
+                    ErrorKind::Settlement,
+                    format!("release owner failed; settlement unconfirmed: {error}"),
+                )
+            })?
+    }
+
     /// Deny new work, cancel active assignments and settle all native workers.
     /// Snapshots remain readable afterward. Repeated calls may retry pending cleanup.
     /// Dropping this future leaves its independent shutdown owner running.
@@ -697,7 +767,13 @@ impl Inner {
                 run.cancel.send_replace(true);
             }
             (
-                state.runs.keys().cloned().collect::<Vec<_>>(),
+                // Releases admitted before shutdown own only idle sessions.
+                // Waiting on active runs avoids racing with their record removal.
+                state
+                    .sessions
+                    .values()
+                    .filter_map(|entry| entry.active.clone())
+                    .collect::<Vec<_>>(),
                 state
                     .sessions
                     .values()
