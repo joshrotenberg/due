@@ -83,9 +83,8 @@ Due uses wrapper versions with passthrough support
 cooperative shutdown
 ([claude-wrapper #818](https://github.com/joshrotenberg/claude-wrapper/pull/818),
 [codex-wrapper #149](https://github.com/joshrotenberg/codex-wrapper/pull/149)).
-The first build needs GitHub for the Git-pinned Claude wrapper and crates.io
-for the pinned Codex wrapper release and other registry dependencies. Keep
-`Cargo.lock` committed for reproducible application builds.
+Both wrappers are pinned to exact crates.io releases. Keep `Cargo.lock`
+committed for reproducible application builds.
 
 ## Shared options
 
