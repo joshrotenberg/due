@@ -1,15 +1,14 @@
 ---
 name: delegate
-description: Delegate bounded, authorized work (code, documents, research, data) to a separate Claude Code or Codex session through the installed Due CLI, as an independent super-subagent whose result the caller verifies.
+description: Delegate bounded, authorized work (code, documents, research, data) to a separate Claude Code or Codex session through the Due CLI or a configured Due MCP server, and independently verify the result.
 ---
 
 # Delegate with Due
 
 Due runs a separate Claude Code or Codex session on a bounded assignment and
-returns its result. Treat it as a super-subagent: it works independently inside
-the scope you give it, and you review the outcome. This plugin only points to the
-installed `due` executable; the executable's help and guides are the source of
-truth for that version.
+returns its result. Treat the worker as an independent super-subagent. It works
+within the scope you give it, and you review the outcome. The installed
+executable's help and guides document the CLI and its available features.
 
 You own the scope and the acceptance. Honor the provider the user chose; one
 provider is enough, and a fresh session of the same provider can review work it
@@ -25,7 +24,19 @@ restriction matters, verify it on the actual worker setup as described in
 Prefer doing the work directly when it is small or depends on this conversation's
 context. Delegate when it can be written as a self-contained assignment.
 
-Discover what this build offers, progressively and only as needed:
+Use `due run` for ordinary delegation. For resident work or several workers,
+use MCP when the host already exposes tools from a Due MCP server configured
+for the assignment's workspace. Check the server's `spawn` schema for the
+provider or named profile it accepts, and keep the returned run and session
+references for inspection and follow-ups. Confirm that the selected worker
+fits the assignment before starting it. If the host has no suitable Due MCP
+connection, use the CLI. If an MCP request may have started a worker, resolve
+that assignment before starting it again.
+
+For an MCP-enabled build, the installed skills catalog includes the `mcp`
+guide. It explains server setup and the tool lifecycle.
+
+Discover what the installed build offers.
 
 ```sh
 due -h                          # Short help: commands available in this build
@@ -41,8 +52,8 @@ covers session lifecycle support and patterns such as independent review and
 revision. Commands or guides that do not appear in `due -h` or `due skills` are
 not part of the installed build; do not assume them or invent flags.
 
-If `due` is not on PATH, report the missing prerequisite. The selected provider
-CLI must also be installed and authenticated by the user.
+For CLI delegation, `due` must be on PATH. The machine running the worker needs
+the selected provider CLI installed and authenticated.
 
 For setup, troubleshooting or reporting a Due problem, read the installed
 `overview` guide.

@@ -304,6 +304,12 @@ fn help_exposes_run_and_skills_routes_without_a_provider() {
         let output = standalone.run(&args);
         success(&output);
         let help = String::from_utf8(output.stdout).unwrap();
+        if args == ["--help"] {
+            assert_eq!(
+                help.contains("due skills show mcp"),
+                cfg!(feature = "mcp-stdio")
+            );
+        }
         for command in discoverable {
             assert!(
                 help.contains(command),
