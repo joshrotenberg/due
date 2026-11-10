@@ -288,7 +288,8 @@ uses the managed directory, it can be removed. No `due init` uninstall command o
 background cleanup is installed. For a legacy `due-dev` registration, follow the
 [migration](#migrating-a-checkout-based-installation) instructions instead.
 
-To remove a Cargo-installed binary, use `cargo uninstall due`. For a checkout
+To remove a Cargo-installed binary, use `cargo uninstall due-cli`. If you
+installed with `--root`, pass the same root when uninstalling. For a checkout
 symlink, remove the verified symlink and restore the saved executable if desired;
 Cargo does not reliably track manually installed symlinks. Do not remove the
 checkout until no active runs or plugin registrations use it.
