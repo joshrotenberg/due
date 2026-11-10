@@ -1,6 +1,12 @@
 #![cfg(all(unix, feature = "mcp-stdio"))]
 
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Stdio, time::Duration};
+use std::{
+    env, fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 use tokio::{
@@ -10,6 +16,13 @@ use tokio::{
 };
 
 const DEADLINE: Duration = Duration::from_secs(15);
+
+fn due_binary() -> PathBuf {
+    match env::var_os("DUE_MCP_TEST_BINARY") {
+        Some(path) => fs::canonicalize(path).expect("resolve DUE_MCP_TEST_BINARY"),
+        None => env!("CARGO_BIN_EXE_due").into(),
+    }
+}
 
 struct Peer {
     child: Child,
@@ -22,7 +35,7 @@ impl Peer {
     fn start(root: &Path, catalog: Option<&Path>) -> Self {
         let cwd = root.join("worker-cwd");
         fs::create_dir(&cwd).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_due"));
+        let mut command = Command::new(due_binary());
         command
             .args(["mcp", "--cwd"])
             .arg(&cwd)
@@ -635,7 +648,7 @@ async fn invalid_catalog_is_rejected_before_mcp_startup() {
         .unwrap();
         let output = timeout(
             DEADLINE,
-            Command::new(env!("CARGO_BIN_EXE_due"))
+            Command::new(due_binary())
                 .arg("mcp")
                 .arg("--profiles")
                 .arg(&catalog)
