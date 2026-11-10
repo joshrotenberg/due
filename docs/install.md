@@ -165,10 +165,17 @@ a fresh session. Codex uses the [official local-plugin workflow](https://develop
 
 Rebuild/install Due, then repeat `due init` with the same host and directory
 options. Package files come from that exact binary, with no runtime checkout reads
-or downloads by Due. Native hosts may cache the skill; verify discovery in a new
-session. If a host reports that the cache is unchanged, inspect its plugin manager
-and use its supported refresh flow. Binary-only guide changes do not require a
-plugin refresh when the small delegate skill is unchanged.
+or downloads by Due. Verify the delegate skill in a fresh host session. On a
+same-version rebuild, Claude Code 2.1.317 reported the plugin was already up
+to date and kept its old cache copy, while a fresh session advertised the
+updated skill from the local marketplace. Codex CLI 0.165.0 refreshed its
+cache and advertised the update in a new app-server process. Both hosts
+advertised the new skill after a version bump. These checks used disposable
+host configurations on macOS.
+
+If a fresh session still shows stale content, use the host's plugin manager
+to inspect and refresh the installation. Binary-only guide changes do not
+require a plugin refresh when the delegate skill is unchanged.
 
 The managed directory is identified by `.due-install.json`. Setup refuses a
 nonempty unmanaged directory, symlinked package entries or unexpected files,
