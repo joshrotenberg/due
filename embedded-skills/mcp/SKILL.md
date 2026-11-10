@@ -5,7 +5,9 @@ description: Configure a stdio MCP client to start Due workers, follow up, read 
 
 # Due over MCP
 
-Configure your MCP client to start the `due` executable with these arguments:
+An MCP-enabled Due build includes the `mcp` command. Build it from a source
+checkout with `cargo build --locked -p due-cli --features mcp-stdio`. Configure
+your MCP client to start that executable with these arguments.
 
 ```text
 mcp --cwd /path/to/authorized/workspace
@@ -14,7 +16,9 @@ mcp --cwd /path/to/authorized/workspace
 Use `due mcp --help` to check the command. Each connection owns a set of Claude
 or Codex workers. Choose either installed and authenticated provider for a worker.
 The workspace is set by the server operator. The provider CLI resolves its own
-settings and permissions.
+settings and permissions. Plugin users can use the delegate skill with a Due
+connection configured by the host operator. For an ordinary one-turn task, use
+`due run`.
 
 | Tool | Use |
 | --- | --- |

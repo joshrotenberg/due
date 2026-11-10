@@ -1,21 +1,19 @@
 # Due delegate plugin
 
-This skills-only plugin helps an agent run a bounded assignment through the local
-Due CLI, using Claude Code or Codex, and independently verify the result and
-workspace changes. Choose a one-shot `due run`, a resident JavaScript `due script`,
-or an independent raw RPC client. Its short `delegate` skill frames Due as an
-independent worker and points to progressive discovery in the installed
-executable: `due -h` (short), `due --help` (long), `due COMMAND --help`,
-`due skills list --output json` and `due skills show NAME` (start with
-`overview`). The executable's help and guides, not this package, document the
-commands and contracts of that version.
+The delegate skill helps an agent give a bounded assignment to Claude Code or
+Codex and verify the outcome. The default path uses the local Due CLI. Start
+with `due run` for one turn and use `due skills show overview` to discover other
+commands and installed guides.
 
-Keep `due` and the selected provider CLI on PATH. Provider authentication and
-permissions remain the host's responsibility. The package contains no MCP server,
-hooks or background process. Installing it starts no model work and does not
-enable a global delegation/reporting policy. The former source-trial and A/B
-requirements are retired. JavaScript is embedded in normal Due builds, so the
-harness needs no Node installation.
+A host with a configured Due MCP connection can use the same skill for
+resident workers and follow-ups. Build Due with `mcp-stdio`, then configure the
+host to launch `due mcp --cwd /path/to/workspace`. See `due skills show mcp` in
+that build for the tool lifecycle and named profiles. The plugin package
+contains the skill. The host operator configures MCP separately.
+
+CLI delegation needs `due` on PATH. The machine running the worker needs an
+installed and authenticated provider CLI. Installation starts no model work.
+The former source-trial and A/B requirements are retired.
 
 Use `due init --dry-run`, then `due init` to install for both hosts, or select
 `--host claude` or `--host codex`. Reload plugins or start a fresh host session
