@@ -61,6 +61,9 @@ fn expected_features() -> Vec<&'static str> {
     if cfg!(feature = "harness") {
         features.push("harness");
     }
+    if cfg!(feature = "mcp-stdio") {
+        features.push("mcp-stdio");
+    }
     if cfg!(feature = "rpc") {
         features.push("rpc");
     }

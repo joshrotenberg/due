@@ -258,6 +258,13 @@ Lua remains a comparison fixture, not a shipped harness language. The separate
 [MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
 remains outside this implementation.
 
+For an MCP client, build Due with `cargo build --locked --features mcp-stdio`
+and configure the client to launch `due mcp --cwd /path/to/workspace`. One
+stdio connection can supervise multiple workers. See
+[the MCP guide](embedded-skills/mcp/SKILL.md) for the tool and session lifecycle
+or `due skills show mcp` in an MCP-enabled build. Rust applications can host
+the [adapter library](crates/due-mcp/README.md) directly.
+
 ## Limits of `due run`
 
 - One foreground turn per invocation. There is no daemon, queue, scheduler, MCP

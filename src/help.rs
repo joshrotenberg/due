@@ -10,6 +10,8 @@ pub fn overview() -> String {
     text.push_str("  script    A JavaScript caller supervises several turns, items and checks.\n");
     #[cfg(feature = "rpc")]
     text.push_str("  rpc       Build a client in any language over resident JSON-RPC stdio.\n");
+    #[cfg(feature = "mcp-stdio")]
+    text.push_str("  mcp       Serve multiple workers to one MCP client over stdio.\n");
     text.push_str(
         "\nPROFILES\n  Reuse JSON defaults, then supply the assignment separately:\n    printf '%s\\n' '{\"schema_version\":1,\"provider\":\"claude\"}' > worker.json\n    due run --request worker.json -p 'Review the parser.' --dry-run --output json\n    due skills show profiles\n\nDISCOVER OFFLINE\n    due skills list --output json        List guides in this installed build\n    due skills show overview             Choose a workflow and get started\n    due skills show use-cases            Decide whether Due fits; pick a pattern\n    due skills show run                  Prepare and verify one-shot assignments\n    due skills show contracts            Interpret results and structured answers\n    due skills show observe              Monitor and summarize progress\n",
     );
@@ -18,6 +20,10 @@ pub fn overview() -> String {
     #[cfg(feature = "harness")]
     text.push_str(
         "    due skills show supervise            Write a supervised JavaScript workflow\n",
+    );
+    #[cfg(feature = "mcp-stdio")]
+    text.push_str(
+        "    due skills show mcp                  Configure an MCP client and manage workers\n",
     );
     text.push_str(
         "    due schema request                  Export the request JSON Schema\n    due build-info --output json        Report this binary's revision and features\n    due run --help                      Examples and options for a command\n\nSETUP\n    due init --dry-run                   Preview local plugin setup\n    due init                            Register the bundled plugin in both hosts\n  Due must be on PATH. Install and authenticate Claude Code or Codex separately.\n  Guides, schemas and help work without a provider or source checkout.\n\nRESULTS\n  Due owns execution and process cleanup; the caller owns the assignment, native\n  permission policy, independent acceptance checks and authorized follow-ups.\n  A successful worker turn does not establish that its changes were accepted.\n  Run answers/results use stdout; progress and diagnostics use stderr.\n  Read a command's --help for its output, timeout and exit-code contract.",

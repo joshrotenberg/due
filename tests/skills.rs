@@ -25,6 +25,8 @@ fn capture(command: &mut Command) -> Output {
 }
 
 const SKILLS: &[&str] = &[
+    #[cfg(feature = "mcp-stdio")]
+    "mcp",
     "overview",
     "use-cases",
     "profiles",
@@ -355,6 +357,9 @@ fn short_and_long_help_are_distinct_offline_for_each_command() {
     }
     if cfg!(feature = "harness") {
         commands.push(vec!["script"]);
+    }
+    if cfg!(feature = "mcp-stdio") {
+        commands.push(vec!["mcp"]);
     }
     for command in commands {
         let invoke = |help: &str| {
