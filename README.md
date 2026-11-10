@@ -284,6 +284,8 @@ the [adapter library](crates/due-mcp/README.md) directly.
 
 - [Core library spike](docs/core-spike.md): experimental multi-provider Rust
   interface, concurrent native workers, ownership and fake-provider validation.
+- [Delegation design](docs/delegation-interface.md): worker ownership, run and
+  session identity, and the boundary between Due and its callers.
 - [docs/cli.md](docs/cli.md): full CLI reference covering options, request
   fields, structured answers, tracing, native passthrough, results, and errors.
 - [JavaScript harness](docs/harness.md): supported session supervision, JSON results and evidence.
