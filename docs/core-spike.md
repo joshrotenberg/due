@@ -48,6 +48,22 @@ future API revision can decide how much of that data belongs in the core
 result. This spike tests the package boundary while preserving the result
 contract.
 
+## Try a separate author and reviewer
+
+Run the [offline walkthrough](../examples/core-compare/tests/author_reviewer.rs)
+from the repository root:
+
+```sh
+cargo test --locked -p due-core-compare --test author_reviewer -- --nocapture
+```
+
+It starts a fresh author and reviewer using fake Claude and Codex executables,
+sends one follow-up to each original session, and checks that both native
+processes exit. The diff and review feedback are sample inputs. The fixture
+answers count turns, so the example checks session continuity and cleanup.
+For the lifecycle operations available on other surfaces, see
+`due skills show use-cases`.
+
 ## Interface
 
 | Function | Actual spike API |

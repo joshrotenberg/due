@@ -37,10 +37,9 @@ due skills show NAME            # One guide; start with: due skills show overvie
 
 Read only the guide the task needs. `due skills show overview` helps choose
 between a one-shot run and a resident session; `due skills show use-cases`
-matches a task to a pattern such as review and revise, independent assignments
-or structured extraction. Commands or guides that do not appear in `due -h` or
-`due skills` are not part of the installed build; do not assume them or invent
-flags.
+covers session lifecycle support and patterns such as independent review and
+revision. Commands or guides that do not appear in `due -h` or `due skills` are
+not part of the installed build; do not assume them or invent flags.
 
 If `due` is not on PATH, report the missing prerequisite. The selected provider
 CLI must also be installed and authenticated by the user.

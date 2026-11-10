@@ -45,6 +45,32 @@ list them. Reduced builds support one-shot assignments and saved-context
 follow-ups with `due run` and `--resume`; live resident supervision requires a
 build that includes `script` or `rpc`.
 
+### Choose a session lifecycle
+
+| Surface | Fresh | Live reuse | Saved resume | Saved fork |
+| --- | --- | --- | --- | --- |
+| `due run` | Run without `--resume` | Unavailable | `--resume NATIVE_ID` | Unavailable |
+| `due rpc` | `session.open` without `resume` | Start another turn on the open session | `session.open` with `resume: NATIVE_ID` | Unavailable |
+| `due script` | `scope.open(profile)` without `resume` | Call `worker.turn` again on the open worker | Open with `resume: NATIVE_ID` | Unavailable |
+| Rust `due_core::Engine` (resident feature) | `spawn` | `follow_up(SessionRef, ...)` | `follow_up(SavedSession, ...)` | `fork(SavedSession, ...)` |
+
+Fresh starts a new conversation. Live reuse keeps the open native process and
+its context. Saved resume opens another process on the same persisted native
+history. Saved fork starts a new native history from an existing one, with a
+new Due handle and native ID.
+
+For saved operations, use the same provider and intended workspace, and keep the
+source idle with persisted history. An ephemeral worker can take live follow-ups
+where supported. It has no saved history to resume or fork. Use the native
+session or thread ID for CLI, RPC and script resume. A Due handle is scoped to
+the owner that created it.
+
+The Rust fork adapter supports Claude and Codex. The installed provider must
+accept the fork for the requested history. Due reports native rejection as a
+failed run with the provider diagnostic and requires a distinct native ID before
+offering a saved descriptor for the branch. A fork carries conversation context.
+Workspace files are shared when both workers use the same workspace.
+
 ### Bounded delegation
 
 Write the workspace, inputs, deliverable, allowed changes and stopping point
@@ -83,9 +109,15 @@ and continue the reviewer with the new diff. Set a stopping point for revisions,
 then close resident sessions or stop resuming saved sessions when the issue is
 done. Either role can use either provider. A fork carries the source's history,
 which is useful for exploring a different approach and changes what the reviewer
-has seen. The installed `due run`, `due rpc` and `due script` commands support
-fresh and resumed sessions. Direct Rust callers can also fork saved history
-through `due_core::Engine`.
+has seen.
+
+The [runnable author/reviewer example](https://github.com/joshrotenberg/due/blob/main/examples/core-compare/tests/author_reviewer.rs)
+uses fake Claude and Codex workers to demonstrate separate live follow-ups and
+cleanup. Run it from a Due source checkout on macOS or Linux:
+
+```sh
+cargo test --locked -p due-core-compare --test author_reviewer -- --nocapture
+```
 
 ### Independent assignments
 

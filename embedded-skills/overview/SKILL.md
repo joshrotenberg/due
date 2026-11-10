@@ -67,7 +67,8 @@ Due is useful with either provider alone; a fresh session of the same provider
 is a valid independent reviewer. For patterns such as review and revise,
 independent assignments, structured extraction, embedding Due in a program, and
 when direct work or the provider's interactive CLI is simpler, read
-`due skills show use-cases`.
+`due skills show use-cases`. It also lists session lifecycle support by surface
+and links to a runnable, provider-free author/reviewer example.
 
 ## Get started
 
