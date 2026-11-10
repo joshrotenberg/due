@@ -31,6 +31,7 @@ pub struct BuildInfoArgs {
 const FEATURES: &[(&str, bool)] = &[
     ("core", cfg!(feature = "core")),
     ("harness", cfg!(feature = "harness")),
+    ("mcp-stdio", cfg!(feature = "mcp-stdio")),
     ("rpc", cfg!(feature = "rpc")),
 ];
 

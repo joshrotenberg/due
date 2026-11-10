@@ -10,7 +10,13 @@ loop into the RPC server.
 Normal builds ship RPC and the JavaScript harness. The `rpc` and `harness`
 features also permit explicit reduced builds; test the feature combinations
 when changing gated code. Lua remains in the separate historical comparison.
-The MCP experiment stays on `codex/due-mcp-spike` and is not part of this direction.
+The `mcp-stdio` feature adds the stdio MCP adapter. Exercise its library and CLI
+entry points with fake providers:
+
+```sh
+cargo test --locked -p due-mcp
+cargo test --locked -p due-cli --no-default-features --features mcp-stdio --test mcp --test skills --test build_info
+```
 
 The earlier source-trial requirements are retired. Development does not require
 Due-only delegation, reporting every successful call, or periodic A/B runs.

@@ -3,6 +3,8 @@ mod cli;
 mod contracts;
 mod help;
 mod init;
+#[cfg(feature = "mcp-stdio")]
+mod mcp;
 mod request;
 use due::result;
 #[cfg(feature = "rpc")]
@@ -37,6 +39,8 @@ async fn main() -> ExitCode {
         #[cfg(feature = "harness")]
         Command::Script(args) => script::execute(args).await,
         Command::Run(run) => run_command(*run).await,
+        #[cfg(feature = "mcp-stdio")]
+        Command::Mcp(args) => mcp::execute(args).await,
         Command::Init(args) => init::execute(args).await,
         Command::Skills(args) => skills::execute(&args),
         Command::Schema(args) => contracts::execute(&args),

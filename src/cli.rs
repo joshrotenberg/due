@@ -26,6 +26,12 @@ pub enum Command {
     #[cfg(feature = "rpc")]
     #[command(after_help = crate::help::SHORT, after_long_help = crate::help::RPC)]
     Rpc,
+    /// Host Due workers for an MCP client over stdio.
+    #[cfg(feature = "mcp-stdio")]
+    #[command(
+        after_long_help = "Configure your MCP client to launch `due mcp` with the intended working directory. See `due skills show mcp` for the tool and session lifecycle."
+    )]
+    Mcp(crate::mcp::McpArgs),
     /// Install or update the bundled delegate plugin in local agent hosts.
     Init(crate::init::InitArgs),
     /// Discover and read the guides embedded in this binary.

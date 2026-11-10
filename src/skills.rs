@@ -19,6 +19,12 @@ struct Skill {
 }
 
 const SKILLS: &[Skill] = &[
+    #[cfg(feature = "mcp-stdio")]
+    Skill {
+        name: "mcp",
+        description: "Configure a stdio MCP client to start Due workers, follow up, read session items, and reply to approvals.",
+        content: include_str!("../embedded-skills/mcp/SKILL.md"),
+    },
     Skill {
         name: "overview",
         description: "Choose between Due's one-shot run, resident script and raw RPC modes, get started offline, discover installed help and guides, and troubleshoot or report problems.",
