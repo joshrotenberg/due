@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout, Command},
-    time::{sleep, timeout},
+    time::{interval, sleep, timeout},
 };
 
 const DEADLINE: Duration = Duration::from_secs(15);
@@ -447,18 +447,26 @@ async fn broken_stdout_settles_a_worker_with_stdin_open() {
     peer.awaiting_input(&run["run"]).await;
 
     drop(peer.output);
-    let ping = json!({"jsonrpc":"2.0","id":peer.next_id,"method":"ping"});
-    timeout(
-        DEADLINE,
-        peer.input.write_all(format!("{ping}\n").as_bytes()),
-    )
+    // A sibling spawn can briefly retain a copy of the read end on Darwin.
+    // Keep making the server write until it observes that all readers are gone.
+    let status = timeout(DEADLINE, async {
+        let mut probes = interval(Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                status = peer.child.wait() => break status.unwrap(),
+                _ = probes.tick() => {
+                    let ping = json!({"jsonrpc":"2.0","id":peer.next_id,"method":"ping"});
+                    peer.next_id += 1;
+                    if let Err(error) = peer.input.write_all(format!("{ping}\n").as_bytes()).await {
+                        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+                        break peer.child.wait().await.unwrap();
+                    }
+                }
+            }
+        }
+    })
     .await
-    .unwrap()
-    .unwrap();
-    let status = timeout(DEADLINE, peer.child.wait())
-        .await
-        .expect("server did not stop after the stdout failure")
-        .unwrap();
+    .expect("server did not stop after the stdout failure");
     assert_eq!(status.code(), Some(1));
     assert!(workspace.path().join("codex/exited").is_file());
 }
