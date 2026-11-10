@@ -51,7 +51,6 @@ covers each pattern and when to choose something else.
 Due is installed from source; there are no published releases. You need:
 
 - Rust 1.90 or newer and a native C compiler/linker for embedded JavaScript.
-- Read access to the private repository `joshrotenberg/due`.
 - The provider CLI you intend to use (`claude` or `codex`), installed and
   authenticated. Due inherits that CLI's environment, settings, and permission
   defaults. It does not install providers or manage credentials.
@@ -254,9 +253,7 @@ Use `due run --resume ID` when separate invocations and native saved context are
 sufficient. Use a resident session when you need continuing observation, explicit
 permission replies, or interruption across an assignment. The
 [language comparison](docs/rpc-languages.md) records why JavaScript was selected;
-Lua remains a comparison fixture, not a shipped harness language. The separate
-[MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
-remains outside this implementation.
+Lua remains a comparison fixture.
 
 For an MCP client, build Due with `cargo build --locked --features mcp-stdio`
 and configure the client to launch `due mcp --cwd /path/to/workspace`. One
@@ -292,7 +289,9 @@ the [adapter library](crates/due-mcp/README.md) directly.
 - [Raw RPC](docs/rpc.md): wire contract for independently written clients.
 - [Native subagent comparison](docs/native-comparison.md): defaults, existing
   controls, and deferred gaps.
-- [docs/install.md](docs/install.md): installation, including the Codex plugin.
+- See [installation](docs/install.md) for source builds and plugin setup for Claude Code and Codex.
+- The [release readiness plan](docs/release-readiness.md) lists parity checks,
+  documentation, and packaging work before an initial release.
 - [docs/dogfooding.md](docs/dogfooding.md): trying Due and reporting issues.
 - [Caller policy](docs/caller-policy.md): scope, verification and optional issue reporting;
   the former mandatory source-trial workflow is retired.
