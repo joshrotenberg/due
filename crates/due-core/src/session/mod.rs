@@ -388,10 +388,18 @@ enum Backend {
 }
 
 impl Backend {
-    async fn open(options: &OpenOptions, sink: EventSink) -> Result<Self, String> {
+    async fn open(
+        options: &OpenOptions,
+        sink: EventSink,
+        fork_source: Option<&str>,
+    ) -> Result<Self, String> {
         match options.provider {
-            Provider::Claude => claude::Backend::open(options, sink).await.map(Self::Claude),
-            Provider::Codex => codex::Backend::open(options, sink).await.map(Self::Codex),
+            Provider::Claude => claude::Backend::open(options, sink, fork_source)
+                .await
+                .map(Self::Claude),
+            Provider::Codex => codex::Backend::open(options, sink, fork_source)
+                .await
+                .map(Self::Codex),
         }
     }
     async fn start(&mut self, id: String, prompt: String) -> Result<(), String> {
@@ -454,7 +462,15 @@ impl Manager {
         }
     }
 
-    pub async fn open(&self, mut options: OpenOptions) -> Result<Value, String> {
+    pub async fn open(&self, options: OpenOptions) -> Result<Value, String> {
+        self.open_with_fork(options, None).await
+    }
+
+    pub(crate) async fn open_with_fork(
+        &self,
+        mut options: OpenOptions,
+        fork_source: Option<&str>,
+    ) -> Result<Value, String> {
         options.validate()?;
         let mut slot = self.session.lock().await;
         if self.stopping.load(Ordering::Acquire) {
@@ -478,14 +494,14 @@ impl Manager {
         };
         sink.state.lock().unwrap().requested =
             RequestedSettings::new(options.model.as_deref(), options.effort);
-        let backend = match Backend::open(&options, sink.clone()).await {
+        let backend = match Backend::open(&options, sink.clone(), fork_source).await {
             Ok(backend) => backend,
             Err(error) => {
                 sink.failed(error.clone());
                 return Err(error);
             }
         };
-        let response = json!({
+        let mut response = json!({
             "session_id": id, "provider": options.provider,
             "native_session_id": sink.state.lock().unwrap().native_session_id,
             "capabilities": {"multi_turn":true,"interrupt":true,"interaction_reply":true,"steer":false,"session_read":true,"session_stream":options.stream},
@@ -498,6 +514,9 @@ impl Manager {
                 "timeout":options.timeout, "native_args":options.native_args,
             },
         });
+        if let Some(source) = fork_source {
+            response["resolved_options"]["fork_source"] = json!(source);
+        }
         sink.item("session_opened", response.clone(), None);
         *self.read_session.lock().unwrap() = Some(ReadSession {
             id: id.clone(),

@@ -279,7 +279,11 @@ impl Active {
 }
 
 impl Backend {
-    pub async fn open(options: &OpenOptions, sink: EventSink) -> Result<Self, String> {
+    pub async fn open(
+        options: &OpenOptions,
+        sink: EventSink,
+        fork_source: Option<&str>,
+    ) -> Result<Self, String> {
         let turn_timeout = options.timeout_duration()?;
         let mut builder = Codex::builder()
             .timeout(CONTROL_TIMEOUT)
@@ -301,8 +305,16 @@ impl Backend {
             .await
             .map_err(|e| e.to_string())?;
         let handle = server.handle();
-        let opened = if let Some(id) = &options.resume {
+        let opened = if let Some(id) = fork_source.or(options.resume.as_deref()) {
+            let method = if fork_source.is_some() {
+                "thread/fork"
+            } else {
+                "thread/resume"
+            };
             let mut params = json!({"threadId": id});
+            if fork_source.is_some() {
+                params["excludeTurns"] = json!(true);
+            }
             if let Some(cwd) = &options.cwd {
                 params["cwd"] = json!(cwd);
             }
@@ -310,21 +322,29 @@ impl Backend {
                 params["model"] = json!(model);
             }
             handle
-                .request("thread/resume", params)
+                .request(method, params)
                 .await
                 .map_err(|error| report_rpc_error(error, &sink, None))
                 .and_then(|response| {
                     sink.item(
                         "native_response",
-                        json!({"provider":"codex", "method":"thread/resume", "response":response}),
+                        json!({"provider":"codex", "method":method, "response":response}),
                         None,
                     );
+                    if let Some(source) = fork_source
+                        && let Some(ancestry) = response
+                            .pointer("/thread/forkedFromId")
+                            .and_then(Value::as_str)
+                        && ancestry != source
+                    {
+                        return Err("Codex fork reported unexpected source ancestry".into());
+                    }
                     response
                         .pointer("/thread/id")
                         .and_then(Value::as_str)
                         .filter(|id| !id.is_empty())
                         .map(str::to_owned)
-                        .ok_or_else(|| "Codex resume response has no thread ID".to_owned())
+                        .ok_or_else(|| format!("Codex {method} response has no thread ID"))
                 })
         } else {
             let mut params = ThreadStartParams::new().ephemeral(options.ephemeral);
@@ -925,7 +945,7 @@ mod tests {
             "binary":binary,"cwd":dir.path()}))
         .unwrap();
         let sink = EventSink::new(Provider::Codex, "session".into(), None);
-        let mut backend = Backend::open(&options, sink.clone()).await.unwrap();
+        let mut backend = Backend::open(&options, sink.clone(), None).await.unwrap();
         let turn = sink.begin().unwrap();
         backend
             .start(turn.clone(), "startup-hold".into())
