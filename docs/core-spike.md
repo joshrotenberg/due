@@ -1,9 +1,51 @@
 # Core library spike
 
-Experimental implementation of the five-function design in
-[PR #147](https://github.com/joshrotenberg/due/pull/147). This branch implements
-the library first. It does not introduce an MCP adapter or JS client, remove
-`due rpc`/`due script`, or replace installed guidance/plugins.
+`due-core` began as the five-function design in
+[PR #147](https://github.com/joshrotenberg/due/pull/147). The CLI uses it, and so
+do `due-mcp` and the comparison example.
+
+## Source use and API status
+
+A Due source checkout includes the Rust execution library `due-core`, the
+[stdio adapter `due-mcp`](../crates/due-mcp/README.md), and an independent
+consumer example in `due-core-compare`.
+
+The current workspace packages set `publish = false`. The library API may
+change between commits. [Issue #95](https://github.com/joshrotenberg/due/issues/95)
+tracks the decision about a supported public API and crates.io publication.
+
+### Depending on `due-core` from source
+
+Add `due-core` as a path or git dependency. For a git dependency, pinning a
+revision makes the dependency explicit. `Cargo.lock` records the resolved
+commit.
+
+```toml
+[dependencies]
+# Resident engine (the default feature).
+due-core = { git = "https://github.com/joshrotenberg/due", rev = "<commit>" }
+# Or, from a local checkout:
+# due-core = { path = "../due/crates/due-core" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+The crate's features select its execution model:
+
+- `resident` (default): `due_core::Engine` with long-lived native workers,
+  follow-ups, forks, waits, interactions and session item streams. This is
+  what the rest of this document describes. It needs a Tokio runtime.
+- `oneshot`: `due_core::oneshot::execute` runs a single native turn and
+  returns a normalized `RunResult`. To enable only this feature, use
+  `default-features = false, features = ["oneshot"]`.
+
+The two features are independent, and you can enable both. The CLI declares
+only `oneshot` on its direct `due-core` dependency, which its foreground
+command uses. Its default `harness` feature enables `rpc`, which enables
+`core` (`due-core/resident`), so a default CLI build compiles both. The
+crate's minimum Rust version is 1.90. To serve workers to an MCP client,
+depend on `due-mcp`
+from the same repository or run `due mcp`. The `due` executable includes that
+command when built with the `mcp-stdio` feature.
 
 ## Library boundary
 
@@ -30,7 +72,8 @@ in the application.
 The [comparison example](../examples/core-compare) is a second executable
 that depends on `due-core` and Tokio. It runs the same prompt in independent
 Claude and Codex workers, sends a follow-up to both, and reads each session's
-journal after cleanup.
+journal after cleanup. It exercises the resident API through a path dependency
+with the default `resident` feature.
 
 ```sh
 cargo test --locked -p due-core -p due-core-compare
