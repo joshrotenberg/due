@@ -98,8 +98,9 @@ artifacts or diff yourself. Next: `due skills show run` and
 
 ## Set up
 
-- The provider CLI (`claude` or `codex`) must be installed, authenticated and
-  working when run directly on the same host. Due inherits its environment.
+- Install and authenticate the provider CLI (`claude` or `codex`) in the host
+  that launches Due. For launch failures, compare both commands from the same
+  command tool.
 - `due init --dry-run` previews installing the bundled agent plugin; `due init`
   applies it (`--host claude` or `--host codex` for one host). It starts no model
   work and changes no permissions or credentials.
@@ -117,6 +118,7 @@ changes.
 | Exit 127 | The provider executable is missing or not on PATH; `--binary PATH` selects one |
 | Exit 2, `invalid_input` | Flag conflicts, bad profile JSON, empty prompt; `--dry-run` shows the merge |
 | `authentication` error | Run the provider CLI directly in the normal host; a sandbox-only "not logged in" is not proof of expiry. Login is the human's step; never copy credentials |
+| Claude Desktop child reports `ECONNREFUSED` or waits without a reply | Compare direct Claude and Due through the same Bash tool with the same executable, options and host policy. A Code-tab terminal is a separate control |
 | Exit 124 | `--timeout` elapsed; it is absolute and not extended by activity |
 | Exit 130 | Cancelled by SIGINT, SIGTERM or SIGHUP |
 | Task command denied | Native permissions blocked it; report the check as blocked rather than widening grants |
