@@ -1,7 +1,8 @@
 //! Scoped, multi-provider delegation over native Claude and Codex wrappers.
 //!
 //! The default `resident` feature provides an asynchronous engine. Disabling it
-//! leaves the shared provider and result types available to foreground callers.
+//! leaves the shared provider and result types available. Enable `oneshot` to
+//! execute individual foreground turns through the native wrappers.
 
 #[doc(hidden)]
 pub mod diagnostics;
@@ -11,6 +12,9 @@ pub mod result;
 pub mod types;
 
 pub use types::{Effort, Provider};
+
+#[cfg(feature = "oneshot")]
+pub mod oneshot;
 
 #[cfg(feature = "resident")]
 mod core;

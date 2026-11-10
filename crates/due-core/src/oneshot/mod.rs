@@ -1,28 +1,76 @@
 mod claude;
 mod codex;
-pub(crate) mod output;
-use due_core::provenance;
+mod observer;
+mod output;
+mod policy;
+mod schema;
+
+use crate::provenance;
+pub use observer::{ActivityKind, ActivityStatus, RunObserver};
 
 use std::{
     future::Future,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
 
 use crate::{
-    cli::{Provider, RunArgs},
     result::{ErrorKind, Invocation, RunError, RunResult},
-    schema::Schema,
-    telemetry::Progress,
+    types::{Effort, Provider},
 };
+use schema::Schema;
 
-pub struct Context {
+type Progress = Arc<dyn RunObserver>;
+
+/// Options for a single native provider invocation.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    pub provider: Provider,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub cwd: Option<PathBuf>,
+    pub timeout: Option<Duration>,
+    pub schema: Option<PathBuf>,
+    pub resume: Option<String>,
+    pub ephemeral: bool,
+    pub dry_run: bool,
+    pub binary: Option<PathBuf>,
+    pub native_args: Vec<String>,
+}
+
+impl RunOptions {
+    /// Use the provider's defaults in the caller's working directory.
+    pub fn new(provider: Provider) -> Self {
+        Self {
+            provider,
+            model: None,
+            effort: None,
+            cwd: None,
+            timeout: None,
+            schema: None,
+            resume: None,
+            ephemeral: false,
+            dry_run: false,
+            binary: None,
+            native_args: Vec::new(),
+        }
+    }
+
+    /// Validate native arguments that can conflict with managed execution options.
+    pub fn validate_native_args(&self) -> Result<(), RunError> {
+        policy::native_args(self)
+    }
+}
+
+struct Context {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub schema: Option<Schema>,
 }
 
 impl Context {
-    pub fn resolve(run: &RunArgs) -> Result<Self, RunError> {
+    pub fn resolve(run: &RunOptions) -> Result<Self, RunError> {
         if let Some(cwd) = &run.cwd {
             require_utf8_path(cwd, "working directory")?;
         }
@@ -89,11 +137,42 @@ fn require_utf8_path(path: &Path, label: &str) -> Result<(), RunError> {
     Ok(())
 }
 
-pub async fn execute<C>(run: &RunArgs, prompt: &str, progress: &Progress, cancel: C) -> RunResult
+/// Execute or plan one turn. Use `Arc::new(())` for buffered execution, or
+/// supply an observer to receive progress from native streaming output.
+pub async fn execute<C>(
+    run: &RunOptions,
+    prompt: &str,
+    progress: Arc<dyn RunObserver>,
+    cancel: C,
+) -> RunResult
 where
     C: Future<Output = ()> + Send,
 {
-    let context = match Context::resolve(run) {
+    let result = execute_turn(run, prompt, &progress, cancel).await;
+    result
+        .with_requested(run.model.as_deref(), run.effort)
+        .with_schema_requested(run.schema.is_some())
+}
+
+async fn execute_turn<C>(
+    run: &RunOptions,
+    prompt: &str,
+    progress: &Progress,
+    cancel: C,
+) -> RunResult
+where
+    C: Future<Output = ()> + Send,
+{
+    let validation = run.validate_native_args().and_then(|()| {
+        if prompt.trim().is_empty() {
+            Err(RunError::invalid("prompt must not be empty"))
+        } else if run.resume.is_some() && run.ephemeral {
+            Err(RunError::invalid("resume conflicts with ephemeral"))
+        } else {
+            Ok(())
+        }
+    });
+    let context = match validation.and_then(|()| Context::resolve(run)) {
         Ok(context) => context,
         Err(error) => {
             return RunResult::new(run.provider)
@@ -106,7 +185,7 @@ where
         Provider::Codex => codex::execute(run, &context, prompt, progress, cancel).await,
     };
     if context.schema.is_some() {
-        crate::schema::normalize(result)
+        schema::normalize(result)
     } else {
         result
     }

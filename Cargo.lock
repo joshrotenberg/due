@@ -232,12 +232,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "due"
+name = "due-cli"
 version = "0.2.1"
 dependencies = [
  "clap",
- "claude-wrapper",
- "codex-wrapper",
  "due-core",
  "due-harness",
  "futures-util",

@@ -745,8 +745,24 @@ async fn native_exit_between_turns_rejects_followup_without_rewriting_a_complete
         let run = engine.spawn(fixture.assignment("first")).await.unwrap();
         let completed = finished(&engine, &run).await;
         let before = serde_json::to_value(&completed).unwrap();
+        let mut items = engine.subscribe(&completed.session, 0).unwrap();
         assert_eq!(unsafe { libc::kill(fixture.pid(), libc::SIGTERM) }, 0);
         reaped(fixture.pid()).await;
+        // Reaping can precede the session owner recording the failure.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let item = items
+                    .next()
+                    .await
+                    .unwrap()
+                    .expect("session stream closed without reporting the exit");
+                if item.kind == "session_failed" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("session owner did not report the exit");
         assert_eq!(
             engine
                 .follow_up(completed.session, FollowUp::new("cannot run"))

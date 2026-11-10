@@ -40,6 +40,18 @@ due --version
 due run --help
 ```
 
+The Cargo package is `due-cli`, and it installs the `due` executable.
+The default feature set includes the existing `due rpc` and `due script`
+commands. Select a smaller build if you only need the foreground CLI or RPC:
+
+```sh
+cargo build --locked -p due-cli --no-default-features
+cargo build --locked -p due-cli --no-default-features --features rpc
+```
+
+The `harness` feature enables `script` and includes `rpc` for its resident
+session transport. The foreground `run` command is available in each build.
+
 Cargo normally installs under `~/.cargo/bin`. Ensure the host's process environment
 can find that directory. A terminal finding `due` does not prove a desktop app has
 the same PATH; restart the app after changing its launch environment and check

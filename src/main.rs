@@ -3,12 +3,10 @@ mod cli;
 mod contracts;
 mod help;
 mod init;
-mod providers;
 mod request;
-use due::{diagnostics, result};
+use due::result;
 #[cfg(feature = "rpc")]
 mod rpc;
-mod schema;
 #[cfg(feature = "harness")]
 mod script;
 #[cfg(feature = "rpc")]
@@ -18,7 +16,6 @@ mod session_profile;
 mod skills;
 mod telemetry;
 mod trace_summary;
-mod validate;
 
 use std::{
     io::{self, Write},
@@ -27,6 +24,7 @@ use std::{
 };
 
 use clap::Parser;
+use due_core::oneshot::{self, RunObserver, RunOptions};
 
 use cli::{Cli, Command, Output, RunArgs, RunCommand};
 use result::{RunError, RunResult};
@@ -74,7 +72,8 @@ async fn run_command(input: RunCommand) -> ExitCode {
         }
     };
     progress.started(&run);
-    let mut result = match prepare_prompt(&run) {
+    let options = run.execution_options();
+    let mut result = match prepare_prompt(&run, &options) {
         Ok(prompt) => {
             progress.prompt_ready(prompt.len());
             let period = run.trace_interval.unwrap_or(Duration::from_secs(5));
@@ -88,11 +87,16 @@ async fn run_command(input: RunCommand) -> ExitCode {
                     Err(error) => RunResult::new(run.provider)
                         .fail(RunError::io("register shutdown signals", error)),
                     Ok(cancel) => {
-                        let execution = providers::execute(&run, &prompt, &progress, async {
-                            // Await the wrappers' cancellation cleanup before reporting exit 130.
-                            cancel.await;
-                            progress.phase("cancel_requested");
-                        });
+                        let execution = oneshot::execute(
+                            &options,
+                            &prompt,
+                            std::sync::Arc::new(progress.clone()),
+                            async {
+                                // Await the wrappers' cancellation cleanup before reporting exit 130.
+                                cancel.await;
+                                progress.phase("cancel_requested");
+                            },
+                        );
                         tokio::pin!(execution);
                         let mut heartbeat = tokio::time::interval_at(heartbeat_start, period);
                         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -164,8 +168,9 @@ fn finish_output(output: Output, result: &RunResult, diagnostics: bool) -> ExitC
     ExitCode::from(result.exit_code())
 }
 
-fn prepare_prompt(run: &RunArgs) -> Result<String, RunError> {
-    validate::native_args(run)?;
+fn prepare_prompt(run: &RunArgs, options: &RunOptions) -> Result<String, RunError> {
+    // Reject conflicting provider flags before reading a prompt from stdin.
+    options.validate_native_args()?;
     let prompt = match &run.prompt {
         Some(prompt) => prompt.clone(),
         None => io::read_to_string(io::stdin())
