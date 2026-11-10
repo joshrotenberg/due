@@ -51,7 +51,11 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub async fn open(options: &OpenOptions, sink: EventSink) -> Result<Self, String> {
+    pub async fn open(
+        options: &OpenOptions,
+        sink: EventSink,
+        fork_source: Option<&str>,
+    ) -> Result<Self, String> {
         let deadline = options.timeout_duration()?;
         let pending = Pending::default();
         let active = Arc::new(AtomicBool::new(false));
@@ -119,7 +123,9 @@ impl Backend {
                 crate::types::Effort::High => claude_wrapper::Effort::High,
             });
         }
-        if let Some(id) = &options.resume {
+        if let Some(id) = fork_source {
+            opts = opts.resume(id).fork_session();
+        } else if let Some(id) = &options.resume {
             opts = opts.resume(id);
         }
         if options.ephemeral {

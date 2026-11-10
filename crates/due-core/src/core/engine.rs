@@ -26,7 +26,14 @@ use crate::{
 static OPEN_NATIVE: AsyncMutex<()> = AsyncMutex::const_new(());
 const MAX_INPUT: usize = 1024 * 1024;
 
+enum SessionStart {
+    Fresh,
+    Resume(String),
+    Fork(String),
+}
+
 struct Worker {
+    fork_source: Option<String>,
     options: WorkerOptions,
     manager: Manager,
     handle: Mutex<Option<String>>,
@@ -101,7 +108,7 @@ impl Engine {
         let options = assignment.worker.validate()?;
         self.admit(
             None,
-            Some((options, None)),
+            Some((options, SessionStart::Fresh)),
             FollowUp {
                 prompt: assignment.prompt,
                 timeout: assignment.timeout,
@@ -117,26 +124,48 @@ impl Engine {
     ) -> Result<RunRef, Error> {
         match session.into() {
             SessionInput::Live(session) => self.admit(Some(session), None, assignment),
-            SessionInput::Saved(saved) => {
-                if saved.worker.ephemeral
-                    || saved.native_id.trim().is_empty()
-                    || saved.native_id.len() > MAX_INPUT
-                {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        "saved session requires a native ID and persisted history",
-                    ));
-                }
-                let options = validate_worker(saved.worker, Some(saved.native_id.clone()))?;
-                self.admit(None, Some((options, Some(saved.native_id))), assignment)
-            }
+            SessionInput::Saved(saved) => self.admit_saved(saved, assignment, SessionStart::Resume),
         }
+    }
+
+    /// Admit an assignment in a new session branched from saved native history.
+    ///
+    /// The source's provider and explicit worker configuration are reused. The
+    /// resulting worker gets a distinct logical and native identity. Native
+    /// startup or history failures become terminal result data.
+    pub async fn fork(&self, source: SavedSession, assignment: FollowUp) -> Result<RunRef, Error> {
+        if source.native_id.starts_with('-') || source.native_id.chars().any(char::is_control) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "invalid native fork source ID",
+            ));
+        }
+        self.admit_saved(source, assignment, SessionStart::Fork)
+    }
+
+    fn admit_saved(
+        &self,
+        saved: SavedSession,
+        assignment: FollowUp,
+        start: impl FnOnce(String) -> SessionStart,
+    ) -> Result<RunRef, Error> {
+        if saved.worker.ephemeral
+            || saved.native_id.trim().is_empty()
+            || saved.native_id.len() > MAX_INPUT
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "saved session requires a native ID and persisted history",
+            ));
+        }
+        let options = validate_worker(saved.worker, Some(saved.native_id.clone()))?;
+        self.admit(None, Some((options, start(saved.native_id))), assignment)
     }
 
     fn admit(
         &self,
         session: Option<SessionRef>,
-        fresh: Option<(WorkerOptions, Option<String>)>,
+        fresh: Option<(WorkerOptions, SessionStart)>,
         assignment: FollowUp,
     ) -> Result<RunRef, Error> {
         if assignment.prompt.trim().is_empty() || assignment.prompt.len() > MAX_INPUT {
@@ -173,13 +202,19 @@ impl Engine {
                 if state.sessions.len() >= self.inner.limits.max_sessions {
                     return Err(Error::new(ErrorKind::Capacity, "worker limit reached"));
                 }
-                let (options, native) = fresh.expect("new worker options");
+                let (options, start) = fresh.expect("new worker options");
+                let (native, fork_source) = match start {
+                    SessionStart::Fresh => (None, None),
+                    SessionStart::Resume(id) => (Some(id), None),
+                    SessionStart::Fork(id) => (None, Some(id)),
+                };
                 let id = SessionRef(uuid::Uuid::new_v4().to_string());
                 let items = Arc::new(SessionItems::new(id.0.clone(), None));
                 state.sessions.insert(
                     id.clone(),
                     Session {
                         worker: Arc::new(Worker {
+                            fork_source,
                             options,
                             manager: Manager::with_items(Arc::clone(&items)),
                             handle: Mutex::new(None),
@@ -877,7 +912,10 @@ async fn drive(
             let native = worker.native.lock().unwrap().clone();
             let opened = match worker
                 .manager
-                .open(open_options(&worker.options, native))
+                .open_with_fork(
+                    open_options(&worker.options, native),
+                    worker.fork_source.as_deref(),
+                )
                 .await
             {
                 Ok(value) => value,
@@ -946,7 +984,18 @@ async fn drive(
         );
         if observed["state"] == "finished" {
             let mut result = (*worker.manager.result(&handle, turn).unwrap().unwrap()).clone();
-            if observed["session_error"].is_string()
+            let unconfirmed_fork =
+                worker.fork_source.is_some() && worker.native.lock().unwrap().is_none();
+            if unconfirmed_fork && matches!(result.status, Status::Succeeded) {
+                return stop_failed(
+                    inner,
+                    worker,
+                    RunErrorKind::Protocol,
+                    "native fork did not report a new session identity".into(),
+                )
+                .await;
+            }
+            if (unconfirmed_fork || observed["session_error"].is_string())
                 && let Err(error) = close_worker(worker, inner.limits.settlement_timeout).await
             {
                 result = result.fail(RunError::new(
@@ -997,6 +1046,9 @@ fn before_start(worker: &Worker, timed_out: bool) -> RunResult {
     failed(worker, kind, message)
 }
 fn remember_native(worker: &Worker, native: &str) -> Result<(), String> {
+    if worker.fork_source.as_deref() == Some(native) {
+        return Err("native fork reused the source session identity".into());
+    }
     let mut known = worker.native.lock().unwrap();
     if native.trim().is_empty() || known.as_ref().is_some_and(|previous| previous != native) {
         return Err("native session identity changed unexpectedly".into());

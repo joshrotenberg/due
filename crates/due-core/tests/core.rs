@@ -62,15 +62,32 @@ impl Fixture {
         let source = include_str!("fixtures/session-agent.sh")
             .replace("native=\"native-$provider\"", r#"native="native-$provider-$$"
 previous=
+saved=
+fork=0
 for argument in "$@"; do
-  if [ "$previous" = --resume ] && [ -f "$DUE_SESSION_FIXTURE_DIR/history-$argument" ]; then
-    native="$argument"
-    count=$(cat "$DUE_SESSION_FIXTURE_DIR/history-$native")
-  fi
+  if [ "$previous" = --resume ]; then saved="$argument"; fi
+  if [ "$argument" = --fork-session ]; then fork=1; fi
   previous="$argument"
-done"#)
+done
+if [ -n "$saved" ] && [ -f "$DUE_SESSION_FIXTURE_DIR/history-$saved" ]; then
+  count=$(cat "$DUE_SESSION_FIXTURE_DIR/history-$saved")
+  if [ "$fork" = 0 ] || [ -f "$DUE_SESSION_FIXTURE_DIR/fork-alias" ]; then native="$saved"; fi
+fi"#)
             .replace("count=$((count + 1))", "count=$((count + 1)); printf '%s' \"$count\" > \"$DUE_SESSION_FIXTURE_DIR/history-$native\"")
-            .replace("        thread/start|thread/resume)", r#"        thread/start|thread/resume)
+            .replace("        thread/start|thread/resume)", r#"        thread/fork)
+          source_re='"threadId":"([^"]+)"'
+          if [ -f "$DUE_SESSION_FIXTURE_DIR/fork-unsupported" ]; then
+            emit '{"id":'"$id"',"error":{"code":-32601,"message":"thread/fork unsupported by fixture"}}'
+          elif [[ "$line" =~ $source_re ]]; then
+            requested="${BASH_REMATCH[1]}"
+            count=$(cat "$DUE_SESSION_FIXTURE_DIR/history-$requested")
+            if [ -f "$DUE_SESSION_FIXTURE_DIR/fork-alias" ]; then native="$requested"; fi
+            ancestry="$requested"
+            if [ -f "$DUE_SESSION_FIXTURE_DIR/fork-wrong-source" ]; then ancestry="wrong-source"; fi
+            result "$id" '{"thread":{"id":"'"$native"'","forkedFromId":"'"$ancestry"'","turns":[]}}'
+          fi
+          ;;
+        thread/start|thread/resume)
           resume_re='"threadId":"([^"]+)"'
           if [ "$method" = thread/resume ] && [[ "$line" =~ $resume_re ]]; then
             requested="${BASH_REMATCH[1]}"
@@ -707,6 +724,130 @@ async fn provider_failure_is_result_data_and_can_be_followed_by_a_successful_tur
             Status::Succeeded
         ));
         engine.shutdown().await.unwrap();
+        reaped(fixture.pid()).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_branches_saved_history_and_preserves_the_source() {
+    for provider in [Provider::Claude, Provider::Codex] {
+        let fixture = Fixture::new(provider);
+        let engine = engine();
+        let source = engine.spawn(fixture.assignment("first")).await.unwrap();
+        let original = finished(&engine, &source).await;
+        let before = serde_json::to_value(&original).unwrap();
+        let saved = original.saved_session.unwrap();
+        let source_pid = fixture.pid();
+        let run = engine
+            .fork(saved.clone(), FollowUp::new("branch"))
+            .await
+            .unwrap();
+        let fork = finished(&engine, &run).await;
+        let fork_pid = fixture.pid();
+        let branch = fork.saved_session.unwrap();
+        assert_ne!(fork.session, original.session);
+        assert_ne!(branch.native_id, saved.native_id);
+        assert_eq!(branch.worker.cwd, saved.worker.cwd);
+        assert_eq!(branch.worker.provider, saved.worker.provider);
+        assert_eq!(fork.result.unwrap().text, "turn 2");
+
+        let mut stream = engine.subscribe(&fork.session, 0).unwrap();
+        let page = stream.read_available(256).unwrap();
+        assert!(page.items.iter().any(|item| {
+            item.kind == "session_opened"
+                && item.data["resolved_options"]["fork_source"] == saved.native_id
+        }));
+        if provider == Provider::Codex {
+            assert!(page.items.iter().any(|item| {
+                item.data["method"] == "thread/fork"
+                    && item.data["response"]["thread"]["forkedFromId"] == saved.native_id
+            }));
+        }
+
+        let child_next = engine
+            .follow_up(fork.session, FollowUp::new("branch again"))
+            .await
+            .unwrap();
+        let parent_next = engine
+            .follow_up(original.session, FollowUp::new("source again"))
+            .await
+            .unwrap();
+        assert_eq!(
+            finished(&engine, &child_next).await.result.unwrap().text,
+            "turn 3"
+        );
+        assert_eq!(
+            finished(&engine, &parent_next).await.result.unwrap().text,
+            "turn 2"
+        );
+        assert_eq!(
+            serde_json::to_value(engine.inspect(&source).unwrap()).unwrap(),
+            before
+        );
+        engine.shutdown().await.unwrap();
+        reaped(source_pid).await;
+        reaped(fork_pid).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_rejects_an_alias_and_retains_native_unsupported_errors() {
+    let fixture = Fixture::new(Provider::Claude);
+    let invalid = SavedSession {
+        native_id: "--continue".into(),
+        worker: fixture.options(),
+    };
+    assert_eq!(
+        engine()
+            .fork(invalid, FollowUp::new("branch"))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::InvalidInput
+    );
+    assert!(!fixture.directory.path().join("pid").exists());
+    for (provider, mode, expected) in [
+        (
+            Provider::Claude,
+            "fork-alias",
+            "reused the source session identity",
+        ),
+        (
+            Provider::Codex,
+            "fork-alias",
+            "reused the source session identity",
+        ),
+        (
+            Provider::Codex,
+            "fork-wrong-source",
+            "unexpected source ancestry",
+        ),
+        (
+            Provider::Codex,
+            "fork-unsupported",
+            "thread/fork unsupported by fixture",
+        ),
+    ] {
+        let fixture = Fixture::new(provider);
+        let engine = engine();
+        let saved = SavedSession {
+            native_id: "fixture-source".into(),
+            worker: fixture.options(),
+        };
+        let root = fixture.directory.path();
+        fs::write(root.join("history-fixture-source"), "1").unwrap();
+        fs::write(root.join(mode), "").unwrap();
+        let run = engine.fork(saved, FollowUp::new("branch")).await.unwrap();
+        let snapshot = finished(&engine, &run).await;
+        assert!(snapshot.saved_session.is_none());
+        let result = snapshot.result.unwrap();
+        assert!(result.session_id.is_none());
+        let error = result.error.as_ref().unwrap();
+        assert!(error.message.contains(expected), "{error:?}");
+        if provider == Provider::Codex {
+            assert!(!fixture.input().contains(r#""method":"turn/start""#));
+        }
+        let _ = engine.shutdown().await;
         reaped(fixture.pid()).await;
     }
 }

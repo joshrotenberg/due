@@ -76,8 +76,16 @@ and wanted. The caller runs the objective checks (tests, linters, a schema
 validator, source comparison) itself and treats the reviewer's verdict as
 input, not acceptance. If revision is needed, resume the author with the
 findings or run the loop in `due script` (`due skills show supervise`).
-Examples: a second Codex session reviews a Codex patch against the issue text;
-a Claude session fact-checks a research summary against the cited files.
+For issue work, start one author and one fresh reviewer. Give the reviewer
+the issue, diff and relevant repository evidence. Keep the two session IDs
+separate. If the author revises the change, continue the author with the findings
+and continue the reviewer with the new diff. Set a stopping point for revisions,
+then close resident sessions or stop resuming saved sessions when the issue is
+done. Either role can use either provider. A fork carries the source's history,
+which is useful for exploring a different approach and changes what the reviewer
+has seen. The installed `due run`, `due rpc` and `due script` commands support
+fresh and resumed sessions. Direct Rust callers can also fork saved history
+through `due_core::Engine`.
 
 ### Independent assignments
 

@@ -54,6 +54,7 @@ contract.
 | --- | --- |
 | `spawn` | `engine.spawn(Assignment { worker, prompt, timeout }).await` |
 | `follow_up` | `engine.follow_up(SessionRef or SavedSession, FollowUp { prompt, timeout }).await` |
+| `fork` | `engine.fork(saved, FollowUp { prompt, timeout }).await`; branch persisted native history into a new worker |
 | `inspect` | `engine.inspect(&run)`; synchronous, non-consuming |
 | `wait` | `engine.wait(&runs, WaitOptions { until, timeout }).await` |
 | `interrupt` | `engine.interrupt(&run).await`; targets the exact assignment and awaits terminal settlement |
@@ -78,6 +79,23 @@ a `SavedSession` imports persisted native history into a new resident process.
 Saved descriptors freeze explicit requested configuration, not inherited grants,
 credentials or native filesystem contents. Resume identity mismatches fail.
 An ephemeral worker supports live follow-ups but publishes no resume descriptor.
+
+Use `engine.fork(saved, FollowUp::new("Explore a different approach"))` when a
+new worker should start with the source's persisted context. Use an idle source
+with saved history. The core reuses its explicit worker configuration and gives
+the branch a new logical session reference. Due waits for a distinct native
+identity before publishing a resume descriptor. With Claude, the provider may
+first report that identity during the assignment. With Codex, the fork response
+reports the new thread before the assignment starts. The session journal records
+the requested source as `session_opened.resolved_options.fork_source` and retains
+Codex's native response, including `forkedFromId` when present. A provider that
+rejects the operation yields a failed run with its diagnostic.
+
+A fork copies conversation context. Workspace files and side effects are shared
+when both workers use the same workspace. For independent review, start a fresh
+worker and pass the issue, diff, and verification evidence. The core API owns
+forking in this slice. The foreground CLI, RPC and JavaScript adapters retain
+their existing session operations.
 
 `wait` returns snapshots in requested order. `Any` includes already-completed
 runs; `All` requires every requested run to finish. A zero wait budget polls;
@@ -156,7 +174,7 @@ execution deadline can wait indefinitely for input. Its assignment deadline,
 `interrupt` and engine shutdown still apply. Unattended callers can instead set
 `interaction_mode = InteractionMode::Reject`; encountering an interaction then
 fails the run explicitly with `unsupported` and closes that worker. Neither mode
-changes native permission grants. Fork and steer remain outside this spike.
+changes native permission grants. Live steering remains outside this spike.
 Fresh/resume input uses the existing resident policy allowlist, not the wider
 one-shot passthrough surface; answer schemas are also not added here.
 
