@@ -1,6 +1,6 @@
 # Install from source
 
-Due is currently distributed from its private source repository. Install the CLI and use its
+Install Due from its public source repository and use its
 embedded installer for the skills-only plugin on each machine. No plugin source
 checkout is needed after building the executable. The plugin does not install a
 binary, provider, or credentials. Normal builds include the resident RPC interface
@@ -13,7 +13,6 @@ task-permission failures.
 
 ## Prerequisites
 
-- Access to [joshrotenberg/due](https://github.com/joshrotenberg/due) from that machine.
 - Rust 1.90 or newer, Cargo, Git, and a native C compiler/linker for embedded JavaScript.
 - Claude Code or Codex installed and authenticated locally for whichever provider
   you will run. Check that it works directly before diagnosing Due.
@@ -26,11 +25,10 @@ from crates.io. Keep `Cargo.lock` and the wrapper pins unchanged.
 
 ## Build and install the CLI
 
-Clone into a normal local development directory with GitHub SSH access, or use
-`gh repo clone joshrotenberg/due` with your authenticated GitHub CLI:
+Clone the public repository into a local development directory:
 
 ```sh
-git clone git@github.com:joshrotenberg/due.git
+git clone https://github.com/joshrotenberg/due.git
 cd due
 git rev-parse HEAD
 cargo install --path . --locked
@@ -51,6 +49,11 @@ cargo build --locked -p due-cli --no-default-features --features rpc
 The `harness` feature enables `script` and includes `rpc` for its resident
 session transport. The foreground `run` command is available in each build.
 
+To include the stdio MCP command and its embedded guide, install with
+`cargo install --path . --locked --features mcp-stdio`. Check that the installed
+binary exposes `due mcp --help` and `due skills show mcp`, then follow the
+[MCP setup guide](../embedded-skills/mcp/SKILL.md) to configure your client.
+
 Cargo normally installs under `~/.cargo/bin`. Ensure the host's process environment
 can find that directory. A terminal finding `due` does not prove a desktop app has
 the same PATH; restart the app after changing its launch environment and check
@@ -68,7 +71,7 @@ outside temporary or cloud-synchronized storage. A symlink to its release binary
 gives normal `due` invocations with no build or wrapper process on startup:
 
 ```sh
-git clone git@github.com:joshrotenberg/due.git "$HOME/Code/github.com/due"
+git clone https://github.com/joshrotenberg/due.git "$HOME/Code/github.com/due"
 cd "$HOME/Code/github.com/due"
 cargo build --release --locked --target-dir "$PWD/target"
 mkdir -p "$HOME/.cargo/bin"
@@ -162,10 +165,17 @@ a fresh session. Codex uses the [official local-plugin workflow](https://develop
 
 Rebuild/install Due, then repeat `due init` with the same host and directory
 options. Package files come from that exact binary, with no runtime checkout reads
-or downloads by Due. Native hosts may cache the skill; verify discovery in a new
-session. If a host reports that the cache is unchanged, inspect its plugin manager
-and use its supported refresh flow. Binary-only guide changes do not require a
-plugin refresh when the small delegate skill is unchanged.
+or downloads by Due. Verify the delegate skill in a fresh host session. On a
+same-version rebuild, Claude Code 2.1.317 reported the plugin was already up
+to date and kept its old cache copy, while a fresh session advertised the
+updated skill from the local marketplace. Codex CLI 0.165.0 refreshed its
+cache and advertised the update in a new app-server process. Both hosts
+advertised the new skill after a version bump. These checks used disposable
+host configurations on macOS.
+
+If a fresh session still shows stale content, use the host's plugin manager
+to inspect and refresh the installation. Binary-only guide changes do not
+require a plugin refresh when the delegate skill is unchanged.
 
 The managed directory is identified by `.due-install.json`. Setup refuses a
 nonempty unmanaged directory, symlinked package entries or unexpected files,

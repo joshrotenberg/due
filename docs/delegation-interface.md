@@ -60,7 +60,7 @@ library. Each exposes the operations and lifecycle its interface can support.
 | `due-mcp` | A reusable library that maps MCP tools and schemas onto the core. The CLI can expose its stdio server with an opt-in `mcp-stdio` feature. |
 | `due-rpc` | A proposed reusable JSON-RPC library with caller-supplied I/O. A future extraction starts with the shipped `due rpc` protocol and its compatibility tests. |
 | `due-harness` | The embedded language runtime and workflow API. Today JavaScript launches a Due RPC child. A future in-process core backend could make the CLI's harness feature independent of RPC. |
-| `due-plugin` | Proposed library for package assets and installation. The CLI retains the `due init` command and its output contract. |
+| `due-plugin` | Library for package assets and managed installation. The CLI exposes `due init` and its setup report. |
 
 The default CLI build includes RPC and JavaScript. A build with no default
 features retains the one-shot command and offline discovery.
@@ -80,8 +80,9 @@ The library accepts host-supplied streams and configuration. The opt-in
 
 One stdio connection owns one engine with multiple workers. Clients can start
 a worker, wait or inspect by run reference, follow up by session reference,
-read session items by cursor, and answer a pending approval. EOF or a transport
-failure starts cleanup for that connection's workers. The host should receive
+read session items by cursor, answer a pending approval, and release a settled
+session after collecting its records. EOF or a transport failure starts cleanup
+for that connection's workers. The host should receive
 the cleanup outcome.
 
 Verify the library from a separate Cargo consumer and exercise the CLI feature
@@ -97,23 +98,19 @@ live session registration remain [separate experiments](https://github.com/joshr
 
 ## Plugin crate and host registration
 
-Extract the current package assets, host manifest rendering, install plan, and
-managed installation into `due-plugin`. Keep Clap arguments, terminal output,
-and the process exit code in `due-cli`. Pass the Due executable path and a
-shutdown signal to the library. Keep the existing managed tree, locking, and
-setup receipt compatible with installed packages.
+The [`due-plugin` library](../crates/due-plugin/README.md) owns package assets,
+host manifests, install planning, and managed installation. The CLI supplies
+the executable path and shutdown signal and presents the existing setup report.
 
 | Configuration | Behavior |
 | --- | --- |
-| Default `due-cli/plugin` and `due-plugin/cli` | `due init` installs the delegate skill. Ordinary assignments use `due run`. |
-| Minimal CLI with the proposed `plugin` feature disabled | `due run`, help, and installed guides are available. |
+| Default and minimal CLI | `due init` installs the delegate skill. Ordinary assignments use `due run`. |
 | CLI with `mcp-stdio` | `due mcp` is available for an explicitly configured host. |
 | Proposed optional `due-plugin/mcp` | Adds MCP package rendering alongside the delegate skill for a host and workspace the operator selects. A Due binary that packages its own server also needs `mcp-stdio`. |
 
-The first extraction should move the current CLI package and installer
-together. Keep the plugin crate independent of worker execution. Prove the
-same package files, dry-run plan, and fake-host registration results before
-adding an MCP packaging option.
+The delegate skill can use an explicitly configured Due MCP connection. See
+[release readiness](release-readiness.md) for the CLI and plugin parity checks
+and native host validation.
 
 Both installed CLIs advertise direct stdio registration through `mcp add`.
 Claude Code exposes local, project, and user scopes. It also discovers

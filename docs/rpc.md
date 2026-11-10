@@ -20,9 +20,8 @@ above this wire contract with the same Rust process ownership used in the
 [language comparison](rpc-languages.md). External clients can implement the same
 operations without embedding JavaScript or using the bundled client. `due run`
 keeps its one-shot behavior. Reduced source builds can select only `--features rpc`
-with `--no-default-features`. The separate
-[MCP experiment](https://github.com/joshrotenberg/due/tree/codex/due-mcp-spike)
-remains outside this implementation.
+with `--no-default-features`. For an MCP client that needs multiple workers on
+one stdio connection, see the [MCP adapter guide](../embedded-skills/mcp/SKILL.md).
 
 ## Wire contract
 

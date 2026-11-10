@@ -39,8 +39,9 @@ For a long-lived connection, save any results and items you need before calling
 `release_session` with `{"session":"<session reference>"}`. Success returns
 `{"released":true}`. The old session and all its run references then expire.
 If a run is active, wait for it to finish or interrupt it first. If settlement
-fails, the records and capacity stay reserved. Closing the connection settles
-active assignments and closes idle workers.
+fails, the records and capacity stay reserved. A provider that exits with a
+nonzero status can report a settlement error even after its main process exits.
+Closing the connection starts cleanup for all its workers.
 
 ## Named worker profiles
 
