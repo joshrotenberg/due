@@ -107,6 +107,35 @@ artifacts or diff yourself. Next: `due skills show run` and
   work and changes no permissions or credentials.
 - Reusable settings live in JSON profiles you own: `due skills show profiles`.
 
+## Give workers consistent instructions
+
+Start in the checkout that contains the project's instructions. Each provider
+uses its normal rules to discover repository instructions and settings there.
+For MCP, the server's working directory selects that checkout.
+
+Keep reusable working preferences in a file you control. Compose that text
+with the assignment when you launch a fresh worker. Include the task's
+deliverable, allowed changes, and acceptance check. This gives both providers
+the same explicit instructions, even when their native configuration differs.
+
+Set `work_style`, `task`, `profile`, and `workspace` to paths you manage.
+The first two files supply the prompt. The JSON profile selects the provider
+and execution settings.
+
+```sh
+{
+  printf '%s\n' 'Working instructions'
+  cat "$work_style"
+  printf '\n\n%s\n' 'Assignment'
+  cat "$task"
+} | due run --request "$profile" --cwd "$workspace" --stdin --output json
+```
+
+Compose the same prompt in a resident client. Pass it to `worker.turn(prompt)`
+in a script, the `prompt` field of RPC `turn.start`, or the `prompt` field of
+MCP `spawn`. On a follow-up, state any changed instructions in the new prompt.
+See `due skills show profiles` for execution settings.
+
 ## Troubleshooting
 
 Preserve the result, stderr, any trace file and partial edits before a follow-up.
