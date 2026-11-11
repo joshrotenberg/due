@@ -17,7 +17,7 @@ use std::{
 
 use crate::{
     result::{ErrorKind, Invocation, RunError, RunResult},
-    types::{Effort, Provider},
+    types::{Effort, Provider, validate_timeout},
 };
 use schema::Schema;
 
@@ -30,6 +30,7 @@ pub struct RunOptions {
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub cwd: Option<PathBuf>,
+    /// Optional provider execution budget. It must be positive and fit the monotonic clock.
     pub timeout: Option<Duration>,
     pub schema: Option<PathBuf>,
     pub resume: Option<String>,
@@ -168,6 +169,8 @@ where
             Err(RunError::invalid("prompt must not be empty"))
         } else if run.resume.is_some() && run.ephemeral {
             Err(RunError::invalid("resume conflicts with ephemeral"))
+        } else if let Some(timeout) = run.timeout {
+            validate_timeout(timeout).map_err(RunError::invalid)
         } else {
             Ok(())
         }
@@ -188,5 +191,38 @@ where
         schema::normalize(result)
     } else {
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::result::Status;
+
+    #[test]
+    fn dry_run_rejects_invalid_typed_timeouts() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for provider in [Provider::Claude, Provider::Codex] {
+            let mut options = RunOptions::new(provider);
+            options.dry_run = true;
+            for duration in [Duration::ZERO, Duration::MAX] {
+                options.timeout = Some(duration);
+                let result = runtime.block_on(execute(
+                    &options,
+                    "Check the timeout",
+                    Arc::new(()),
+                    std::future::pending(),
+                ));
+                assert!(
+                    matches!(result.status, Status::Failed),
+                    "{provider:?}, {duration:?}: {:?}",
+                    result.status
+                );
+                assert_eq!(result.error.unwrap().kind, ErrorKind::InvalidInput);
+                assert!(result.invocation.is_none());
+            }
+        }
     }
 }
