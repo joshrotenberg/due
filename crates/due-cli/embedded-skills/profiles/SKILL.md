@@ -158,9 +158,11 @@ In a git worktree, `.git` is a file naming the worktree's own git directory,
 `<base>/.git/worktrees/<name>`, which holds its index and `HEAD`. Objects and refs
 are in the shared `<base>/.git`. Both directories are outside the workspace, so
 this profile lets the worker edit files but not record them in git. To let the
-worker commit, add both directories printed by
-`git rev-parse --path-format=absolute --git-common-dir --git-dir` to
-`sandbox_workspace_write.writable_roots`. This makes the shared repository's git
+worker commit, replace the empty `sandbox_workspace_write.writable_roots` array
+with both directories printed by
+`git rev-parse --path-format=absolute --git-common-dir --git-dir`. The worktree's
+own git directory alone is not enough: the commit fails writing its object to
+the shared directory. This makes the shared repository's git
 directory writable by the worker; grant it only when the assignment has the
 worker commit.
 
