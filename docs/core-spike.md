@@ -47,6 +47,12 @@ depend on `due-mcp`
 from the same repository or run `due mcp`. The `due` executable includes that
 command when built with the `mcp-stdio` feature.
 
+Use `oneshot` for a foreground assignment or a later invocation with a saved
+native session ID. Its optional `RunOptions::timeout` must be positive and fit
+the monotonic clock. Use the resident engine when an application needs live
+follow-ups, explicit interaction responses, or several concurrent workers. Both
+entry points support using Claude or Codex on its own.
+
 ## Library boundary
 
 Use either provider on its own, or select a provider for each worker in a
@@ -119,6 +125,7 @@ For the lifecycle operations available on other surfaces, see
 | `interrupt` | `engine.interrupt(&run).await`; targets the exact assignment and awaits terminal settlement |
 | `respond` | `engine.respond(&interaction.id, native_response).await`; answers one pending generation |
 | `subscribe` | `engine.subscribe(&session, after_cursor)`; independent full-item reader across turns, with `next().await` or `read_available(limit)` |
+| `release_session` | `engine.release_session(&session).await`; close an idle worker and reclaim its session and run slots |
 
 `WorkerOptions` fixes provider, canonical cwd, resolved executable, requested
 model/effort, ephemeral choice and audited native policy arguments at admission.
@@ -183,9 +190,17 @@ Drop requests best-effort cleanup on the captured runtime; it cannot report
 success and is not a substitute for awaited shutdown.
 
 Defaults retain at most 64 admitted runs and 16 logical workers, with a
-90-second settlement budget per cleanup/wait stage. Limits are caller supplied.
-There is no eviction, persistent engine registry or automatic slot recycling;
-capacity exhaustion is explicit. Use an engine scope appropriate to the task.
+90-second settlement budget per cleanup/wait stage. Limits are caller supplied
+and capacity exhaustion is explicit.
+
+For an engine that outlives individual assignments, collect the results and
+session items you need, then call `release_session` once the worker is idle.
+Successful release frees the session slot and its retained run slots. Further
+lookups with those references fail. Existing stream readers can drain retained
+items through closure, and saved native history follows the provider's own
+retention rules. Active runs return `Busy`. If cleanup fails, the engine retains
+the records and capacity reservation.
+
 Native transport output/event limits remain enforced by the reused backends.
 Prompts and native argument bytes are bounded to 1 MiB; native arguments also
 have a 4096-element limit. Model input is bounded to 1 MiB. No model calls occur

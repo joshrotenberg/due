@@ -70,11 +70,16 @@ impl Effort {
 /// Parse a positive duration that the current monotonic clock can represent.
 pub fn parse_timeout(value: &str) -> Result<Duration, String> {
     let duration = humantime::parse_duration(value).map_err(|e| e.to_string())?;
+    validate_timeout(duration)?;
+    Ok(duration)
+}
+
+pub(crate) fn validate_timeout(duration: Duration) -> Result<(), &'static str> {
     if duration.is_zero() {
-        return Err("duration must be greater than zero".into());
+        return Err("duration must be greater than zero");
     }
     if Instant::now().checked_add(duration).is_none() {
-        return Err("duration exceeds this platform's scheduling range".into());
+        return Err("duration exceeds this platform's scheduling range");
     }
-    Ok(duration)
+    Ok(())
 }

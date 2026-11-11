@@ -9,6 +9,16 @@ provider-specific tool policy, approval responses, and session items.
 The [core API guide](core-spike.md) documents the implementation in `due-core`,
 including examples, retention bounds, and cleanup guarantees.
 
+People can run Due directly or use its CLI and JSON results from scripts. An
+application can embed the Rust library or compose workflows in a harness. A
+host that needs a process boundary can use MCP or RPC to manage workers and
+read their progress.
+
+A supervising agent can delegate one assignment or keep several workers
+running while it manages the project. It can use any interface that fits its
+host and workflow. The supervising agent defines the assignments, decides
+when to follow up, and verifies the results.
+
 ## One owner for a worker's lifetime
 
 A core engine owns the workers it starts. Workers in separate sessions can run
