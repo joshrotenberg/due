@@ -19,7 +19,7 @@ use tokio::{
 };
 use tower_mcp::{
     BoxError, CallToolResult, McpRouter, StdioPipes, StdioTransport, ToolBuilder,
-    extract::{Json, State},
+    extract::{Context, Json, State},
 };
 
 const MAX_CONCURRENT_REQUESTS: usize = 16;
@@ -221,9 +221,9 @@ fn router(app: Arc<App>) -> McpRouter {
         )
         .tool(
             ToolBuilder::new("wait")
-                .description("Observe completion of one or more runs for up to 10 seconds. Expiry leaves the runs active. Combine runs in one wait or poll with timeout_ms: 0 to avoid the pending wait limit.")
+                .description("Observe completion of one or more runs for up to 10 seconds. Expiry or cancellation leaves the runs active. Combine runs in one wait or poll with timeout_ms: 0 to avoid the pending wait limit.")
                 .read_only()
-                .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Wait>| async move {
+                .extractor_handler(app.clone(), |State(app): State<Arc<App>>, context: Context, Json(input): Json<Wait>| async move {
                     let timeout_ms = input.timeout_ms.unwrap_or(1000);
                     if timeout_ms > 10_000 {
                         return tool_error(json!({"kind":"invalid_input","message":"timeout_ms must be at most 10000"}));
@@ -248,7 +248,12 @@ fn router(app: Arc<App>) -> McpRouter {
                             Err(_) => return tool_error(json!({"kind":"busy","message":"too many pending waits or controls; wait on several runs together or poll with timeout_ms: 0"})),
                         }
                     };
-                    outcome(app.engine.wait(&input.runs, options).await)
+                    // The transport suppresses the cancelled reply but lets the handler finish.
+                    // Dropping the observation here releases both permits and leaves the runs active.
+                    tokio::select! {
+                        _ = context.cancelled() => tool_error(json!({"kind":"cancelled","message":"wait request cancelled"})),
+                        result = app.engine.wait(&input.runs, options) => outcome(result),
+                    }
                 })
                 .build(),
         )

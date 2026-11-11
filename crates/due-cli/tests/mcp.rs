@@ -448,6 +448,109 @@ async fn saturated_waits_leave_room_to_interrupt() {
 }
 
 #[tokio::test]
+async fn cancelling_wait_frees_capacity_and_leaves_run_active() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut peer = Peer::start(workspace.path(), None);
+    peer.initialize().await;
+    let held = peer
+        .tool("spawn", json!({"provider":"codex","prompt":"ask"}))
+        .await;
+    let pending = peer.awaiting_input(&held["run"]).await;
+
+    let mut waits = Vec::new();
+    for _ in 0..15 {
+        waits.push(
+            peer.request(
+                "tools/call",
+                json!({"name":"wait","arguments":{"runs":[held["run"]],"timeout_ms":10000}}),
+            )
+            .await,
+        );
+    }
+    let busy = peer.receive().await;
+    assert_eq!(
+        busy["result"]["structuredContent"]["error"]["kind"], "busy",
+        "{busy}"
+    );
+    waits.retain(|id| busy["id"] != *id);
+    assert_eq!(waits.len(), 14);
+    let cancelled = waits.pop().unwrap();
+    peer.send(json!({
+        "jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":cancelled}
+    }))
+    .await;
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            // The notification and tool requests can reach their handlers in
+            // either order. Try a short observation until a permit is free.
+            let replacement = peer
+                .call(
+                    "tools/call",
+                    json!({"name":"wait","arguments":{"runs":[held["run"]],"timeout_ms":1}}),
+                )
+                .await;
+            let content = &replacement["structuredContent"];
+            if replacement["isError"] != true {
+                assert_eq!(content["condition_met"], false, "{replacement}");
+                assert_eq!(
+                    content["runs"][0]["state"], "awaiting_input",
+                    "{replacement}"
+                );
+                break;
+            }
+            assert_eq!(content["error"]["kind"], "busy", "{replacement}");
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled wait held its permit until the original deadline");
+
+    let reply = peer
+        .request(
+            "tools/call",
+            json!({"name":"respond","arguments":{
+                "interaction":pending["interactions"][0]["id"],
+                "response":{"decision":"cancel"}
+            }}),
+        )
+        .await;
+    let mut reply_pending = true;
+    for _ in 0..=waits.len() {
+        let response = peer.receive().await;
+        let result = &response["result"]["structuredContent"];
+        if response["id"] == reply {
+            assert!(reply_pending, "{response}");
+            reply_pending = false;
+            assert_eq!(result["interaction"], pending["interactions"][0]["id"]);
+        } else {
+            let position = waits
+                .iter()
+                .position(|id| response["id"] == *id)
+                .unwrap_or_else(|| panic!("unexpected wait response: {response}"));
+            waits.swap_remove(position);
+            assert_eq!(result["condition_met"], true, "{response}");
+        }
+    }
+    assert!(!reply_pending);
+    assert!(waits.is_empty());
+    assert_eq!(
+        peer.tool("release_session", json!({"session":held["session"]}))
+            .await,
+        json!({"released":true})
+    );
+    drop(peer.input);
+    assert!(
+        timeout(DEADLINE, peer.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(peer.output.next_line().await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn stdio_releases_settled_workers_and_handles_eof_during_release() {
     let workspace = tempfile::tempdir().unwrap();
     let mut peer = Peer::start(workspace.path(), None);
