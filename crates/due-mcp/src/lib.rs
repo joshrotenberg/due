@@ -13,11 +13,16 @@ use due_core::{
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    sync::Semaphore,
+};
 use tower_mcp::{
     BoxError, CallToolResult, McpRouter, StdioPipes, StdioTransport, ToolBuilder,
     extract::{Json, State},
 };
+
+const MAX_CONCURRENT_REQUESTS: usize = 16;
 
 /// Host-controlled settings shared by the workers on one connection.
 pub struct Config {
@@ -59,6 +64,7 @@ struct App {
     engine: Engine,
     config: Config,
     profiles: Option<BTreeMap<String, WorkerOptions>>,
+    wait_slots: Semaphore,
 }
 
 impl App {
@@ -214,13 +220,21 @@ fn router(app: Arc<App>) -> McpRouter {
         )
         .tool(
             ToolBuilder::new("wait")
-                .description("Observe completion of runs for up to 10 seconds. Expiry leaves the runs active.")
+                .description("Observe completion of one or more runs for up to 10 seconds. Expiry leaves the runs active. Combine runs in one wait or poll with timeout_ms: 0 to avoid the pending wait limit.")
                 .read_only()
                 .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Wait>| async move {
                     let timeout_ms = input.timeout_ms.unwrap_or(1000);
                     if timeout_ms > 10_000 {
                         return tool_error(json!({"kind":"invalid_input","message":"timeout_ms must be at most 10000"}));
                     }
+                    let _permit = if timeout_ms == 0 {
+                        None
+                    } else {
+                        match app.wait_slots.try_acquire() {
+                            Ok(permit) => Some(permit),
+                            Err(_) => return tool_error(json!({"kind":"busy","message":"too many pending wait calls; wait on several runs together or poll with timeout_ms: 0"})),
+                        }
+                    };
                     let options = WaitOptions {
                         until: if input.any { WaitUntil::Any } else { WaitUntil::All },
                         timeout: Some(Duration::from_millis(timeout_ms)),
@@ -341,9 +355,11 @@ fn connection(mut config: Config) -> Result<(Arc<App>, StdioTransport), BoxError
         engine: Engine::new(config.limits.clone())?,
         config,
         profiles,
+        // Observation calls must leave room for the controls that settle runs.
+        wait_slots: Semaphore::new(MAX_CONCURRENT_REQUESTS - 1),
     });
     let transport = StdioTransport::without_server_notifications(router(app.clone()))
-        .max_concurrent_requests(16)
+        .max_concurrent_requests(MAX_CONCURRENT_REQUESTS)
         .drain_timeout(Duration::from_secs(5));
     Ok((app, transport))
 }

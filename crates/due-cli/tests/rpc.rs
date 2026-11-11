@@ -643,12 +643,17 @@ fn failed_native_turn_is_result_data_and_session_accepts_follow_up() {
 }
 
 #[test]
-fn eof_cleans_up_active_native_session_and_drains_terminal_items() {
-    for provider in ["claude", "codex"] {
+fn concurrent_workers_settle_independently_on_eof_and_explicit_close() {
+    for (provider, sibling_provider) in [("claude", "codex"), ("codex", "claude")] {
         let mut client = Client::new(false);
+        let mut sibling = Client::new(false);
         let session = client.open(provider, true, None);
+        let sibling_session = sibling.open(sibling_provider, true, None);
         let turn = client.start(&session, "hold");
+        let sibling_turn = sibling.start(&sibling_session, "hold");
         client.ready(provider, &session, &turn);
+        sibling.ready(sibling_provider, &sibling_session, &sibling_turn);
+
         client.eof();
         assert_eq!(client.finished(&session, &turn)["status"], "cancelled");
         client
@@ -657,6 +662,18 @@ fn eof_cleans_up_active_native_session_and_drains_terminal_items() {
             client.dir.path().join("exited").exists(),
             "native process survived EOF"
         );
+
+        let snapshot = sibling.ok(
+            "turn.read",
+            json!({"session_id":sibling_session,"turn_id":sibling_turn}),
+        );
+        assert_eq!(snapshot["state"], "running", "{snapshot}");
+        sibling.close(&sibling_session);
+        assert_eq!(
+            sibling.finished(&sibling_session, &sibling_turn)["status"],
+            "cancelled"
+        );
+        sibling.eof();
     }
 }
 

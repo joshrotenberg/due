@@ -6,6 +6,12 @@ an optional executable override for each provider, engine limits, and a
 shutdown future. Each call owns its workers and returns after cleanup on EOF,
 transport failure, or host shutdown.
 
+Use one `spawn` per concurrent worker and combine run references in one `wait`
+call. The connection limits positive-duration waits to 15 so wait calls cannot
+occupy every request slot. After collecting a settled session's records, use
+`release_session` to reclaim capacity. To shut down an embedded connection,
+signal its shutdown future and await `serve` for the cleanup outcome.
+
 ```rust
 use due_mcp::{Config, serve};
 use tokio::io::{AsyncRead, AsyncWrite};
