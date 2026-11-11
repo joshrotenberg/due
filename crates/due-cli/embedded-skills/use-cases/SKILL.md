@@ -105,11 +105,37 @@ findings or run the loop in `due script` (`due skills show supervise`).
 For issue work, start one author and one fresh reviewer. Give the reviewer
 the issue, diff and relevant repository evidence. Keep the two session IDs
 separate. If the author revises the change, continue the author with the findings
-and continue the reviewer with the new diff. Set a stopping point for revisions,
-then close resident sessions or stop resuming saved sessions when the issue is
-done. Either role can use either provider. A fork carries the source's history,
-which is useful for exploring a different approach and changes what the reviewer
-has seen.
+and start a fresh reviewer with the new diff. Set a stopping point for
+revisions, then close resident sessions or stop resuming saved sessions when the
+issue is done. Either role can use either provider. A fork carries the source's
+history, which is useful for exploring a different approach and changes what the
+reviewer has seen.
+
+Use a fresh reviewer session for each review round. A reviewer resumed for a
+second round tends to approve without looking.
+
+An approving review from a run that opened no file and ran no command is
+unverified. Before counting an approval, check for tool activity. For a run
+started with `--trace-file`, read the `activities.by_kind` counts from
+`due trace summarize FILE --output json`; a reviewer that ran nothing shows no
+`command` or `tool_call` activity. On a resident surface, read the session
+items. If a reviewer's commands were denied (see `permission_denials` in a
+Claude result), check that it still read the diff and the changed files before
+counting the review. If there was no activity, rerun the review at higher
+effort. Low-effort reviewers have approved code with
+a planted bug without running anything.
+
+To check the plan first, have a second worker (the other provider when
+available) read the plan against the code, read-only, and restate it with
+corrections before the author implements. This found more problems than
+reviews of the finished diff did. The checker may widen scope, so the caller
+keeps the original scope and accepts only corrections within it.
+
+For behavior-changing work (features, fixes, performance), the caller can run a
+revert check. Copy the working directory, revert the non-test paths to HEAD in
+the copy, and run the new tests there. They should fail: tests that pass
+without the change do not test it. The check does not apply to refactors, and
+it does not replace a real run of the changed path.
 
 The [runnable author/reviewer example](https://github.com/joshrotenberg/due/blob/main/examples/core-compare/tests/author_reviewer.rs)
 uses fake Claude and Codex workers to demonstrate separate live follow-ups and
