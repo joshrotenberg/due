@@ -18,6 +18,7 @@ const LOCK: &str = ".due-init.lock";
 const MARKETPLACE: &str = "due-local";
 const MANIFEST: &str = include_str!("../../../plugin/due/plugin.json");
 const SKILL: &[u8] = include_bytes!("../../../plugin/due/skills/delegate/SKILL.md");
+const WORK_LOOP_SKILL: &[u8] = include_bytes!("../../../plugin/due/skills/work-loop/SKILL.md");
 const HOST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_OUTPUT: u64 = 64 * 1024;
 const KILLED_OUTPUT_GRACE: Duration = Duration::from_secs(1);
@@ -163,6 +164,10 @@ fn package() -> Vec<(&'static str, Vec<u8>)> {
             include_bytes!("../../../plugin/due/README.md").to_vec(),
         ),
         ("plugin/due/skills/delegate/SKILL.md", SKILL.to_vec()),
+        (
+            "plugin/due/skills/work-loop/SKILL.md",
+            WORK_LOOP_SKILL.to_vec(),
+        ),
         ("plugin/due/.claude-plugin/plugin.json", json_bytes(&native)),
         ("plugin/due/.codex-plugin/plugin.json", json_bytes(&codex)),
         (

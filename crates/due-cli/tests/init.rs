@@ -183,7 +183,7 @@ fn relocated_dry_run_is_write_free_and_starts_no_host() {
     let value = report(&f.run(&["--dry-run"]), 0, "planned");
     assert_eq!(value["plan"]["ready"], true);
     assert_eq!(value["plan"]["commands"].as_array().unwrap().len(), 8);
-    assert_eq!(value["plan"]["files"].as_array().unwrap().len(), 8);
+    assert_eq!(value["plan"]["files"].as_array().unwrap().len(), 9);
     assert!(!f.install.exists());
     assert!(!f.calls.exists());
     assert_eq!(fs::read_dir(f.temp.path().join("tmp")).unwrap().count(), 0);
@@ -196,7 +196,7 @@ fn standalone_apply_materializes_both_formats_and_only_native_plugin_commands() 
     let f = Fixture::new();
     let value = report(&f.run(&[]), 0, "installed");
     assert_eq!(value["completed_steps"].as_array().unwrap().len(), 7);
-    assert_eq!(value["files_written"].as_array().unwrap().len(), 8);
+    assert_eq!(value["files_written"].as_array().unwrap().len(), 9);
     let plugin = f.install.join("plugin/due");
     assert_eq!(
         fs::read(plugin.join("plugin.json")).unwrap(),
@@ -205,6 +205,10 @@ fn standalone_apply_materializes_both_formats_and_only_native_plugin_commands() 
     assert_eq!(
         fs::read(plugin.join("skills/delegate/SKILL.md")).unwrap(),
         include_bytes!("../../../plugin/due/skills/delegate/SKILL.md")
+    );
+    assert_eq!(
+        fs::read(plugin.join("skills/work-loop/SKILL.md")).unwrap(),
+        include_bytes!("../../../plugin/due/skills/work-loop/SKILL.md")
     );
     for file in [
         "plugin.json",
@@ -325,7 +329,7 @@ fn failed_native_step_preserves_local_package_and_stops_before_later_hosts() {
             .unwrap()
             .contains("synthetic setup failure")
     );
-    assert_eq!(value["files_written"].as_array().unwrap().len(), 8);
+    assert_eq!(value["files_written"].as_array().unwrap().len(), 9);
     assert!(
         f.install
             .join("plugin/due/skills/delegate/SKILL.md")
@@ -586,7 +590,7 @@ fn cancellation_reports_partial_setup_and_settles_its_native_processes() {
         value["failed_step"]["stderr"],
         "native setup awaiting completion"
     );
-    assert_eq!(value["files_written"].as_array().unwrap().len(), 8);
+    assert_eq!(value["files_written"].as_array().unwrap().len(), 9);
     assert!(!f.install.join(".due-init.lock").exists());
     for pid in fs::read_to_string(pids).unwrap().lines() {
         let output = Command::new("/bin/ps")
