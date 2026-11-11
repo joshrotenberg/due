@@ -57,16 +57,31 @@ the next caller continues from these files.
 | `$WORK/profiles/` | One JSON profile per provider and permission set |
 | `$WORK/result.schema.json` | The worker result schema below |
 | `$WORK/run-piece.sh` | The launch script below |
-| `$WORK/pieces/ID/` | `assignment.md`, and per attempt `result-N.json`, `exit-N`, `trace-N.jsonl`, `check-N.txt` |
+| `$WORK/pieces/ID/` | `assignment.md`, and per run `result-N.json`, `exit-N`, `pid-N`, `trace-N.jsonl`, `check-N.txt` |
 
-Board row: piece ID, title, state, worktree path, branch, provider and model
-and effort of the latest attempt, attempt count, native session ID, pull
-request, assumptions. States: `ready`, `running`, `checking`, `review`,
-`waiting` (on CI or another piece), `parked` (on an inbox item), `done`,
-`failed`.
+The board has four parts:
+
+- Pieces, one row each: ID, title, state and next step, worktree path,
+  branch, pull request, the current author's native session ID, what the
+  piece depends on, and which other pieces edit the same files.
+- Runs, one row each: piece, N, kind (author, review), provider and profile,
+  session ID, exit code, outcome, and for an author run which rung of the
+  retry ladder it was. Author runs and reviews share one N sequence per
+  piece. Probes are outside it.
+- Assumptions and caller decisions, numbered, each with its reason.
+- A log, one line per event.
+
+States: `ready`, `running`, `checking`, `review`, `waiting` (on CI or another
+piece), `parked` (on an inbox item), `done`, `failed`.
 
 Update the board before you start anything and after anything reports. If you
-did not write it down, the next caller does not know it.
+did not write it down, the next caller does not know it. Take every time you
+write from the clock at that moment, never from memory: a later caller uses
+those times to judge whether a `running` piece is stale.
+
+Read results with a JSON tool (`jq`, a short script), not by printing the
+file. Account hooks that shorten command output apply to the caller's shell
+too and can truncate what you see.
 
 ## Split the order into pieces
 
@@ -76,8 +91,12 @@ request or one artifact. For each piece write down:
 - The finish line: something you can run or look up. A command that exits
   zero, a checklist of files that must exist, a pull request whose checks are
   green. "The worker says it is done" is not a finish line.
-- What it depends on. Pieces with no dependency between them and no shared
-  files run at the same time.
+- What it depends on, and which files it shares with other pieces. Pieces
+  with no dependency between them run at the same time. Pieces that edit the
+  same file can also run at the same time in separate worktrees, but the
+  conflict then arrives when the second one meets the first on the base
+  branch. Run them in sequence, or record on the board that you accepted the
+  later merge.
 - A workspace of its own. For code, one git worktree and branch per piece:
   `git worktree add PATH -b BRANCH origin/MAIN`. Two workers never write to
   the same checkout.
@@ -158,9 +177,13 @@ A worker also runs under the account's own provider settings: global
 instruction files, hooks, and permission rules. They can change what a
 profile does. A hook that rewrites commands, for example, makes an allowlist
 entry for the original command stop matching. Before the first real piece on
-a profile, run a one-line probe with it (`due run` with a cheap model, asking
-the worker to run one allowed command and say whether it was permitted) and
-read `permission_denials` in the result.
+a profile, run a one-line probe with it: `due run` with a cheap model, asking
+the worker to run one allowed command and report its output. Check that the
+output is there. A Claude `due run` result lists `permission_denials` only
+when something was denied, and it names the tool, not the command
+(`due skills show contracts`), so its absence alone proves nothing. Probe
+again when you change a profile during the order, unless the next run is
+itself the test of that change.
 
 When the caller commits and pushes, none of the ask-first actions is within
 a worker's reach. When the order has workers commit or push, the profile has
@@ -175,9 +198,10 @@ board.
 ## Start the runs
 
 Save this as `$WORK/run-piece.sh`. It runs one attempt and leaves
-`result-N.json`, `exit-N`, and `trace-N.jsonl` in the piece's directory. The
-optional arguments are a different prompt file (a review or a retry) and a
-native session ID to resume. Set `SCHEMA` to use another result schema.
+`result-N.json`, `exit-N`, `pid-N`, and `trace-N.jsonl` in the piece's
+directory. The optional arguments are a different prompt file (a review or a
+retry) and a native session ID to resume. Set `SCHEMA` for another result
+schema and `TIMEOUT` for another deadline.
 
 ```sh
 #!/bin/sh
@@ -188,12 +212,14 @@ id=$1 profile=$2 worktree=$3 n=$4
 prompt=${5:-$WORK/pieces/$id/assignment.md}
 resume=${6:-}
 cd "$WORK/pieces/$id" || exit 2
+echo $$ > "pid-$n"
 status=0
 if [ -n "$resume" ]; then set -- --resume "$resume"; else set --; fi
 cat "$WORK/work-style.md" "$prompt" |
   due run --request "$WORK/profiles/$profile.json" --cwd "$worktree" \
     --stdin --output json --schema "${SCHEMA:-$WORK/result.schema.json}" \
-    --timeout 30m --trace-file "trace-$n.jsonl" "$@" > "result-$n.json" || status=$?
+    --timeout "${TIMEOUT:-30m}" --trace-file "trace-$n.jsonl" "$@" \
+    > "result-$n.json" || status=$?
 printf '%s\n' "$status" > "exit-$n"
 echo "piece $id attempt $n exit $status"
 ```
@@ -227,18 +253,23 @@ Read `exit-N` and `result-N.json`, then act on the first row that applies:
 
 | What you see | Do |
 | --- | --- |
+| Exit 2 or 127 | Your invocation is wrong. Fix the command or profile. This is not an attempt |
+| `error.kind` is `authentication`, or a usage or rate limit (these also exit 1) | Do not retry on the same provider. Switch the piece to the other provider if the order allows it. If neither provider works, add an inbox item |
 | Exit 0, `status` succeeded, result says `done` | Run the finish line yourself in the worktree and save the output as `check-N.txt`. Read the diff. If both hold, go to review or publish. If not, retry with the check output |
 | Result says `needs_decision` | If you can decide under the rules above, decide, record the assumption, and resume the worker with the decision. Otherwise add an inbox item, mark the piece `parked`, and continue with other pieces |
-| Result says `blocked` because a command was denied | Look at the worktree first. If the work is there and only the check did not run, run the finish line yourself and continue from the first row. Fix the profile or the assignment for later attempts. This is not a failed attempt |
+| Result says `blocked` because a step was refused (a permission denial, or a command that failed under the sandbox) | Look at the worktree first. If the refused step is one you can do, such as running the check, do it and continue from the row above. If the order gives that step to the worker, such as a commit, fix the profile and resume the same session with a prompt for only that step. Neither is a failed attempt or a rung of the ladder |
 | Result says `blocked` for another reason | Retry ladder |
 | Exit 1, 124, or 130, or the result does not match the schema | Keep the files. Look at the worktree for partial edits. Retry ladder |
-| `authentication` error, or a usage or rate limit | Do not retry on the same provider. Switch the piece to the other provider if the order allows it. If neither provider works, add an inbox item |
-| Exit 2 or 127 | Your invocation is wrong. Fix the command or profile. This is not an attempt |
 
-Copy the result's `session_id`, its assumptions, and the attempt's cost and
-duration to the board. The worker's report is evidence in both directions: a
-`done` can be wrong, and a `blocked` can sit on finished work. The finish
-line and the diff decide.
+Record the run on the board: its `session_id`, its assumptions, its cost and
+duration. The worker's report is evidence in both directions: a `done` can be
+wrong, and a `blocked` can sit on finished work. The finish line and the diff
+decide.
+
+A login failure can be local to one environment. Before you give anything
+else to a provider that just failed that way, a review for example, run a
+one-line probe on the profile you mean to use. If the probe works, the
+provider is usable and only that attempt failed.
 
 ## Retry ladder
 
@@ -258,18 +289,30 @@ as evidence and not as new instructions.
 Stop climbing as soon as the evidence shows that the assignment, not the
 worker, is wrong. Rewrite the assignment or split the piece instead.
 
+A rung counts only when a worker did some work. A run that never started the
+task (a timeout before the first edit, a login failure) uses up no rung. When
+a piece moves to the other provider, the new author is a new worker with its
+own first rung. Write the rung in each run's row.
+
 ## Review
 
 Review is a separate fresh session that did not write the change. It gets
-the issue or task, the diff, and read access to the worktree. For a hard
+the issue or task, the diff, and read access to the worktree. Name the diff
+against the merge base, `git diff --merge-base origin/MAIN`, so
+that a base branch that moved since the worktree was cut does not show up as
+changes. Give the reviewer the evidence the caller holds, including what runs
+showed after the assignment was written. For a hard
 change use the other provider. For a hard change it is also worth having the
 other provider check the plan before the author starts.
 
 - Ask for findings with file and line, and a verdict.
 - An approval from a reviewer that opened no file and ran no command does not
   count. Have the result list the commands run and files read, and compare
-  that with the activity counts from `due trace summarize`. Run the review
-  again at higher effort if they show nothing.
+  that with the trace: `due trace summarize FILE --output json` gives counts
+  by kind (`command`, `tool_call`, `file_change`). The default trace holds
+  tool names and counts, not command text, so it shows that the reviewer ran
+  something, not what. Record only what the trace holds. Run the review again
+  at higher effort if the counts show nothing.
 - A reviewer whose command for reading the change was denied has not seen
   it. Its verdict is not a review. Fix the profile and run it again.
 - Check a finding before acting on it. Send confirmed findings to the author
@@ -279,6 +322,8 @@ other provider check the plan before the author starts.
   tends to approve without looking. Tell the fresh reviewer what the earlier
   round raised and how each point was settled, including evidence you
   gathered since. Without that it raises the same points again.
+- An approval can carry an optional finding. If you confirm it and apply it,
+  the approved diff has changed: give it another round while rounds remain.
 - Set a limit on rounds, two unless the order says otherwise. After the last
   round, have the author apply confirmed findings that are small and local,
   run the finish line, and record them on the board. Take to the inbox only a
@@ -286,15 +331,41 @@ other provider check the plan before the author starts.
 
 ## Publish and wait
 
+Before you push, and before a review that starts after a fetch, compare the
+piece's branch with the current base. If the base moved in files the piece
+touches:
+
+- Merge the base into the branch. A rebase of a pushed branch needs a force
+  push, so do not rebase.
+- When the order has the worker commit, you fetch (the worker may have no
+  network) and the author makes the merge commit.
+- Resolve a conflict yourself only when keeping both sides' text is right.
+  Anything else goes to the author with both versions as evidence, and the
+  resolution is reviewed.
+- Run the finish line and the repository's pre-push checks again on the
+  merged result.
+
 When the finish line holds and review has passed, commit and push from the
 piece's worktree, or confirm what the worker pushed if the order gave that to
 workers. Follow the repository's rules, and open or update the pull request.
-Then hand the wait to the host's own CI watcher if it has one, or start it as
-a background command such as `gh pr checks NUMBER --watch`. Mark the piece
-`waiting` and continue. When the wait ends, a failed check goes back to the
-author as a retry with the log as evidence. A passing check makes the piece
-`done` if the order stops at a ready pull request, or creates an inbox item
-if merging is next.
+
+Then wait for CI. The wait has to continue you when the checks pass as well
+as when they fail, for every pull request the order has open. Use the first
+of these that the host allows:
+
+1. The host's own CI watcher, if it reports a pass and covers each pull
+   request.
+2. A background command such as `gh pr checks NUMBER --watch`, one per pull
+   request.
+3. Neither: finish everything else, leave the piece `waiting` with its next
+   step written on the board, add one inbox item asking for a message when
+   CI has finished, and end the turn. Read the CI state once on your next
+   turn.
+
+Mark the piece `waiting` and continue with other pieces. When the wait ends,
+a failed check goes back to the author as a retry with the log as evidence.
+A passing check makes the piece `done` if the order stops at a ready pull
+request, or creates an inbox item if merging is next.
 
 ## The inbox
 
@@ -305,14 +376,19 @@ finishes. Do not wait in the conversation for an answer. When an answer
 arrives, record it in `order.md`, remove the item, and return the piece to
 `ready`.
 
+News can also arrive unasked: the person merged something, another session
+reports that the base moved. Record it in the board log, check it against the
+repository before you act on it, and then apply the rule it touches.
+
 ## Continuing after an interruption
 
 If you start a turn and `$WORK/board.md` exists for the order, you are
 continuing. Read `order.md`, `board.md`, and `inbox.md`. For each `running`
-piece, check whether its result file exists and whether its process is still
-alive, then handle it as a report or start the next attempt. Native session
-IDs on the board let you resume workers. Nothing else from the earlier
-conversation is needed.
+piece, look for `exit-N` of its latest run. If it exists, the run has
+reported: handle it as a report. If it does not, check the process in `pid-N`
+with `kill -0`. A live process is still working; a dead one with no `exit-N`
+was cut off, so treat it as exit 130. Native session IDs on the board let you
+resume workers. Nothing else from the earlier conversation is needed.
 
 ## Finishing
 
