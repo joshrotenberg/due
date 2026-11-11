@@ -16,6 +16,7 @@ edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 publish = false
+repository = "https://github.com/joshrotenberg/due"
 
 [workspace.dependencies]
 due-core = { path = "crates/due-core", default-features = false }
@@ -42,3 +43,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false }
 uuid = "1"
 which = "8"
+
+[profile.dist]
+inherits = "release"
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.34.0"
+packages = ["due-cli"]
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+hosting = ["github"]
+installers = ["shell"]
+install-path = "~/.local/bin"
+install-updater = false
+unix-archive = ".tar.gz"
+checksum = "sha256"
+source-tarball = false
