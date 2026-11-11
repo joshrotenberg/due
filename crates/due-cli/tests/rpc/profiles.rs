@@ -129,8 +129,10 @@ fn profiles_resolve_once_and_preserve_native_policy_for_multiple_turns() {
 #[test]
 fn checked_in_workspace_profile_keeps_every_native_restriction() {
     let mut client = Client::new(false);
-    let value: Value =
-        serde_json::from_str(include_str!("../../examples/codex-workspace-profile.json")).unwrap();
+    let value: Value = serde_json::from_str(include_str!(
+        "../../../../examples/codex-workspace-profile.json"
+    ))
+    .unwrap();
     let request = profile(&client, value.clone());
     let mut input = options(&client, &request);
     input["cwd"] = json!(client.dir.path());

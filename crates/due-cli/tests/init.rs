@@ -200,11 +200,11 @@ fn standalone_apply_materializes_both_formats_and_only_native_plugin_commands() 
     let plugin = f.install.join("plugin/due");
     assert_eq!(
         fs::read(plugin.join("plugin.json")).unwrap(),
-        include_bytes!("../plugin/due/plugin.json")
+        include_bytes!("../../../plugin/due/plugin.json")
     );
     assert_eq!(
         fs::read(plugin.join("skills/delegate/SKILL.md")).unwrap(),
-        include_bytes!("../plugin/due/skills/delegate/SKILL.md")
+        include_bytes!("../../../plugin/due/skills/delegate/SKILL.md")
     );
     for file in [
         "plugin.json",
@@ -379,7 +379,7 @@ fn rerun_refreshes_only_owned_package_and_lock_is_exclusive() {
     );
     assert_eq!(
         fs::read(skill).unwrap(),
-        include_bytes!("../plugin/due/skills/delegate/SKILL.md")
+        include_bytes!("../../../plugin/due/skills/delegate/SKILL.md")
     );
     let metadata: Value = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
     assert_eq!(metadata["cli_version"], env!("CARGO_PKG_VERSION"));

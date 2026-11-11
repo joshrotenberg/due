@@ -224,7 +224,7 @@ fn guide_routes_name_catalog_entries() {
     documents.push((
         "plugin/due/skills/delegate".into(),
         fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/due/skills/delegate/SKILL.md"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin/due/skills/delegate/SKILL.md"),
         )
         .unwrap(),
     ));
@@ -335,7 +335,8 @@ fn standalone_profile_guide_matches_the_workspace_example() {
         .expect("profile guide must ship the full workspace profile");
     let example: Value = serde_json::from_slice(
         &fs::read(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/codex-workspace-profile.json"),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples/codex-workspace-profile.json"),
         )
         .unwrap(),
     )

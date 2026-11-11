@@ -6,7 +6,7 @@
 //! Accuracy over no-change build speed: this script reruns on every Cargo
 //! invocation that builds this package, so the reported revision and tree
 //! state are never cached from an earlier build. Precise file watches cannot
-//! be both cheap and complete: a new untracked file at the package root (for
+//! be both cheap and complete: a new untracked file in the checkout (for
 //! example an input a committed `include_str!` was waiting for) would not
 //! rerun them. The cost is that each `cargo build` or `cargo test` recompiles
 //! and relinks this package's own targets (the `due` binary and its test
@@ -24,8 +24,9 @@ use std::{env, ffi::OsStr, path::PathBuf};
 const ALWAYS_RERUN_SENTINEL: &str = "due-build-info-never-created";
 
 fn main() {
-    let root = env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR");
-    let root = PathBuf::from(root);
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.join("../..");
     let out_dir = env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR");
     let sentinel = PathBuf::from(out_dir).join(ALWAYS_RERUN_SENTINEL);
     match sentinel.to_str() {
@@ -39,7 +40,7 @@ fn main() {
             let mut suffix = 0_u64;
             loop {
                 let name = format!("{ALWAYS_RERUN_SENTINEL}-{suffix}");
-                if root.join(&name).symlink_metadata().is_err() {
+                if manifest_dir.join(&name).symlink_metadata().is_err() {
                     println!("cargo::rerun-if-changed={name}");
                     break;
                 }
@@ -48,7 +49,7 @@ fn main() {
         }
     }
 
-    let identity = git_identity::probe(&root, OsStr::new("git"));
+    let identity = git_identity::probe(&workspace_root, OsStr::new("git"));
     println!(
         "cargo::rustc-env=DUE_BUILD_SOURCE_STATUS={}",
         identity.status.as_str()

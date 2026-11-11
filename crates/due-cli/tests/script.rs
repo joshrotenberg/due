@@ -53,7 +53,7 @@ impl Fixture {
         let native = self.directory.path().join("native");
         fs::write(
             &native,
-            include_bytes!("../crates/due-core/tests/fixtures/session-agent.sh"),
+            include_bytes!("../../due-core/tests/fixtures/session-agent.sh"),
         )
         .unwrap();
         fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
@@ -318,7 +318,7 @@ fn interrupt_completed_unconsumed_turn_resolves_without_native_interrupt_and_wai
 #[test]
 fn checked_in_example_accepts_only_after_independent_verification_passes() {
     for provider in ["claude", "codex"] {
-        let fixture = Fixture::new(include_str!("../examples/harness/supervision.js"));
+        let fixture = Fixture::new(include_str!("../../../examples/harness/supervision.js"));
         let profile = fixture.provider(provider);
         // The checker inspects actual native input, independently of worker text.
         let verify = json!({"program":"python3","args":["-c",

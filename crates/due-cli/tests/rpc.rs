@@ -75,7 +75,7 @@ impl Client {
         let binary = dir.path().join("provider");
         fs::write(
             &binary,
-            include_bytes!("../crates/due-core/tests/fixtures/session-agent.sh"),
+            include_bytes!("../../due-core/tests/fixtures/session-agent.sh"),
         )
         .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();

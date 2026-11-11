@@ -42,7 +42,7 @@ and document output include `schema_version: 1` and `cli_version`; unknown names
 return a structured `invalid_input` error and exit 2 in JSON mode. Normal argument
 syntax errors use stderr and exit 2. These commands are read-only and do not need
 a provider installation. The canonical instructions live in
-[`embedded-skills/`](../embedded-skills) and are included at compile time;
+[`embedded-skills/`](../crates/due-cli/embedded-skills) and are included at compile time;
 changing them requires rebuilding the binary.
 
 Short `-h` output lists commands and options compactly; `--help` adds examples
@@ -223,7 +223,7 @@ raw RPC, including the narrower native options resident sessions accept.
 
 Only `schema_version: 1` is required in the file. A provider and non-whitespace
 prompt must be present after merging, or use `--stdin` for the prompt.
-The [request schema](../schemas/run-request.schema.json) describes the profile's
+The [request schema](../crates/due-cli/schemas/run-request.schema.json) describes the profile's
 structural shape; `due schema request` exports the installed version offline.
 The [full request](../examples/run-request.json) and [profile](../examples/profile.json)
 are examples. There is no profile search path, inheritance chain, or config store.

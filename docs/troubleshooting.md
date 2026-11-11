@@ -206,13 +206,13 @@ ls -l "$due_link"
 readlink "$due_link"
 # Confirm these observations match the intended source revision and original target.
 cd "$source_root" || exit 1
-cargo build --offline --release --locked --target-dir "$target_dir"
+cargo build --offline --release --locked -p due-cli --target-dir "$target_dir"
 ```
 
 Use the supported Rust toolchain (minimum 1.90); record `rustc --version` and
 `cargo --version`. This offline command requires cached locked dependencies.
 If diagnostics confirm a missing dependency and retrieval is authorized, use
-`cargo build --release --locked --target-dir "$target_dir"` instead. Retain
+`cargo build --release --locked -p due-cli --target-dir "$target_dir"` instead. Retain
 `Cargo.lock`, exact wrapper pins and the default feature set. A network-blocked
 worker reports the missing dependency to the caller; it does not expand grants.
 Do not pull, reset, clean, use `cargo install --force`, or relink to an experimental

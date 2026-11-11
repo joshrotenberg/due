@@ -62,8 +62,11 @@ library. Each exposes the operations and lifecycle its interface can support.
 | `due-harness` | The embedded language runtime and workflow API. Today JavaScript launches a Due RPC child. A future in-process core backend could make the CLI's harness feature independent of RPC. |
 | `due-plugin` | Library for package assets and managed installation. The CLI exposes `due init` and its setup report. |
 
-The default CLI build includes RPC and JavaScript. A build with no default
-features retains the one-shot command and offline discovery.
+The root Cargo manifest defines the workspace and shares dependency
+declarations. The executable, embedded guides, schemas, and CLI integration
+tests live in `crates/due-cli`. The default CLI build includes RPC and
+JavaScript. A build with no default features retains the one-shot command and
+offline discovery.
 
 Library entry points take explicit configuration and return results to the
 embedding application. The executable owns flags, process signals, exit codes,

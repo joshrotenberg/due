@@ -1,19 +1,19 @@
 [package]
 name = "due-mcp"
 version = "0.2.1"
-edition = "2024"
-rust-version = "1.90"
+edition.workspace = true
+rust-version.workspace = true
 description = "Stdio MCP adapter for due-core"
-license = "MIT OR Apache-2.0"
-publish = false
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
-due-core = { path = "../due-core" }
-schemars = "1.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["io-util", "macros"] }
-tower-mcp = { version = "=0.25.0", default-features = false }
+due-core = { workspace = true, features = ["default"] }
+schemars.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros"] }
+tower-mcp.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time"] }

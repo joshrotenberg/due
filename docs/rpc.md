@@ -21,7 +21,7 @@ above this wire contract with the same Rust process ownership used in the
 operations without embedding JavaScript or using the bundled client. `due run`
 keeps its one-shot behavior. Reduced source builds can select only `--features rpc`
 with `--no-default-features`. For an MCP client that needs multiple workers on
-one stdio connection, see the [MCP adapter guide](../embedded-skills/mcp/SKILL.md).
+one stdio connection, see the [MCP adapter guide](../crates/due-cli/embedded-skills/mcp/SKILL.md).
 
 ## Wire contract
 
@@ -411,7 +411,7 @@ by the bounded journal.
 ## Checking the interface
 
 ```sh
-cargo test --locked --features rpc --test rpc
+cargo test --locked -p due-cli --features rpc --test rpc
 cargo clippy --locked --all-targets --features rpc -- -D warnings
 cargo test --locked --all-features
 cargo +1.90 check --locked --features rpc
@@ -429,7 +429,7 @@ by Node-style socket-backed stdio.
 To compare CLI resume with RPC using a real provider and a disposable workspace:
 
 ```sh
-cargo build --locked --release --features rpc
+cargo build --locked --release -p due-cli --features rpc
 node examples/session-harness/compare.mjs --due ./target/release/due \
   --provider codex --model gpt-6-astra --cwd /path/to/disposable-workspace \
   --artifacts /path/to/fresh-comparison --backend all

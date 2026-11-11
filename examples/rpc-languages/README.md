@@ -27,7 +27,7 @@ is required to use the raw protocol from another language or process.
 Normal Due builds include RPC. Build Due, then the separate comparison runner:
 
 ```sh
-cargo build --locked --release
+cargo build --locked --release -p due-cli
 cargo build --locked --release --manifest-path examples/rpc-languages/Cargo.toml
 ```
 
