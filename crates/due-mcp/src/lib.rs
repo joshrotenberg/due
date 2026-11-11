@@ -65,6 +65,7 @@ struct App {
     config: Config,
     profiles: Option<BTreeMap<String, WorkerOptions>>,
     wait_slots: Semaphore,
+    blocking_slots: Semaphore,
 }
 
 impl App {
@@ -239,6 +240,14 @@ fn router(app: Arc<App>) -> McpRouter {
                         until: if input.any { WaitUntil::Any } else { WaitUntil::All },
                         timeout: Some(Duration::from_millis(timeout_ms)),
                     };
+                    let _blocking = if timeout_ms == 0 {
+                        None
+                    } else {
+                        match app.blocking_slots.try_acquire() {
+                            Ok(permit) => Some(permit),
+                            Err(_) => return tool_error(json!({"kind":"busy","message":"too many pending waits or controls; wait on several runs together or poll with timeout_ms: 0"})),
+                        }
+                    };
                     outcome(app.engine.wait(&input.runs, options).await)
                 })
                 .build(),
@@ -247,6 +256,9 @@ fn router(app: Arc<App>) -> McpRouter {
             ToolBuilder::new("interrupt")
                 .description("Interrupt this exact run and wait for its settlement.")
                 .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Run>| async move {
+                    let Ok(_slot) = app.blocking_slots.try_acquire() else {
+                        return tool_error(json!({"kind":"busy","message":"too many pending waits or controls; retry after one settles"}));
+                    };
                     outcome(app.engine.interrupt(&input.run).await)
                 })
                 .build(),
@@ -263,6 +275,9 @@ fn router(app: Arc<App>) -> McpRouter {
             ToolBuilder::new("release_session")
                 .description("Close an idle or ended worker and discard its retained runs and items. Read them before release.")
                 .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Release>| async move {
+                    let Ok(_slot) = app.blocking_slots.try_acquire() else {
+                        return tool_error(json!({"kind":"busy","message":"too many pending waits or controls; retry after one settles"}));
+                    };
                     outcome(app.engine.release_session(&input.session).await.map(|()| json!({"released":true})))
                 })
                 .build(),
@@ -355,8 +370,10 @@ fn connection(mut config: Config) -> Result<(Arc<App>, StdioTransport), BoxError
         engine: Engine::new(config.limits.clone())?,
         config,
         profiles,
-        // Observation calls must leave room for the controls that settle runs.
-        wait_slots: Semaphore::new(MAX_CONCURRENT_REQUESTS - 1),
+        // Long observations leave room to initiate a control. A control
+        // awaiting native settlement must also leave room for a response.
+        wait_slots: Semaphore::new(MAX_CONCURRENT_REQUESTS - 2),
+        blocking_slots: Semaphore::new(MAX_CONCURRENT_REQUESTS - 1),
     });
     let transport = StdioTransport::without_server_notifications(router(app.clone()))
         .max_concurrent_requests(MAX_CONCURRENT_REQUESTS)

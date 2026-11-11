@@ -1269,14 +1269,22 @@ async fn racing_followups_admit_exactly_one_turn_for_a_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_during_blocked_startup_reports_pending_settlement_and_can_be_retried() {
+async fn shutdown_closes_idle_siblings_when_startup_is_stuck() {
     let fixture = Fixture::new(Provider::Codex);
-    fs::write(fixture.directory.path().join("hold-open"), "hold").unwrap();
+    let idle = Fixture::new(Provider::Codex);
     let engine = Engine::new(Limits {
-        settlement_timeout: Duration::from_millis(50),
+        settlement_timeout: Duration::from_millis(500),
         ..Limits::default()
     })
     .unwrap();
+    let idle_run = engine.spawn(idle.assignment("finish")).await.unwrap();
+    let idle_snapshot = finished(&engine, &idle_run).await;
+    assert!(matches!(
+        idle_snapshot.result.unwrap().status,
+        Status::Succeeded
+    ));
+
+    fs::write(fixture.directory.path().join("hold-open"), "hold").unwrap();
     let run = engine
         .spawn(fixture.assignment("not dispatched"))
         .await
@@ -1284,6 +1292,9 @@ async fn shutdown_during_blocked_startup_reports_pending_settlement_and_can_be_r
     exists(fixture.directory.path().join("open-waiting")).await;
     let pending = engine.shutdown().await;
     let snapshot = engine.inspect(&run).unwrap();
+    let idle_exited = idle.directory.path().join("exited").is_file();
+    let mut reader = engine.subscribe(&idle_snapshot.session, 0).unwrap();
+    let idle_closed = reader.read_available(256).unwrap().closed;
     // Always release the fixture before assertions so even a failure can settle.
     fs::write(fixture.directory.path().join("release-open"), "release").unwrap();
     assert_eq!(pending.unwrap_err().kind, ErrorKind::Settlement);
@@ -1295,6 +1306,12 @@ async fn shutdown_during_blocked_startup_reports_pending_settlement_and_can_be_r
     );
     engine.shutdown().await.unwrap();
     reaped(fixture.pid()).await;
+    reaped(idle.pid()).await;
+    assert!(
+        idle_exited,
+        "stalled startup prevented idle sibling cleanup"
+    );
+    assert!(idle_closed, "idle sibling's journal did not close");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

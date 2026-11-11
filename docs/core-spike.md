@@ -179,11 +179,11 @@ it sends no turn.
 ## Ownership, failures and bounds
 
 Call `engine.shutdown().await` before releasing its Tokio runtime. Shutdown
-rejects new work, cancels active runs and closes every native worker. Repeated
-calls preserve cleanup failures; earlier successful assignment results remain
-unchanged. If shutdown returns a settlement error while runs are still active,
-keep the runtime alive and retry once the runs have settled so idle workers
-can close too. Dropping a polled shutdown future leaves its independent
+rejects new work, cancels active runs and settles workers independently. An
+unsettled run does not prevent cleanup of idle or settled workers. Repeated
+calls preserve cleanup failures and earlier assignment results. If shutdown
+returns a settlement error while runs are still active, keep the runtime alive
+and retry once those runs have settled. Dropping a polled shutdown future leaves its independent
 cleanup owner running through its configured bounds. Run snapshots remain
 readable after shutdown.
 Drop requests best-effort cleanup on the captured runtime; it cannot report
