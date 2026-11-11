@@ -179,6 +179,12 @@ the denied tool, and a detailed trace can show the Bash input checked if
 Claude reported it. Its absence does not prove the command ran, and the trace
 does not audit what a hook executed.
 
+A Claude worker limited to file tools and a Bash allowlist of build and test
+commands cannot delete a file: the file tools have no delete and `rm` is not
+allowed. When the task removes tracked files, add `git rm` to the allowlist
+(for example `Bash(git rm:*)`) and name the paths in the assignment. It stages
+each deletion.
+
 Use the profile from each surface:
 
 ```sh
