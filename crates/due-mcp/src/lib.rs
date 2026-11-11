@@ -283,7 +283,12 @@ fn router(app: Arc<App>) -> McpRouter {
                     let Ok(_slot) = app.blocking_slots.try_acquire() else {
                         return tool_error(json!({"kind":"busy","message":"too many pending waits or controls; retry after one settles"}));
                     };
-                    outcome(app.engine.release_session(&input.session).await.map(|()| json!({"released":true})))
+                    outcome(app.engine.release_session_with_report(&input.session).await.map(|report| {
+                        match report.exit_error {
+                            Some(message) => json!({"released":true,"exit_error":message}),
+                            None => json!({"released":true}),
+                        }
+                    }))
                 })
                 .build(),
         )

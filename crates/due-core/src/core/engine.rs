@@ -16,7 +16,7 @@ use tokio::{
 use super::*;
 use crate::{
     result::{ErrorKind as RunErrorKind, RunError, RunResult, Status},
-    session::{Manager, OpenOptions, SessionItems},
+    session::{CloseError, Manager, OpenOptions, SessionItems},
 };
 
 // The wrapper open operation includes pipe creation and native initialization.
@@ -39,7 +39,7 @@ struct Worker {
     handle: Mutex<Option<String>>,
     native: Mutex<Option<String>>,
     unavailable: AtomicBool,
-    cleanup: AsyncMutex<Option<Result<(), String>>>,
+    cleanup: AsyncMutex<Option<Result<(), CloseError>>>,
     items: Arc<SessionItems>,
 }
 struct Session {
@@ -572,10 +572,23 @@ impl Engine {
     /// Read any results you need first. After success, new lookups by the old
     /// references fail. Existing journal readers can drain to closure, and
     /// saved native history remains available under the provider's own rules.
-    /// An active run or concurrent release returns Busy. Cleanup failure
-    /// leaves the records and capacity reserved. Dropping the caller's future
-    /// after admission leaves settlement with the engine.
+    /// An active run or concurrent release returns Busy. Unconfirmed cleanup
+    /// leaves the records and capacity reserved. An abnormal exit confirmed by
+    /// the wrapper still releases capacity. To keep the exit diagnostic, use
+    /// [`Self::release_session_with_report`].
+    /// Dropping the caller's future after admission leaves settlement with the engine.
     pub async fn release_session(&self, session: &SessionRef) -> Result<(), Error> {
+        self.release_session_with_report(session).await.map(|_| ())
+    }
+
+    /// Release an idle session and report any confirmed abnormal provider exit.
+    ///
+    /// On success the session and retained runs are retired. An unconfirmed
+    /// exit returns a settlement error and leaves the records and capacity reserved.
+    pub async fn release_session_with_report(
+        &self,
+        session: &SessionRef,
+    ) -> Result<ReleaseReport, Error> {
         let worker = {
             let mut state = self.inner.state.lock().unwrap();
             if state.closing {
@@ -599,23 +612,25 @@ impl Engine {
             .runtime
             .spawn(async move {
                 let cleanup = close_worker(&worker, inner.limits.settlement_timeout).await;
-                worker.items.finish(cleanup.as_ref().err().cloned());
+                worker
+                    .items
+                    .finish(cleanup.as_ref().err().map(ToString::to_string));
                 let mut state = inner.state.lock().unwrap();
-                match cleanup {
-                    Ok(()) => {
-                        state.sessions.remove(&session);
-                        state
-                            .runs
-                            .retain(|_, entry| entry.snapshot.session != session);
-                        drop(state);
-                        inner.changed.notify_waiters();
-                        Ok(())
-                    }
-                    Err(error) => {
+                let exit_error = match cleanup {
+                    Ok(()) => None,
+                    Err(CloseError::AbnormalExit(message)) => Some(message),
+                    Err(CloseError::Unconfirmed(message)) => {
                         state.sessions.get_mut(&session).unwrap().releasing = false;
-                        Err(Error::new(ErrorKind::Settlement, error))
+                        return Err(Error::new(ErrorKind::Settlement, message));
                     }
-                }
+                };
+                state.sessions.remove(&session);
+                state
+                    .runs
+                    .retain(|_, entry| entry.snapshot.session != session);
+                drop(state);
+                inner.changed.notify_waiters();
+                Ok(ReleaseReport { exit_error })
             })
             .await
             .map_err(|error| {
@@ -795,8 +810,10 @@ impl Inner {
                     return Err(format!("shutdown requested; run {} has not settled", run.0));
                 }
                 let result = close_worker(&worker, bound).await;
-                worker.items.finish(result.as_ref().err().cloned());
-                result
+                worker
+                    .items
+                    .finish(result.as_ref().err().map(ToString::to_string));
+                result.map_err(|error| error.to_string())
             });
         }
         let mut errors = Vec::new();
@@ -935,16 +952,18 @@ async fn at(deadline: Option<TokioInstant>) {
         None => std::future::pending().await,
     }
 }
-async fn close_worker(worker: &Worker, bound: Duration) -> Result<(), String> {
+async fn close_worker(worker: &Worker, bound: Duration) -> Result<(), CloseError> {
     let mut cleanup = worker.cleanup.lock().await;
     if let Some(result) = &*cleanup {
         return result.clone();
     }
     worker.unavailable.store(true, Ordering::Release);
-    let result = match timeout(bound, worker.manager.shutdown()).await {
+    let result = match timeout(bound, worker.manager.shutdown_with_status()).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(error)) => Err(error),
-        Err(_) => Err("native shutdown deadline exceeded; settlement unconfirmed".into()),
+        Err(_) => Err(CloseError::Unconfirmed(
+            "native shutdown deadline exceeded; settlement unconfirmed".into(),
+        )),
     };
     *cleanup = Some(result.clone());
     result

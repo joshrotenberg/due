@@ -286,6 +286,81 @@ async fn release_reclaims_both_limits_without_affecting_another_worker() {
 }
 
 #[tokio::test]
+async fn confirmed_abnormal_exit_reclaims_session_and_run_capacity() {
+    for provider in [Provider::Claude, Provider::Codex] {
+        let crashed = Fixture::new(provider);
+        let healthy = Fixture::new(Provider::Codex);
+        let engine = Engine::new(Limits {
+            max_sessions: 2,
+            max_runs: 2,
+            ..Limits::default()
+        })
+        .unwrap();
+        let first = engine
+            .spawn(crashed.assignment("native-exit-error"))
+            .await
+            .unwrap();
+        let stopped = finished(&engine, &first).await;
+        assert!(matches!(
+            stopped.result.as_ref().unwrap().status,
+            Status::Failed
+        ));
+        let mut reader = engine.subscribe(&stopped.session, 0).unwrap();
+        let sibling = engine.spawn(healthy.assignment("first")).await.unwrap();
+        let sibling = finished(&engine, &sibling).await;
+        assert_eq!(sibling.result.as_ref().unwrap().text, "turn 1");
+        assert_eq!(
+            engine
+                .spawn(crashed.assignment("fresh"))
+                .await
+                .unwrap_err()
+                .kind,
+            ErrorKind::Capacity
+        );
+
+        let released = engine
+            .release_session_with_report(&stopped.session)
+            .await
+            .unwrap();
+        let diagnostic = released.exit_error.unwrap();
+        let expected = match provider {
+            Provider::Claude => "exit status: 17",
+            Provider::Codex => "exit code 17",
+        };
+        assert!(diagnostic.contains(expected), "{provider:?}: {diagnostic}");
+        reaped(crashed.pid()).await;
+        assert_eq!(
+            engine.inspect(&first).unwrap_err().kind,
+            ErrorKind::UnknownRun
+        );
+        let page = reader.read_available(256).unwrap();
+        assert!(page.closed);
+        assert!(page.items.iter().any(|item| {
+            item.kind == "session_stream_closed"
+                && item.data["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(&diagnostic))
+        }));
+
+        // The only free session and run slots are from the crashed worker.
+        let replacement = engine.spawn(crashed.assignment("fresh")).await.unwrap();
+        let replacement = finished(&engine, &replacement).await;
+        assert_eq!(replacement.result.as_ref().unwrap().text, "turn 1");
+        engine.release_session(&replacement.session).await.unwrap();
+
+        let next = engine
+            .follow_up(sibling.session, FollowUp::new("second"))
+            .await
+            .unwrap();
+        assert_eq!(
+            finished(&engine, &next).await.result.as_ref().unwrap().text,
+            "turn 2"
+        );
+        engine.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn release_reserves_the_session_and_survives_a_dropped_caller() {
     let fixture = Fixture::new(Provider::Claude);
     let engine = Arc::new(engine());

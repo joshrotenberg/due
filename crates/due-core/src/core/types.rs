@@ -230,6 +230,13 @@ pub struct WaitResult {
     pub runs: Vec<RunSnapshot>,
 }
 
+/// Diagnostic retained by an explicit session release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseReport {
+    /// Provider diagnostic when the worker was reaped after an abnormal exit.
+    pub exit_error: Option<String>,
+}
+
 /// Fixed per-engine resource limits; no automatic eviction or retries.
 #[derive(Debug, Clone)]
 pub struct Limits {

@@ -293,8 +293,9 @@ impl EventSink {
         self.notify();
     }
 
-    fn closed(&self, outcome: Result<(), String>) -> Result<Value, String> {
-        if let Err(error) = &outcome {
+    fn closed(&self, outcome: Result<(), CloseError>) -> Result<Value, CloseError> {
+        let error = outcome.as_ref().err().map(ToString::to_string);
+        if let Some(error) = &error {
             self.failed(error.clone());
         } else {
             let provider = self.state.lock().unwrap().provider;
@@ -311,7 +312,7 @@ impl EventSink {
         self.item(
             "session_closed",
             json!({
-                "error":outcome.as_ref().err(),
+                "error":error,
                 "session_error":session_error,
                 "native_session_id":native_session_id,
             }),
@@ -382,6 +383,21 @@ impl EventSink {
 
 type InterruptAnswer = oneshot::Receiver<Result<(), String>>;
 
+/// Resident cleanup distinguishes a reaped provider from a failed wait or owner.
+#[derive(Debug, Clone)]
+pub(crate) enum CloseError {
+    AbnormalExit(String),
+    Unconfirmed(String),
+}
+
+impl std::fmt::Display for CloseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AbnormalExit(message) | Self::Unconfirmed(message) => f.write_str(message),
+        }
+    }
+}
+
 enum Backend {
     Claude(claude::Backend),
     Codex(codex::Backend),
@@ -425,7 +441,7 @@ impl Backend {
             Self::Codex(b) => b.reply(id, value, expected).await,
         }
     }
-    async fn close(self) -> Result<(), String> {
+    async fn close(self) -> Result<(), CloseError> {
         match self {
             Self::Claude(b) => b.close().await,
             Self::Codex(b) => b.close().await,
@@ -764,9 +780,15 @@ impl Manager {
     }
 
     pub async fn close(&self, session_id: Option<&str>) -> Result<Value, String> {
+        self.close_with_status(session_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn close_with_status(&self, session_id: Option<&str>) -> Result<Value, CloseError> {
         let mut slot = self.session.lock().await;
         if let Some(id) = session_id {
-            Self::session(&mut slot, id)?;
+            Self::session(&mut slot, id).map_err(CloseError::Unconfirmed)?;
         }
         let Some(session) = slot.take() else {
             return Ok(json!({"closed":true}));
@@ -778,9 +800,15 @@ impl Manager {
     }
 
     pub async fn shutdown(&self) -> Result<Value, String> {
+        self.shutdown_with_status()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn shutdown_with_status(&self) -> Result<Value, CloseError> {
         // EOF must reject queued opens before waiting for any current operation.
         self.stopping.store(true, Ordering::Release);
-        self.close(None).await
+        self.close_with_status(None).await
     }
 
     fn session<'a>(slot: &'a mut Option<Session>, id: &str) -> Result<&'a mut Session, String> {

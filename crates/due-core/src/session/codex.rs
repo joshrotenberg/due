@@ -20,7 +20,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{EventSink, OpenOptions};
+use super::{CloseError, EventSink, OpenOptions};
 use crate::{
     result::{ErrorKind, RunError, RunResult, Usage},
     types::Provider,
@@ -139,7 +139,7 @@ enum Command {
 
 pub struct Backend {
     commands: mpsc::Sender<Command>,
-    owner: Option<JoinHandle<Result<(), String>>>,
+    owner: Option<JoinHandle<Result<(), CloseError>>>,
 }
 
 struct Active {
@@ -444,13 +444,13 @@ impl Backend {
         .await
     }
 
-    pub async fn close(mut self) -> Result<(), String> {
+    pub async fn close(mut self) -> Result<(), CloseError> {
         let _ = self.commands.send(Command::Close).await;
         self.owner
             .take()
             .expect("owner task")
             .await
-            .map_err(|e| format!("Codex owner task failed: {e}"))?
+            .map_err(|e| CloseError::Unconfirmed(format!("Codex owner task failed: {e}")))?
     }
 }
 
@@ -472,7 +472,7 @@ async fn own(
     sink: EventSink,
     sender: mpsc::Sender<Command>,
     mut commands: mpsc::Receiver<Command>,
-) -> Result<(), String> {
+) -> Result<(), CloseError> {
     let mut active: Option<Active> = None;
     let mut interrupt: Option<PendingInterrupt> = None;
     let failure = 'owner: loop {
@@ -682,7 +682,14 @@ async fn own(
         control.reject(&message);
     }
     // EOF shutdown lets Codex stop commands it placed in other process groups.
-    let cleanup = server.shutdown().await.map_err(|e| e.to_string());
+    let cleanup = server.shutdown().await.map_err(|error| {
+        // shutdown() reports an exit code only after wait() has reaped the child.
+        if error.exit_code().is_some() {
+            CloseError::AbnormalExit(error.to_string())
+        } else {
+            CloseError::Unconfirmed(error.to_string())
+        }
+    });
     if let Some(turn) = active.take() {
         let error = match &failure {
             Some((kind, message)) => RunError::new(*kind, message),

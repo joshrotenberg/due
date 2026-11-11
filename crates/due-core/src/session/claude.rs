@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use super::{EventSink, MAX_EVENT_BYTES, MAX_EVENTS, OpenOptions};
+use super::{CloseError, EventSink, MAX_EVENT_BYTES, MAX_EVENTS, OpenOptions};
 use crate::{
     result::{ErrorKind, RunError, RunResult, Usage},
     types::Provider,
@@ -47,7 +47,7 @@ enum Command {
 
 pub struct Backend {
     commands: mpsc::Sender<Command>,
-    task: JoinHandle<Result<(), String>>,
+    task: JoinHandle<Result<(), CloseError>>,
 }
 
 impl Backend {
@@ -191,12 +191,12 @@ impl Backend {
         result.await.map_err(|_| "Claude session is closed")?
     }
 
-    pub async fn close(self) -> Result<(), String> {
+    pub async fn close(self) -> Result<(), CloseError> {
         let _ = self.commands.send(Command::Close).await;
         drop(self.commands);
         self.task
             .await
-            .map_err(|e| format!("Claude session task failed: {e}"))?
+            .map_err(|e| CloseError::Unconfirmed(format!("Claude session task failed: {e}")))?
     }
 }
 
@@ -208,7 +208,7 @@ async fn drive(
     pending: Pending,
     active: Arc<AtomicBool>,
     deadline: Option<Duration>,
-) -> Result<(), String> {
+) -> Result<(), CloseError> {
     let mut deferred_result = None;
     let mut failure = None;
     loop {
@@ -253,7 +253,12 @@ async fn drive(
     }
     active.store(false, Ordering::Release);
     pending.lock().unwrap().clear();
-    let closed = session.close().await.map_err(|e| e.to_string());
+    let closed = session.close().await.map_err(|error| match error {
+        claude_wrapper::Error::DuplexProcessFailed { .. } => {
+            CloseError::AbnormalExit(error.to_string())
+        }
+        _ => CloseError::Unconfirmed(error.to_string()),
+    });
     // A deadline or explicit close is terminal only after the child has settled.
     if let Some(result) = deferred_result {
         sink.finished(result);
@@ -262,7 +267,7 @@ async fn drive(
         sink.failed(reason);
     }
     if let Err(error) = &closed {
-        sink.failed(error.clone());
+        sink.failed(error.to_string());
     }
     closed
 }
