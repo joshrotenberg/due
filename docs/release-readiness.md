@@ -46,19 +46,25 @@ packaging changes can run the same check.
 
 ## 3. Prepare a release candidate
 
-Decide the initial distribution channel, supported artifact targets, and feature
-set from the parity results. A CLI artifact and a published Rust API are
-separate decisions. The project currently installs from source and tracks the
-public Rust API question in [#95](https://github.com/joshrotenberg/due/issues/95).
+The initial distribution plan is a GitHub Releases tarball for each target.
+The project currently installs from source. The public Rust API question is
+tracked separately in [#95](https://github.com/joshrotenberg/due/issues/95).
 
 The [artifact rehearsal workflow](../.github/workflows/artifact-rehearsal.yml)
-builds candidate tarballs for macOS arm64 on macOS 15 and Linux x86-64 on
-Ubuntu 22.04. The binary includes the default RPC and JavaScript features
-and the stdio MCP adapter. Each tarball carries both licenses and has a
-separate SHA-256 checksum. The workflow checks the checksum, unpacks the
-tarball, verifies the recorded build identity, and runs offline help from
-the extracted executable. GitHub Actions keeps the tarballs as temporary
-workflow artifacts.
+builds once per target and uploads the tarball and SHA-256 checksum as temporary
+workflow artifacts. Each smoke job downloads the matching artifact from the same
+run, verifies the host, checksum, archive contents, build identity, and features,
+then runs offline help and loads the embedded MCP guide with an empty `PATH`.
+The binary includes the default RPC and JavaScript features and the stdio MCP
+adapter. Both licenses are in the archive.
+
+| Target | Build host | Download smoke tests and planned support |
+| --- | --- | --- |
+| `aarch64-apple-darwin` | macOS 15 | macOS 15, 26, and 27 on Apple silicon |
+| `x86_64-unknown-linux-gnu` | Ubuntu 24.04 LTS | Ubuntu 24.04 LTS and 26.04 LTS on x86-64 |
+
+The support plan assumes current OS updates. The `xcode-27` runner uses the
+[macOS 27 preview image](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md).
 
 To rehearse on your machine from a clean checkout, run:
 
@@ -67,11 +73,50 @@ output_dir=$(mktemp -d)
 bash scripts/rehearse-package.sh "$output_dir"
 ```
 
+To check a downloaded tarball with its checksum alongside it, pass the target
+and the full build revision reported by the workflow.
+
+```sh
+bash scripts/smoke-package.sh "$target" "$revision" "$archive"
+```
+
 Before proposing a release, rehearse the chosen packaging path from a clean
 revision and install its artifacts in disposable environments. Verify the
 version and source identity, parity checks, documentation links, upgrade and
 rollback instructions, license files, and draft release notes. Record the
 supported targets and known limits. Publication requires a separate decision.
+
+### macOS signing and notarization
+
+The artifact rehearsal uses no Apple credentials. A signed candidate needs an
+Apple Developer Program team, a Developer ID Application certificate with its
+private key available to `codesign`, and Xcode's `notarytool`. For the first
+rehearsal, keep the signing identity in a local keychain and authenticate
+`notarytool` with a keychain profile. Apple supports a team App Store Connect API
+key (`.p8` file, key ID, and issuer ID) or an Apple Account app-specific password
+with the team ID. [Developer ID](https://developer.apple.com/developer-id/) and
+[Apple's authentication options](https://developer.apple.com/documentation/technotes/tn3147-migrating-to-the-latest-notarization-tool).
+
+1. Sign the staged `due` executable with `codesign --sign "$identity"
+   --options runtime --timestamp "$binary"`. Verify it with `codesign --verify
+   --strict --verbose=2 "$binary"`.
+2. Put that signed executable in a ZIP using `ditto -c -k --keepParent` and
+   submit it with `xcrun notarytool submit "$zip" --keychain-profile "$profile"
+   --wait`. Require `Accepted` and review the submission log.
+3. Package the same signed executable bytes and both licenses in the release
+   tarball, then generate its checksum. Apple issues a ticket for the standalone
+   executable. Gatekeeper looks it up online because the executable cannot be
+   stapled. A stapled DMG or PKG would be a separate choice for offline
+   verification. [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
+4. On clean Macs or VMs for the supported versions, download the candidate via a
+   browser, extract it using the normal user workflow, and run the extracted
+   executable with quarantine intact and network access for the ticket lookup.
+   Record the Gatekeeper outcome and rerun the package smoke checks against
+   those same bytes.
+
+If signing moves to CI, keep it in a separately approved release job. Import
+the signing identity into a temporary keychain and keep its private key and the
+notary credentials scoped to that job.
 
 ## Work kept outside this sequence
 

@@ -23,30 +23,10 @@ version=${version#due }
 
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-mkdir "$scratch/package" "$scratch/unpacked"
+mkdir "$scratch/package"
 cp "$binary" LICENSE-APACHE LICENSE-MIT "$scratch/package"
 archive="due-v$version-$target.tar.gz"
 tar -czf "$output_dir/$archive" -C "$scratch/package" due LICENSE-APACHE LICENSE-MIT
 
-cd "$output_dir"
-shasum -a 256 "$archive" > "$archive.sha256"
-shasum -a 256 -c "$archive.sha256"
-tar -xzf "$archive" -C "$scratch/unpacked"
-
-cd "$scratch/unpacked"
-PATH='' ./due build-info --output json > build-info.json
-python3 - "$revision" "$version" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-info = json.loads(Path("build-info.json").read_text())
-assert info["package"]["version"] == sys.argv[2], info
-assert info["source"] == {"status": "recorded", "revision": sys.argv[1], "tree": "clean"}, info
-assert {"harness", "rpc", "mcp-stdio"} <= set(info["features"]), info
-print(json.dumps(info))
-PY
-for command in run init rpc script mcp; do
-  PATH='' ./due "$command" --help > /dev/null
-done
-PATH='' ./due skills show mcp > /dev/null
+(cd "$output_dir" && shasum -a 256 "$archive" > "$archive.sha256")
+bash scripts/smoke-package.sh "$target" "$revision" "$output_dir/$archive"
