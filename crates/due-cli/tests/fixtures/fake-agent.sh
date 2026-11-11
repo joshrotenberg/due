@@ -79,6 +79,10 @@ case "$DUE_TEST_MODE" in
         printf '%s\n' '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"errors":["Reached maximum budget ($0.01)"],"num_turns":1,"total_cost_usd":0.1273986,"session_id":"cap-session"}'
         exit 1
         ;;
+    not_logged_in)
+        printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Not logged in · Please run /login","session_id":"login-session"}'
+        exit 1
+        ;;
     oauth_expired)
         printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed","session_id":"expired-session"}'
         exit 1
