@@ -170,6 +170,15 @@ installed Claude CLI parses it:
 }
 ```
 
+The allowlist must match the command as it runs after any hook rewrites it.
+For example, a hook that adds a flag could turn `git status` into
+`git --no-pager status`. Probe with a one-line `due run` using the profile:
+ask the worker to run one allowed command and check that the command ran.
+`permission_denials` appears only in `due run` results; when present it names
+the denied tool, and a detailed trace can show the Bash input checked if
+Claude reported it. Its absence does not prove the command ran, and the trace
+does not audit what a hook executed.
+
 Use the profile from each surface:
 
 ```sh
