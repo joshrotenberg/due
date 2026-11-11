@@ -260,7 +260,8 @@ the package alone is not a successful behavioral smoke test.
 Choose the update procedure for the binary installation you actually use.
 Preserve local changes before updating the checkout.
 
-For a **Cargo-installed binary**:
+For a **Cargo-installed binary**, reuse your original `--root` and feature
+flags when applicable:
 
 ```sh
 git pull --ff-only
@@ -274,7 +275,24 @@ For a **checkout symlink**, use the pull-and-build procedure in
 `cargo install --force` in that mode.
 
 After updating the binary, refresh its managed plugin with `due init` using the
-same host and directory options. To remove it, use native host commands:
+same host and directory options.
+
+### Roll back the binary and plugin
+
+Keep a copy of the working executable before updating. To roll back, restore
+that executable or repoint your checkout symlink to the saved build. Check
+`command -v due` and `due build-info --output json` from the environment where
+your host launches Due.
+
+Run `due init` with the restored executable and the same host and install
+directory options. It writes the plugin bundled with that build. Confirm the
+restored `due:delegate` skill in a fresh host session. This procedure restored
+both the CLI and the skill in disposable Claude Code 2.1.317 and Codex CLI
+0.165.0 configurations on macOS.
+
+### Remove the plugin or CLI
+
+To remove the plugin, use the native host commands for your setup:
 
 ```sh
 codex plugin remove due@due-local
