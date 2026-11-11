@@ -772,9 +772,14 @@ fn parse_result(value: &Value) -> RunResult {
         let kind = match value.get("subtype").and_then(Value::as_str) {
             Some("error_max_turns") => ErrorKind::MaxTurns,
             Some("error_max_budget_usd") => ErrorKind::MaxBudget,
-            _ if message.trim().eq_ignore_ascii_case(
+            // Match native terminal diagnostics exactly. A tool or model
+            // error can mention login without indicating a credential failure.
+            _ if [
                 "Failed to authenticate: OAuth session expired and could not be refreshed",
-            ) =>
+                "Not logged in · Please run /login",
+            ]
+            .iter()
+            .any(|diagnostic| message.trim().eq_ignore_ascii_case(diagnostic)) =>
             {
                 ErrorKind::Authentication
             }
