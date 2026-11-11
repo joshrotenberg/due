@@ -29,6 +29,7 @@ connection configured by the host operator. For an ordinary one-turn task, use
 | `read_items` | Read a page of session items. Start with `after: 0` and pass back the returned cursor. |
 | `respond` | Submit a provider-native `response` object for an exact pending `interaction`. |
 | `interrupt` | Interrupt the specified active `run` and wait for its outcome. |
+| `release_run` | Free a finished `run` slot and keep the live worker and session journal. |
 | `release_session` | Close an idle or ended `session` and free its session and retained run slots. |
 
 ## Run and release concurrent workers
@@ -57,6 +58,13 @@ delivery; check subsequent items and the run result. If an interrupt returns
 `settlement`, use `inspect` to track the run until it finishes. Check the run's
 terminal status even if the interrupt call succeeded. Continue monitoring other
 workers while one is waiting for input or settlement.
+
+To keep a worker for follow-ups, collect a finished run's result and finish
+any waits that include it. Call `release_run` with `{"run":"<run reference>"}`.
+Success returns `{"released":true}` and frees a slot in the connection's
+retained-run budget. The session reference and journal cursor still work.
+An active run returns `busy`. Later lookups and waits still observing a
+released run return `unknown_run`.
 
 When done with a worker, wait for it to finish or interrupt it. Collect results
 and session items and finish any waits that refer to its runs before calling

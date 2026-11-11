@@ -125,6 +125,7 @@ For the lifecycle operations available on other surfaces, see
 | `interrupt` | `engine.interrupt(&run).await`; targets the exact assignment and awaits terminal settlement |
 | `respond` | `engine.respond(&interaction.id, native_response).await`; answers one pending generation |
 | `subscribe` | `engine.subscribe(&session, after_cursor)`; independent full-item reader across turns, with `next().await` or `read_available(limit)` |
+| `release_run` | `engine.release_run(&run)` frees a finished run's slot and keeps its worker and journal |
 | `release_session` | `engine.release_session(&session).await`; close an idle worker and reclaim its session and run slots |
 
 `WorkerOptions` fixes provider, canonical cwd, resolved executable, requested
@@ -192,6 +193,12 @@ success and is not a substitute for awaited shutdown.
 Defaults retain at most 64 admitted runs and 16 logical workers, with a
 90-second settlement budget per cleanup/wait stage. Limits are caller supplied
 and capacity exhaustion is explicit.
+
+Call `release_run` once you have collected a finished run's result and finished
+observing it. This frees a retained-run slot and leaves the worker and bounded
+session journal available for follow-ups. Releasing an active run returns
+`Busy`. Later lookups and pending waits that include a released run return
+`UnknownRun`. Shutdown rejects further releases.
 
 For an engine that outlives individual assignments, collect the results and
 session items you need, then call `release_session` once the worker is idle.

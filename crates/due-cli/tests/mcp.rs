@@ -222,6 +222,7 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
             "inspect",
             "interrupt",
             "read_items",
+            "release_run",
             "release_session",
             "respond",
             "spawn",
@@ -548,6 +549,99 @@ async fn cancelling_wait_frees_capacity_and_leaves_run_active() {
             .success()
     );
     assert!(peer.output.next_line().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn release_run_reclaims_mcp_capacity_with_live_context_and_items() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut peer = Peer::start(workspace.path(), None);
+    peer.initialize().await;
+
+    let mut latest = peer
+        .tool("spawn", json!({"provider":"codex","prompt":"first"}))
+        .await;
+    let session = latest["session"].clone();
+    for turn in 1..=64 {
+        let finished = peer
+            .tool("wait", json!({"runs":[latest["run"]],"timeout_ms":10000}))
+            .await;
+        assert_eq!(finished["condition_met"], true, "{finished}");
+        assert_eq!(
+            finished["runs"][0]["result"]["text"],
+            format!("turn {turn}")
+        );
+        if turn < 64 {
+            latest = peer
+                .tool("follow_up", json!({"session":session,"prompt":"next"}))
+                .await;
+        }
+    }
+    let capacity = peer
+        .call(
+            "tools/call",
+            json!({
+                "name":"follow_up","arguments":{"session":session,"prompt":"next"}
+            }),
+        )
+        .await;
+    assert_eq!(capacity["isError"], true, "{capacity}");
+    assert_eq!(capacity["structuredContent"]["error"]["kind"], "capacity");
+
+    let first_page = peer
+        .tool("read_items", json!({"session":session,"limit":1}))
+        .await;
+    let cursor = first_page["latest_cursor"].as_u64().unwrap();
+    let retired = latest["run"].clone();
+    assert_eq!(
+        peer.tool("release_run", json!({"run":retired})).await,
+        json!({"released":true})
+    );
+    let after_release = peer
+        .tool("read_items", json!({"session":session,"after":cursor-16}))
+        .await;
+    assert_eq!(after_release["latest_cursor"], cursor);
+    assert_eq!(after_release["closed"], false);
+    assert!(
+        after_release["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["kind"] == "run_finished" && item["run"] == retired })
+    );
+    for (name, arguments) in [
+        ("inspect", json!({"run":retired})),
+        ("wait", json!({"runs":[retired],"timeout_ms":0})),
+    ] {
+        let result = peer
+            .call("tools/call", json!({"name":name,"arguments":arguments}))
+            .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(result["structuredContent"]["error"]["kind"], "unknown_run");
+    }
+
+    let follow = peer
+        .tool("follow_up", json!({"session":session,"prompt":"next"}))
+        .await;
+    let done = peer
+        .tool("wait", json!({"runs":[follow["run"]],"timeout_ms":10000}))
+        .await;
+    assert_eq!(done["runs"][0]["result"]["text"], "turn 65");
+    let page = peer
+        .tool("read_items", json!({"session":session,"after":cursor}))
+        .await;
+    assert!(page["latest_cursor"].as_u64().unwrap() > cursor);
+    assert_eq!(page["closed"], false);
+    peer.tool("release_session", json!({"session":session}))
+        .await;
+    drop(peer.input);
+    assert!(
+        timeout(DEADLINE, peer.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(workspace.path().join("codex/exited").is_file());
 }
 
 #[tokio::test]

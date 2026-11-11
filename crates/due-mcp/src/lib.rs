@@ -179,7 +179,7 @@ fn router(app: Arc<App>) -> McpRouter {
 
     McpRouter::new()
         .server_info("due-mcp", env!("CARGO_PKG_VERSION"))
-        .instructions("Spawn a worker, then use its run and session references to inspect, wait, follow up, or read items. Use inspect to find pending interactions and respond with an explicit provider-native decision. Release idle sessions after collecting their results and items.")
+        .instructions("Spawn a worker, then use its run and session references to inspect, wait, follow up, or read items. Release completed runs to free their slots while keeping the session. Use inspect to find pending interactions and respond with an explicit provider-native decision. Release idle sessions after collecting their results and items.")
         .tool(
             ToolBuilder::new("spawn")
                 .description(format!("Start a worker in the server's working directory using {selector}."))
@@ -273,6 +273,14 @@ fn router(app: Arc<App>) -> McpRouter {
                 .description("Submit a provider-native decision to an exact pending interaction.")
                 .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Respond>| async move {
                     outcome(app.engine.respond(&input.interaction, Value::Object(input.response)).await)
+                })
+                .build(),
+        )
+        .tool(
+            ToolBuilder::new("release_run")
+                .description("Release a finished run and free its slot. Collect its result before release. The worker and session journal remain available.")
+                .extractor_handler(app.clone(), |State(app): State<Arc<App>>, Json(input): Json<Run>| async move {
+                    outcome(app.engine.release_run(&input.run).map(|()| json!({"released":true})))
                 })
                 .build(),
         )

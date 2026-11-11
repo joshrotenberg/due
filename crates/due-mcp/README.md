@@ -9,9 +9,11 @@ transport failure, or host shutdown.
 Use one `spawn` per concurrent worker and combine run references in one `wait`
 call. The connection allows up to 14 positive-duration waits and up to 15
 calls total across those waits, `interrupt`, and `release_session`. This leaves
-room for an approval response even when an interrupt is awaiting settlement. After collecting a settled session's records, use
-`release_session` to reclaim capacity. To shut down an embedded connection,
-signal its shutdown future and await `serve` for the cleanup outcome.
+room for an approval response even when an interrupt is awaiting settlement.
+Collect a finished run's result and use `release_run` to reclaim its slot
+while keeping the worker and session journal. Use `release_session` to close
+the worker and reclaim its remaining slots. To shut down an embedded
+connection, signal its shutdown future and await `serve` for the cleanup outcome.
 
 ```rust
 use due_mcp::{Config, serve};

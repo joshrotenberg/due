@@ -286,6 +286,93 @@ async fn release_reclaims_both_limits_without_affecting_another_worker() {
 }
 
 #[tokio::test]
+async fn release_run_reclaims_retention_and_wakes_a_grouped_wait() {
+    let fixture = Fixture::new(Provider::Codex);
+    let engine = Engine::new(Limits {
+        max_sessions: 1,
+        max_runs: 2,
+        ..Limits::default()
+    })
+    .unwrap();
+    let first = engine.spawn(fixture.assignment("first")).await.unwrap();
+    let snapshot = finished(&engine, &first).await;
+    let session = snapshot.session;
+    let pid = fixture.pid();
+
+    let held = engine
+        .follow_up(session.clone(), FollowUp::new("hold"))
+        .await
+        .unwrap();
+    running(&engine, &held).await;
+    assert_eq!(engine.release_run(&held).unwrap_err().kind, ErrorKind::Busy);
+    assert_eq!(
+        engine
+            .spawn(fixture.assignment("new worker"))
+            .await
+            .unwrap_err()
+            .message,
+        "run retention limit reached"
+    );
+
+    let runs = [first.clone(), held.clone()];
+    let wait = engine.wait(&runs, WaitOptions::default());
+    tokio::pin!(wait);
+    tokio::select! {
+        biased;
+        result = &mut wait => panic!("wait finished early: {result:?}"),
+        () = std::future::ready(()) => {}
+    }
+
+    engine.release_run(&first).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), &mut wait)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnknownRun
+    );
+    assert_eq!(
+        engine.inspect(&first).unwrap_err().kind,
+        ErrorKind::UnknownRun
+    );
+    assert_eq!(
+        engine.release_run(&first).unwrap_err().kind,
+        ErrorKind::UnknownRun
+    );
+    assert_eq!(engine.inspect(&held).unwrap().state, RunState::Running);
+    let page = engine
+        .subscribe(&session, 0)
+        .unwrap()
+        .read_available(256)
+        .unwrap();
+    assert!(!page.closed);
+    assert!(
+        page.items
+            .iter()
+            .any(|item| { item.kind == "run_finished" && item.run.as_ref() == Some(&first) })
+    );
+
+    engine.interrupt(&held).await.unwrap();
+    let third = engine
+        .follow_up(session, FollowUp::new("third"))
+        .await
+        .unwrap();
+    assert_eq!(
+        finished(&engine, &third).await.result.unwrap().text,
+        "turn 3"
+    );
+    assert_eq!(fixture.pid(), pid);
+    engine.shutdown().await.unwrap();
+    reaped(pid).await;
+    assert_eq!(
+        engine.release_run(&third).unwrap_err().kind,
+        ErrorKind::Closed
+    );
+    assert!(engine.inspect(&third).is_ok());
+}
+
+#[tokio::test]
 async fn release_reserves_the_session_and_survives_a_dropped_caller() {
     let fixture = Fixture::new(Provider::Claude);
     let engine = Arc::new(engine());
