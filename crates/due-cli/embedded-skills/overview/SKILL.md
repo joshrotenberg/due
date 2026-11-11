@@ -111,7 +111,8 @@ artifacts or diff yourself. Next: `due skills show run` and
 
 Start in the checkout that contains the project's instructions. Each provider
 uses its normal rules to discover repository instructions and settings there.
-For MCP, the server's working directory selects that checkout.
+For MCP, the server's working directory selects that checkout. Codex also loads
+the account's global `$CODEX_HOME/AGENTS.md`; see Troubleshooting.
 
 Keep reusable working preferences in a file you control. Compose that text
 with the assignment when you launch a fresh worker. Include the task's
@@ -152,6 +153,7 @@ changes.
 | Exit 124 | `--timeout` elapsed; it is absolute and not extended by activity |
 | Exit 130 | Cancelled by SIGINT, SIGTERM or SIGHUP |
 | Task command denied | Native permissions blocked it; report the check as blocked rather than widening grants |
+| Codex worker follows instructions absent from the assignment | Codex loads the account's global `$CODEX_HOME/AGENTS.md` into every run, delegated ones included (seen on codex-cli 0.165). Read it. If it tells the agent to read another file that the sandbox blocks, a command that chains that read with the task command can fail, for example `git diff` in a review |
 | Resume fails | Wrong provider, wrong workspace, or a session that was ephemeral |
 
 Exit codes for `due run`: 0 success or plan, 1 execution failure, 2 invalid
