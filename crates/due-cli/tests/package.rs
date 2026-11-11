@@ -7,6 +7,7 @@ use std::{
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
         .canonicalize()
         .unwrap()
 }
@@ -54,7 +55,7 @@ fn nonempty(value: &Value, field: &str) {
 #[test]
 fn plugin_identity_version_and_entry_skill_match_the_source_package() {
     let root = root();
-    let cargo: toml::Value = toml::from_str(&document(&root, "Cargo.toml")).unwrap();
+    let cargo: toml::Value = toml::from_str(&document(&root, "crates/due-cli/Cargo.toml")).unwrap();
     let plugin_root = contained(&root, "plugin/due");
     let manifest = json(&plugin_root, "plugin.json");
     let binary_name = cargo["bin"].as_array().unwrap()[0]["name"].as_str();
@@ -189,14 +190,14 @@ fn source_distribution_has_its_docs_contracts_and_no_plugin_services() {
         "docs/dogfooding.md",
         "docs/harness.md",
         "docs/rpc.md",
-        "embedded-skills/overview/SKILL.md",
-        "embedded-skills/use-cases/SKILL.md",
-        "embedded-skills/profiles/SKILL.md",
-        "embedded-skills/rpc/SKILL.md",
-        "embedded-skills/run/SKILL.md",
-        "embedded-skills/contracts/SKILL.md",
-        "embedded-skills/observe/SKILL.md",
-        "embedded-skills/supervise/SKILL.md",
+        "crates/due-cli/embedded-skills/overview/SKILL.md",
+        "crates/due-cli/embedded-skills/use-cases/SKILL.md",
+        "crates/due-cli/embedded-skills/profiles/SKILL.md",
+        "crates/due-cli/embedded-skills/rpc/SKILL.md",
+        "crates/due-cli/embedded-skills/run/SKILL.md",
+        "crates/due-cli/embedded-skills/contracts/SKILL.md",
+        "crates/due-cli/embedded-skills/observe/SKILL.md",
+        "crates/due-cli/embedded-skills/supervise/SKILL.md",
         "crates/due-harness/Cargo.toml",
         "crates/due-harness/src/lib.rs",
         "crates/due-harness/clients/async.js",
@@ -205,11 +206,11 @@ fn source_distribution_has_its_docs_contracts_and_no_plugin_services() {
         document(&root, path);
     }
     for path in [
-        "schemas/run-request.schema.json",
-        "schemas/run-result.schema.json",
-        "schemas/trace.schema.json",
-        "schemas/trace-summary.schema.json",
-        "schemas/script-result.schema.json",
+        "crates/due-cli/schemas/run-request.schema.json",
+        "crates/due-cli/schemas/run-result.schema.json",
+        "crates/due-cli/schemas/trace.schema.json",
+        "crates/due-cli/schemas/trace-summary.schema.json",
+        "crates/due-cli/schemas/script-result.schema.json",
     ] {
         let schema = json(&root, path);
         assert!(schema.is_object());

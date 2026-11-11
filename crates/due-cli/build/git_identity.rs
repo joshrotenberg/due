@@ -31,13 +31,13 @@ impl Tree {
 /// How the source revision was, or was not, obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// The package root is a Git work tree root and HEAD resolved to a commit.
+    /// The supplied root is a Git work tree root and HEAD resolved to a commit.
     Recorded,
-    /// No `.git` entry at the package root, for example a source archive.
+    /// No `.git` entry at the supplied root, for example a source archive.
     NoGitMetadata,
     /// The `git` executable could not be started.
     GitUnavailable,
-    /// Git resolved a repository whose root is not this package, for example
+    /// Git resolved a repository whose root differs from the supplied root, for example
     /// an archive unpacked inside an unrelated checkout.
     NotRepositoryRoot,
     /// Git ran but failed, for example an unborn branch or an untrusted owner.
@@ -78,7 +78,7 @@ enum GitFailure {
     Failed,
 }
 
-/// Environment that could redirect Git away from the package being built.
+/// Environment that could redirect Git away from the checkout being built.
 const REDIRECTING_ENV: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -135,7 +135,7 @@ fn is_object_id(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Probe the package at `root` using the given Git executable.
+/// Probe the checkout at `root` using the given Git executable.
 ///
 /// Git resolves linked worktrees itself (`.git` may be a file), so a worktree
 /// reports its own HEAD and working tree.

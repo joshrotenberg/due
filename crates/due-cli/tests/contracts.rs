@@ -228,7 +228,7 @@ fn schema_exports_are_offline_embedded_documents() {
 fn result_schema_accepts_saved_v1_without_provenance() {
     let schema = exported("result");
     let mut saved: Value = serde_json::from_str(include_str!(
-        "../examples/offline-validation/fixtures/approve.result.json"
+        "../../../examples/offline-validation/fixtures/approve.result.json"
     ))
     .unwrap();
     assert!(saved.get("provenance").is_none());

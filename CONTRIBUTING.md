@@ -7,6 +7,28 @@ contracts. Rust owns provider/process lifecycle and limits; caller scripts own
 assignment composition and independent acceptance checks. Do not move a policy
 loop into the RPC server.
 
+## Workspace layout
+
+The root Cargo manifest defines the workspace, shared dependency versions, and
+common package metadata. Member manifests inherit dependency declarations and
+select features and optional dependencies for their own targets.
+
+| Path | Responsibility |
+| --- | --- |
+| `crates/due-cli` | The `due` binary, build identity, embedded guides and schemas, and CLI integration tests. |
+| `crates/due-core` | Provider execution, resident session lifecycle, and result contracts. |
+| `crates/due-mcp` | The MCP adapter over the resident core. |
+| `crates/due-harness` | The embedded JavaScript workflow runtime. |
+| `crates/due-plugin` | Managed plugin setup and native host registration. |
+| `plugin/due` | Source plugin assets for the repository marketplace and managed installer. |
+| `docs`, `examples`, `scripts` | Reference material, runnable consumers, and repository tooling. |
+
+Run Cargo commands from the workspace root. Use `cargo build --locked -p due-cli`
+for the executable and `cargo install --path crates/due-cli --locked` to install
+it. The workspace shares the root lockfile and target directory.
+
+## Checks and feature combinations
+
 Normal builds ship RPC and the JavaScript harness. The `rpc` and `harness`
 features also permit explicit reduced builds; test the feature combinations
 when changing gated code. Lua remains in the separate historical comparison.
@@ -24,7 +46,7 @@ path to the fixture client.
 
 ```sh
 install_root=$(mktemp -d)
-cargo install --path . --locked --debug --no-default-features --features mcp-stdio --root "$install_root"
+cargo install --path crates/due-cli --locked --debug --no-default-features --features mcp-stdio --root "$install_root"
 DUE_MCP_TEST_BINARY="$install_root/bin/due" cargo test --locked -p due-cli --no-default-features --features mcp-stdio --test mcp
 ```
 
@@ -92,7 +114,7 @@ caller observations. Extracting them onto this stable branch does not revalidate
 them on current provider versions or replace an installed build automatically.
 
 Keep Cargo.lock committed and preserve the exact wrapper dependency pins. Review
-dependency updates separately. The crate has `publish = false`; source readiness
+dependency updates separately. Workspace packages inherit `publish = false`; source readiness
 does not authorize a crates.io release or wrapper release.
 
 Runtime help, README/reference docs, exported schemas and embedded skills should
@@ -111,8 +133,8 @@ validate its nested manifest separately when changing that boundary. New product
 examples and guidance should target `due script`, not the comparison runner.
 
 Help uses progressive disclosure: `-h` is the concise command/option reference;
-`--help` adds workflow examples and contracts. Keep command help in `src/help.rs`
-and its option-specific details aligned with embedded guides. `src/skills.rs`
+`--help` adds workflow examples and contracts. Keep command help in `crates/due-cli/src/help.rs`
+and its option-specific details aligned with embedded guides. `crates/due-cli/src/skills.rs`
 provides the installed catalog; keep its names/descriptions consistent with each
 guide's frontmatter. Feature-gate guides and help routes with their commands.
 The plugin entry skill explains purpose/scope and routes into installed discovery;

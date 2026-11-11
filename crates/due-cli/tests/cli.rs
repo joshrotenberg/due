@@ -312,7 +312,7 @@ fn codex_workspace_profile_preserves_policy_for_fresh_and_explicit_resume() {
     // or enforcement. The fake provider does not persist conversation history.
     let fixture = Fixture::new("codex");
     let profile =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/codex-workspace-profile.json");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/codex-workspace-profile.json");
     let original_profile = fs::read(&profile).unwrap();
     let cwd = fixture.root.path().join("authorized workspace");
     fs::create_dir(&cwd).unwrap();
@@ -491,7 +491,7 @@ fn codex_workspace_profile_preserves_policy_for_fresh_and_explicit_resume() {
 fn replacing_codex_workspace_profile_native_args_removes_all_policy_settings() {
     let fixture = Fixture::new("codex");
     let profile =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/codex-workspace-profile.json");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/codex-workspace-profile.json");
     // A dry run makes this pitfall visible without launching a weakened provider.
     let result = json(
         &run(fixture

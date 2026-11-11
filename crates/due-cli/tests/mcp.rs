@@ -168,7 +168,7 @@ fn fake_provider(directory: &Path) -> std::path::PathBuf {
     fs::create_dir(directory).unwrap();
     fs::write(
         directory.join("native"),
-        include_bytes!("../crates/due-core/tests/fixtures/session-agent.sh"),
+        include_bytes!("../../due-core/tests/fixtures/session-agent.sh"),
     )
     .unwrap();
     let executable = directory.join("provider");

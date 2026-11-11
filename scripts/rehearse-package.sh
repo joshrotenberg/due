@@ -16,7 +16,7 @@ fi
 revision=$(git rev-parse HEAD)
 target=$(rustc -vV | sed -n 's/^host: //p')
 build_dir=${CARGO_TARGET_DIR:-target}
-cargo build --locked --release --features mcp-stdio --target "$target" --target-dir "$build_dir"
+cargo build --locked -p due-cli --release --features mcp-stdio --target "$target" --target-dir "$build_dir"
 binary="$build_dir/$target/release/due"
 version=$("$binary" --version)
 version=${version#due }

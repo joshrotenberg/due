@@ -6,7 +6,7 @@ Node built-ins only; it adds no embedded language or change to `due run`. Use a
 source-built Due executable with the optional `rpc` feature.
 
 ```sh
-cargo build --locked --release --features rpc
+cargo build --locked --release -p due-cli --features rpc
 node examples/session-harness/compare.mjs \
   --due ./target/release/due --provider codex --cwd /path/to/project \
   --artifacts /path/to/fresh-comparison --backend all
@@ -291,7 +291,7 @@ closing the session.
 For a small two-turn RPC client that writes every observed native item to stdout:
 
 ```sh
-cargo build --locked --release --features rpc
+cargo build --locked --release -p due-cli --features rpc
 node examples/session-harness/rpc-example.mjs \
   --due ./target/release/due --provider codex --cwd /path/to/project \
   --artifacts /path/to/fresh-rpc-session > /path/to/session-items.jsonl

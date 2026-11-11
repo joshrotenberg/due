@@ -63,7 +63,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           install_root="$RUNNER_TEMP/due-source-install"
-          cargo install --path . --locked --offline --debug --root "$install_root"
+          cargo install --path crates/due-cli --locked --offline --debug --root "$install_root"
           cd "$RUNNER_TEMP"
           binary="$install_root/bin/due"
           PATH='' "$binary" --version
@@ -135,7 +135,7 @@ jobs:
         run: |
           install_root=$(mktemp -d "$RUNNER_TEMP/due-mcp-install.XXXXXX")
           trap 'rm -rf "$install_root"' EXIT
-          cargo install --path . --locked --offline --debug --no-default-features --features mcp-stdio --root "$install_root"
+          cargo install --path crates/due-cli --locked --offline --debug --no-default-features --features mcp-stdio --root "$install_root"
           binary="$install_root/bin/due"
           (
             cd "$install_root"

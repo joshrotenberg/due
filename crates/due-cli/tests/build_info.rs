@@ -381,7 +381,7 @@ fn linked_worktree_reports_its_own_head_and_tree() {
 }
 
 // Incremental Cargo builds of a minimal fixture crate that uses the real
-// build.rs and probe, with its target directory inside the package.
+// build.rs and probe from a nested package inside a virtual workspace.
 
 struct Crate {
     _dir: tempfile::TempDir,
@@ -393,17 +393,23 @@ impl Crate {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("fixture");
         let source = Path::new(env!("CARGO_MANIFEST_DIR"));
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::create_dir_all(root.join("build")).unwrap();
-        fs::copy(source.join("build.rs"), root.join("build.rs")).unwrap();
+        let package = root.join("crates/due-cli");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::create_dir_all(package.join("build")).unwrap();
+        fs::copy(source.join("build.rs"), package.join("build.rs")).unwrap();
         fs::copy(
             source.join("build/git_identity.rs"),
-            root.join("build/git_identity.rs"),
+            package.join("build/git_identity.rs"),
         )
         .unwrap();
         fs::write(
             root.join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            "[workspace]\nmembers = [\"crates/due-cli\"]\nresolver = \"3\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
         )
         .unwrap();
         fs::write(root.join(".gitignore"), "/target\n/Cargo.lock\n").unwrap();
@@ -417,7 +423,7 @@ impl Crate {
         let source = format!(
             "fn main() {{\n    {extra}\n    println!(\n        \"{{}} {{}} {{}}\",\n        env!(\"DUE_BUILD_SOURCE_STATUS\"),\n        env!(\"DUE_BUILD_TREE\"),\n        env!(\"DUE_BUILD_REVISION\"),\n    );\n}}\n"
         );
-        fs::write(self.root.join("src/main.rs"), source).unwrap();
+        fs::write(self.root.join("crates/due-cli/src/main.rs"), source).unwrap();
     }
 
     /// Run one `cargo build` and return whether it succeeded plus the log.
@@ -496,7 +502,7 @@ fn every_cargo_invocation_records_the_current_source_state() {
     assert_eq!(fixture.build(), clean);
 
     // Failed first build: committed source waits for a missing root input.
-    fixture.main("let _ = include_str!(\"../new-input.txt\");");
+    fixture.main("let _ = include_str!(\"../../../new-input.txt\");");
     git(root, &["commit", "-q", "-am", "needs input"]);
     let second = git(root, &["rev-parse", "HEAD"]);
     let (success, log) = fixture.cargo(&[]);

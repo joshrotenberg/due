@@ -31,14 +31,14 @@ Clone the public repository into a local development directory:
 git clone https://github.com/joshrotenberg/due.git
 cd due
 git rev-parse HEAD
-cargo install --path . --locked
+cargo install --path crates/due-cli --locked
 command -v due
 due --version
 due run --help
 ```
 
-The Cargo package is `due-cli`, and it installs the `due` executable.
-The default feature set includes the existing `due rpc` and `due script`
+The Cargo package lives in `crates/due-cli` and installs the `due` executable.
+Run the commands below from the workspace root. The default feature set includes the existing `due rpc` and `due script`
 commands. Select a smaller build if you only need the foreground CLI or RPC:
 
 ```sh
@@ -50,9 +50,9 @@ The `harness` feature enables `script` and includes `rpc` for its resident
 session transport. The foreground `run` command is available in each build.
 
 To include the stdio MCP command and its embedded guide, install with
-`cargo install --path . --locked --features mcp-stdio`. Check that the installed
+`cargo install --path crates/due-cli --locked --features mcp-stdio`. Check that the installed
 binary exposes `due mcp --help` and `due skills show mcp`, then follow the
-[MCP setup guide](../embedded-skills/mcp/SKILL.md) to configure your client.
+[MCP setup guide](../crates/due-cli/embedded-skills/mcp/SKILL.md) to configure your client.
 
 Cargo normally installs under `~/.cargo/bin`. Ensure the host's process environment
 can find that directory. A terminal finding `due` does not prove a desktop app has
@@ -73,7 +73,7 @@ gives normal `due` invocations with no build or wrapper process on startup:
 ```sh
 git clone https://github.com/joshrotenberg/due.git "$HOME/Code/github.com/due"
 cd "$HOME/Code/github.com/due"
-cargo build --release --locked --target-dir "$PWD/target"
+cargo build --release --locked -p due-cli --target-dir "$PWD/target"
 mkdir -p "$HOME/.cargo/bin"
 ln -s "$PWD/target/release/due" "$HOME/.cargo/bin/due"
 command -v due
@@ -91,7 +91,7 @@ From the checkout, preserve local changes, then update:
 
 ```sh
 git pull --ff-only
-cargo build --release --locked --target-dir "$PWD/target"
+cargo build --release --locked -p due-cli --target-dir "$PWD/target"
 git rev-parse HEAD
 git status --short
 due --version
@@ -265,7 +265,7 @@ flags when applicable:
 
 ```sh
 git pull --ff-only
-cargo install --path . --locked --force
+cargo install --path crates/due-cli --locked --force
 due --version
 git rev-parse HEAD
 ```
