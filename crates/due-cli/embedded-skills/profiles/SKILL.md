@@ -162,9 +162,9 @@ worker commit, replace the empty `sandbox_workspace_write.writable_roots` array
 with both directories printed by
 `git rev-parse --path-format=absolute --git-common-dir --git-dir`. The worktree's
 own git directory alone is not enough: the commit fails writing its object to
-the shared directory. This makes the shared repository's git
-directory writable by the worker; grant it only when the assignment has the
-worker commit.
+the shared directory. Granting both makes the shared repository's git directory
+writable by the worker, so grant them only when the assignment has the worker
+commit.
 
 Claude profile that permits reading and one test command, and
 denies anything else that would need approval. Resident sessions require one
