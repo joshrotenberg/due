@@ -21,6 +21,12 @@ and stopping condition. Native repository instructions and settings apply, but
 launching a provider does not transfer the calling agent's entire conversation,
 model choice or per-turn permissions. Make those requirements explicit.
 
+Use the intended checkout for native project instructions. For working
+preferences that should travel with an assignment, compose a caller-owned
+instruction file with the task prompt. See the example under **Give workers
+consistent instructions** in [the installed overview](../crates/due-cli/embedded-skills/overview/SKILL.md#give-workers-consistent-instructions)
+(`due skills show overview`). Use profiles for execution settings.
+
 The worker's authority comes from the task. Delegation does not authorize external
 messages, publication, broader permissions, recursive delegation or unrelated
 changes. Any nested delegation must follow the assignment's explicit scope.
