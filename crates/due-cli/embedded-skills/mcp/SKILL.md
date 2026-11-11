@@ -31,17 +31,33 @@ connection configured by the host operator. For an ordinary one-turn task, use
 | `interrupt` | Interrupt the specified active `run` and wait for its outcome. |
 | `release_session` | Close an idle or ended `session` and free its session and retained run slots. |
 
-Save the run and session references from `spawn`. A session reference is scoped
-to the connection. Use separate sessions for independent author and reviewer
-work. The caller checks the actual work before accepting it. If a worker needs
-approval, inspect the pending request and respond only within your authority.
-For a long-lived connection, save any results and items you need before calling
+## Run and release concurrent workers
+
+Call `spawn` for each independent assignment before waiting for results. Each
+call returns its own run and session references. Use the same provider for
+several workers or mix providers. A session accepts one active run at a time
+and its references are scoped to the connection.
+
+Observe several runs in one call, for example with
+`{"runs":["<first run>","<second run>"],"any":true,"timeout_ms":1000}`. Remove
+finished runs from the next `any` wait. Check pending interactions with `inspect`
+and respond only within your authority. The caller verifies each result against
+the work. At most 15 `wait` calls with a positive budget can be pending on one
+connection, including waits that use the default budget. Extra waits return a
+`busy` tool error so the connection can still handle controls. Use a grouped
+wait or `timeout_ms: 0` to poll.
+
+When done with a worker, wait for it to finish or interrupt it. Collect results
+and session items and finish any waits that refer to its runs before calling
 `release_session` with `{"session":"<session reference>"}`. Success returns
-`{"released":true}`. The old session and all its run references then expire.
-If a run is active, wait for it to finish or interrupt it first. If settlement
-fails, the records and capacity stay reserved. A provider that exits with a
-nonzero status can report a settlement error even after its main process exits.
-Closing the connection starts cleanup for all its workers.
+`{"released":true}` and expires the session and its run references. Other
+workers on the connection remain available. A settlement error retains the
+records and capacity reservation. A nonzero provider exit can cause this error
+even after the provider process exits.
+
+To end the whole stdio connection, close stdin, keep reading stdout through
+EOF, and await the Due process. Disconnect starts cleanup for all workers still
+owned by the connection.
 
 ## Named worker profiles
 

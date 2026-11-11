@@ -17,6 +17,13 @@ loop. Your client owns request IDs, stream consumption, recovery, permission
 decisions, verification and cleanup. Due never approves a request for you, adds no
 authorization, and does not verify what the worker did.
 
+For concurrent workers, start one `due rpc` child per worker and drain every
+child's stdout independently. Keep handles, request IDs, and cursors with their
+own child. Start the turns before waiting on results. Use one long `turn.read`
+poll per child to leave request capacity for controls. When you release one
+worker, the other children keep running. On workflow exit, close and reap every
+child you started.
+
 Check it without a provider (a bad method, then EOF):
 
 ```sh
@@ -127,9 +134,9 @@ session can start fresh or explicitly resume non-ephemeral history that persiste
    with `run_id` equal to the Due turn ID. A `turn_finished` item can arrive
    before the `turn.start` response, so buffer items by `turn_id`.
 5. After a settled turn, send another `turn.start` on the same handle.
-6. `session.close`, keep reading stdout through its response, close stdin, then
-   wait for the child to exit (0 on clean shutdown; an error is written to stderr
-   with a nonzero status).
+6. Call `session.close` and keep reading stdout through its response. When done
+   with that child, close stdin, drain stdout through EOF, and await its exit.
+   Clean shutdown exits zero. Errors are reported on stderr with a nonzero exit.
 
 ## Streaming and items
 

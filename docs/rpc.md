@@ -23,6 +23,15 @@ keeps its one-shot behavior. Reduced source builds can select only `--features r
 with `--no-default-features`. For an MCP client that needs multiple workers on
 one stdio connection, see the [MCP adapter guide](../crates/due-cli/embedded-skills/mcp/SKILL.md).
 
+For simultaneous RPC workers, start one child per worker and drain each child's
+stdout independently. Keep session handles, request IDs, and cursors with their
+own child. Start the turns before waiting for results. Use one long `turn.read`
+poll per child to leave room for controls. When a worker is done, read its
+result and needed items, call `session.close`, then close its stdin,
+drain stdout, and await its exit. Other children continue running. Apply the
+same cleanup to every child your caller owns when it exits or cancels a workflow.
+If a close request fails, preserve its error and still close stdin and await exit.
+
 ## Wire contract
 
 Send compact UTF-8 JSON objects, one per newline, through stdin. Read responses
@@ -187,9 +196,9 @@ After its terminal result, read any needed journal items and close:
 {"jsonrpc":"2.0","id":4,"method":"session.close","params":{"session_id":"SESSION"}}
 ```
 
-Continue reading stdout during close and through EOF, then await the Due child
-exit. A terminal item may precede the `turn.start` response; clients need to
-correlate by IDs rather than assuming response-first ordering.
+Keep reading stdout while waiting for the close response. Close stdin once you
+are done with that child, then drain stdout through EOF and await its exit. A
+terminal item may precede the `turn.start` response, so correlate by ID.
 
 Close reports provider cleanup separately from an earlier session failure. When
 the backend's close operation succeeds, its result contains `closed: true`,

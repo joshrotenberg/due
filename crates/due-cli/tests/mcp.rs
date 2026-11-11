@@ -373,6 +373,81 @@ async fn stdio_drives_two_resident_sessions_and_settles_on_eof() {
 }
 
 #[tokio::test]
+async fn saturated_waits_leave_room_to_interrupt() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut peer = Peer::start(workspace.path(), None);
+    peer.initialize().await;
+    let held = peer
+        .tool("spawn", json!({"provider":"codex","prompt":"ask"}))
+        .await;
+    peer.awaiting_input(&held["run"]).await;
+
+    let mut waits = Vec::new();
+    for _ in 0..16 {
+        waits.push(
+            peer.request(
+                "tools/call",
+                json!({"name":"wait","arguments":{"runs":[held["run"]],"timeout_ms":10000}}),
+            )
+            .await,
+        );
+    }
+    let interrupt = peer
+        .request(
+            "tools/call",
+            json!({"name":"interrupt","arguments":{"run":held["run"]}}),
+        )
+        .await;
+    timeout(Duration::from_secs(5), async {
+        let mut interrupted = false;
+        let mut busy = 0;
+        for _ in 0..=waits.len() {
+            let response = peer.receive().await;
+            let result = &response["result"];
+            if response["id"] == interrupt {
+                assert_eq!(
+                    result["structuredContent"]["result"]["status"], "cancelled",
+                    "{response}"
+                );
+                interrupted = true;
+            } else {
+                let id = response["id"].as_u64().unwrap();
+                waits.retain(|wait| *wait != id);
+                if result["isError"] == true {
+                    assert_eq!(
+                        result["structuredContent"]["error"]["kind"], "busy",
+                        "{response}"
+                    );
+                    busy += 1;
+                } else {
+                    assert_eq!(
+                        result["structuredContent"]["condition_met"], true,
+                        "{response}"
+                    );
+                }
+            }
+        }
+        assert!(interrupted);
+        assert_eq!(busy, 1);
+        assert!(waits.is_empty());
+    })
+    .await
+    .expect("interrupt queued behind the observation deadlines");
+
+    peer.tool("release_session", json!({"session":held["session"]}))
+        .await;
+    assert!(workspace.path().join("codex/exited").is_file());
+    drop(peer.input);
+    assert!(
+        timeout(DEADLINE, peer.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
 async fn stdio_releases_settled_workers_and_handles_eof_during_release() {
     let workspace = tempfile::tempdir().unwrap();
     let mut peer = Peer::start(workspace.path(), None);
@@ -381,15 +456,13 @@ async fn stdio_releases_settled_workers_and_handles_eof_during_release() {
         .tool("spawn", json!({"provider":"claude","prompt":"first"}))
         .await;
     let other = peer
-        .tool("spawn", json!({"provider":"codex","prompt":"first"}))
+        .tool("spawn", json!({"provider":"codex","prompt":"ask"}))
         .await;
     let done = peer
-        .tool(
-            "wait",
-            json!({"runs":[first["run"],other["run"]],"timeout_ms":10000}),
-        )
+        .tool("wait", json!({"runs":[first["run"]],"timeout_ms":10000}))
         .await;
     assert_eq!(done["condition_met"], true, "{done}");
+    let pending = peer.awaiting_input(&other["run"]).await;
     let release = peer
         .tool("release_session", json!({"session":first["session"]}))
         .await;
@@ -412,6 +485,19 @@ async fn stdio_releases_settled_workers_and_handles_eof_during_release() {
             "{result}"
         );
     }
+
+    peer.tool(
+        "respond",
+        json!({
+            "interaction":pending["interactions"][0]["id"],
+            "response":{"decision":"decline"}
+        }),
+    )
+    .await;
+    let done = peer
+        .tool("wait", json!({"runs":[other["run"]],"timeout_ms":10000}))
+        .await;
+    assert_eq!(done["runs"][0]["result"]["text"], "permission denied");
 
     let follow = peer
         .tool(
