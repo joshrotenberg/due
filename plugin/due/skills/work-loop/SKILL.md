@@ -36,6 +36,12 @@ At the start, read the order once for gaps that would block every piece
 ask-first list). Put those in a single message, then begin with the pieces
 that do not depend on the answers.
 
+Who commits and pushes is the operator's choice. The order can say that
+workers commit, or commit and push, or that the caller does both after
+checking. Record the choice in `order.md`. If the order does not say, the
+caller commits and pushes, because that needs no extra worker permissions and
+every change is checked before it leaves the machine.
+
 ## Keep the state on disk
 
 Create a work directory outside every checkout. This guide calls it `$WORK`.
@@ -50,6 +56,7 @@ the next caller continues from these files.
 | `$WORK/work-style.md` | Working instructions every worker receives, from the person or the repository |
 | `$WORK/profiles/` | One JSON profile per provider and permission set |
 | `$WORK/result.schema.json` | The worker result schema below |
+| `$WORK/run-piece.sh` | The launch script below |
 | `$WORK/pieces/ID/` | `assignment.md`, and per attempt `result-N.json`, `exit-N`, `trace-N.jsonl`, `check-N.txt` |
 
 Board row: piece ID, title, state, worktree path, branch, provider and model
@@ -92,15 +99,19 @@ assignment (see "Give workers consistent instructions" in
 
 1. The task, the files or area, and the finish line command.
 2. What it may change and what it may not. Workers edit, build, and test in
-   their worktree. They do not commit, push, open pull requests, or touch
-   anything outside the worktree. You do those after checking.
+   their worktree and touch nothing outside it. Say whether the worker
+   commits and pushes or leaves that to you, as the order decided. Workers do
+   not merge, release, or delete remote state in either case.
 3. This rule, in these words or close to them: "If you are unsure whether a
    choice is allowed and it can be undone, choose, list it under assumptions,
    and continue. Stop with `needs_decision` only when the choice cannot be
    undone or is outside this assignment. Stop with `blocked` only after you
    have tried another way."
 4. "Run the finish line command before you report `done`, and list the
-   commands you ran with their exit codes."
+   commands you ran with their exit codes. Run each command by itself, with
+   no pipes and no chaining." A permission allowlist matches whole commands,
+   and a worker whose chained command is denied may report `blocked` without
+   trying the plain command.
 
 Request this result with `--schema`:
 
@@ -143,23 +154,55 @@ needs it. `due skills show profiles` has the exact shapes: for Codex,
 `sandbox_mode="workspace-write"` with `approval_policy="never"`; for Claude,
 `--permission-mode` with an `--allowedTools` list.
 
-Because workers do not commit or push, none of the ask-first actions is
-within a worker's reach. They stay with you, and you take them to the inbox.
-Do not widen a worker's permissions to make a check pass. If a piece needs
-more, decide that as the caller and record it on the board.
+A worker also runs under the account's own provider settings: global
+instruction files, hooks, and permission rules. They can change what a
+profile does. A hook that rewrites commands, for example, makes an allowlist
+entry for the original command stop matching. Before the first real piece on
+a profile, run a one-line probe with it (`due run` with a cheap model, asking
+the worker to run one allowed command and say whether it was permitted) and
+read `permission_denials` in the result.
+
+When the caller commits and pushes, none of the ask-first actions is within
+a worker's reach. When the order has workers commit or push, the profile has
+to allow it: the worktree's git directories must be writable (find them with
+`git rev-parse --path-format=absolute --git-common-dir --git-dir`), and a push
+needs network access and the worker's own credentials. The ask-first list
+still applies, so say in the assignment that the worker pushes only its own
+branch and never merges. Do not widen a worker's permissions to make a check
+pass. If a piece needs more, decide that as the caller and record it on the
+board.
 
 ## Start the runs
+
+Save this as `$WORK/run-piece.sh`. It runs one attempt and leaves
+`result-N.json`, `exit-N`, and `trace-N.jsonl` in the piece's directory. The
+optional arguments are a different prompt file (a review or a retry) and a
+native session ID to resume. Set `SCHEMA` to use another result schema.
+
+```sh
+#!/bin/sh
+# usage: run-piece.sh ID PROFILE WORKTREE N [PROMPT_FILE] [RESUME_ID]
+set -u
+WORK=$(cd "$(dirname "$0")" && pwd)
+id=$1 profile=$2 worktree=$3 n=$4
+prompt=${5:-$WORK/pieces/$id/assignment.md}
+resume=${6:-}
+cd "$WORK/pieces/$id" || exit 2
+status=0
+if [ -n "$resume" ]; then set -- --resume "$resume"; else set --; fi
+cat "$WORK/work-style.md" "$prompt" |
+  due run --request "$WORK/profiles/$profile.json" --cwd "$worktree" \
+    --stdin --output json --schema "${SCHEMA:-$WORK/result.schema.json}" \
+    --timeout 30m --trace-file "trace-$n.jsonl" "$@" > "result-$n.json" || status=$?
+printf '%s\n' "$status" > "exit-$n"
+echo "piece $id attempt $n exit $status"
+```
 
 Start every `ready` piece whose dependencies are done, each as its own
 background command, so that the pieces run at the same time and you stay free:
 
 ```sh
-cd "$WORK/pieces/$ID" && n=1 && status=0
-{ cat "$WORK/work-style.md" assignment.md; } |
-  due run --request "$WORK/profiles/$PROFILE.json" --cwd "$WORKTREE" \
-    --stdin --output json --schema "$WORK/result.schema.json" \
-    --timeout 30m --trace-file "trace-$n.jsonl" > "result-$n.json" || status=$?
-printf '%s\n' "$status" > "exit-$n"
+"$WORK/run-piece.sh" p1 claude-edit "$WORK/wt/p1" 1
 ```
 
 Use the host's way of running a command in the background that reports when
@@ -186,13 +229,16 @@ Read `exit-N` and `result-N.json`, then act on the first row that applies:
 | --- | --- |
 | Exit 0, `status` succeeded, result says `done` | Run the finish line yourself in the worktree and save the output as `check-N.txt`. Read the diff. If both hold, go to review or publish. If not, retry with the check output |
 | Result says `needs_decision` | If you can decide under the rules above, decide, record the assumption, and resume the worker with the decision. Otherwise add an inbox item, mark the piece `parked`, and continue with other pieces |
-| Result says `blocked` | Retry ladder |
+| Result says `blocked` because a command was denied | Look at the worktree first. If the work is there and only the check did not run, run the finish line yourself and continue from the first row. Fix the profile or the assignment for later attempts. This is not a failed attempt |
+| Result says `blocked` for another reason | Retry ladder |
 | Exit 1, 124, or 130, or the result does not match the schema | Keep the files. Look at the worktree for partial edits. Retry ladder |
 | `authentication` error, or a usage or rate limit | Do not retry on the same provider. Switch the piece to the other provider if the order allows it. If neither provider works, add an inbox item |
 | Exit 2 or 127 | Your invocation is wrong. Fix the command or profile. This is not an attempt |
 
-Copy the result's `session_id` and its assumptions to the board. The worker's
-report is evidence. The finish line and the diff decide.
+Copy the result's `session_id`, its assumptions, and the attempt's cost and
+duration to the board. The worker's report is evidence in both directions: a
+`done` can be wrong, and a `blocked` can sit on finished work. The finish
+line and the diff decide.
 
 ## Retry ladder
 
@@ -221,8 +267,11 @@ other provider check the plan before the author starts.
 
 - Ask for findings with file and line, and a verdict.
 - An approval from a reviewer that opened no file and ran no command does not
-  count. Check the trace, or ask for the commands it ran in the result. Run
-  the review again at higher effort.
+  count. Have the result list the commands run and files read, and compare
+  that with the activity counts from `due trace summarize`. Run the review
+  again at higher effort if they show nothing.
+- A reviewer whose commands were denied has not seen the change. Its verdict
+  is not a review. Fix the profile and run it again.
 - For a second round, give a fresh reviewer the new diff. A resumed reviewer
   tends to approve without looking.
 - Check a finding before acting on it. Send confirmed findings to the author
@@ -232,8 +281,8 @@ other provider check the plan before the author starts.
 ## Publish and wait
 
 When the finish line holds and review has passed, commit and push from the
-piece's worktree, following the repository's rules, and open or update its
-pull request. Then start the wait as a background command, for example
+piece's worktree, or confirm what the worker pushed if the order gave that to
+workers. Follow the repository's rules, and open or update the pull request. Then start the wait as a background command, for example
 `gh pr checks NUMBER --watch`, mark the piece `waiting`, and continue. When
 the wait exits, a failed check goes back to the author as a retry with the
 log as evidence. A passing check makes the piece `done` if the order stops
