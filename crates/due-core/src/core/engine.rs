@@ -567,6 +567,29 @@ impl Engine {
         Ok(result.runs.into_iter().next().unwrap())
     }
 
+    /// Reclaim a finished run's slot while keeping its worker and session journal.
+    ///
+    /// Collect the result and finish any waits on the run before releasing it.
+    /// Subsequent lookups and waits still observing it return `UnknownRun`.
+    /// An active run returns `Busy`, and shutdown prevents further release.
+    pub fn release_run(&self, run: &RunRef) -> Result<(), Error> {
+        let mut state = self.inner.state.lock().unwrap();
+        if state.closing {
+            return Err(Error::new(ErrorKind::Closed, "engine is shutting down"));
+        }
+        let entry = state
+            .runs
+            .get(run)
+            .ok_or_else(|| Error::new(ErrorKind::UnknownRun, "unknown run in this engine"))?;
+        if entry.snapshot.state != RunState::Finished {
+            return Err(Error::new(ErrorKind::Busy, "run is still active"));
+        }
+        state.runs.remove(run);
+        drop(state);
+        self.inner.changed.notify_waiters();
+        Ok(())
+    }
+
     /// Settle an idle session's native worker and discard its retained runs and journal.
     ///
     /// Read any results you need first. After success, new lookups by the old
