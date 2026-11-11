@@ -51,6 +51,22 @@ set from the parity results. A CLI artifact and a published Rust API are
 separate decisions. The project currently installs from source and tracks the
 public Rust API question in [#95](https://github.com/joshrotenberg/due/issues/95).
 
+The [artifact rehearsal workflow](../.github/workflows/artifact-rehearsal.yml)
+builds candidate tarballs for macOS arm64 on macOS 15 and Linux x86-64 on
+Ubuntu 22.04. The binary includes the default RPC and JavaScript features
+and the stdio MCP adapter. Each tarball carries both licenses and has a
+separate SHA-256 checksum. The workflow checks the checksum, unpacks the
+tarball, verifies the recorded build identity, and runs offline help from
+the extracted executable. GitHub Actions keeps the tarballs as temporary
+workflow artifacts.
+
+To rehearse on your machine from a clean checkout, run:
+
+```sh
+output_dir=$(mktemp -d)
+bash scripts/rehearse-package.sh "$output_dir"
+```
+
 Before proposing a release, rehearse the chosen packaging path from a clean
 revision and install its artifacts in disposable environments. Verify the
 version and source identity, parity checks, documentation links, upgrade and
