@@ -5,8 +5,12 @@ on:
   pull_request:
     paths:
       - .github/workflows/artifact-rehearsal.yml
-      - scripts/rehearse-package.sh
+      - Cargo.toml
+      - Cargo.lock
+      - crates/due-cli/Cargo.toml
+      - scripts/install-rehearsal-dist.sh
       - scripts/smoke-package.sh
+      - scripts/smoke-dist-installer.sh
 
 permissions:
   contents: read
@@ -23,27 +27,65 @@ jobs:
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Package and verify
+      - name: Build target archive with dist
         shell: bash
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
         run: |
           test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
-          mkdir "$RUNNER_TEMP/due-artifacts"
-          bash scripts/rehearse-package.sh "$RUNNER_TEMP/due-artifacts"
+          bash scripts/install-rehearsal-dist.sh "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/dist" build --artifacts=local --target "$EXPECTED_TARGET" --output-format=json > "$RUNNER_TEMP/local-dist-manifest.json"
+          git diff HEAD --exit-code -- Cargo.lock
+          cp "$RUNNER_TEMP/local-dist-manifest.json" "target/distrib/$EXPECTED_TARGET-dist-manifest.json"
       - uses: actions/upload-artifact@v7
         with:
-          name: due-${{ matrix.target }}-${{ github.sha }}
-          path: ${{ runner.temp }}/due-artifacts/
+          name: due-dist-target-${{ matrix.target }}
+          path: |
+            target/distrib/due-cli-${{ matrix.target }}.tar.gz
+            target/distrib/due-cli-${{ matrix.target }}.tar.gz.sha256
+            target/distrib/${{ matrix.target }}-dist-manifest.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
 
+  installer:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: due-dist-target-*
+          path: target/distrib
+          merge-multiple: true
+      - name: Assemble shell installer and checksums
+        shell: bash
+        run: |
+          bash scripts/install-rehearsal-dist.sh "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/dist" build --artifacts=global --output-format=json > "$RUNNER_TEMP/dist-manifest.json"
+          git diff HEAD --exit-code -- Cargo.lock
+          sh -n target/distrib/due-cli-installer.sh
+          cp "$RUNNER_TEMP/dist-manifest.json" target/distrib/dist-manifest.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: due-dist-installer
+          path: |
+            target/distrib/due-cli-installer.sh
+            target/distrib/sha256.sum
+            target/distrib/dist-manifest.json
+          if-no-files-found: error
+          retention-days: 14
+
   smoke:
     name: Smoke (${{ matrix.platform }})
-    needs: package
+    needs: installer
     strategy:
       fail-fast: false
       matrix:
@@ -71,11 +113,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v7
         with:
-          name: due-${{ matrix.target }}-${{ github.sha }}
+          name: due-dist-target-${{ matrix.target }}
           path: ${{ runner.temp }}/due-artifacts
+      - uses: actions/download-artifact@v7
+        with:
+          name: due-dist-installer
+          path: ${{ runner.temp }}/due-installer
       - name: Verify runner and downloaded package
         shell: bash
         env:
@@ -92,4 +140,8 @@ jobs:
             test "$ID" = ubuntu
             test "$VERSION_ID" = "$EXPECTED_VERSION"
           fi
-          bash scripts/smoke-package.sh "$EXPECTED_TARGET" "$GITHUB_SHA" "$RUNNER_TEMP"/due-artifacts/*.tar.gz
+          archive="$RUNNER_TEMP/due-artifacts/due-cli-$EXPECTED_TARGET.tar.gz"
+          installer="$RUNNER_TEMP/due-installer"
+          version=$(jq -er '.releases[] | select(.app_name == "due-cli") | .app_version' "$installer/dist-manifest.json")
+          bash scripts/smoke-package.sh "$EXPECTED_TARGET" "$GITHUB_SHA" "$archive" "$version"
+          bash scripts/smoke-dist-installer.sh "$archive" "$installer/due-cli-installer.sh"

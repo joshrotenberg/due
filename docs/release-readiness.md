@@ -51,12 +51,23 @@ The project currently installs from source. The public Rust API question is
 tracked separately in [#95](https://github.com/joshrotenberg/due/issues/95).
 
 The [artifact rehearsal workflow](../.github/workflows/artifact-rehearsal.yml)
-builds once per target and uploads the tarball and SHA-256 checksum as temporary
-workflow artifacts. Each smoke job downloads the matching artifact from the same
-run, verifies the host, checksum, archive contents, build identity, and features,
-then runs offline help and loads the embedded MCP guide with an empty `PATH`.
-The binary includes the default RPC and JavaScript features and the stdio MCP
-adapter. Both licenses are in the archive.
+uses pinned `dist` to build `due-cli` once per target and assemble one shell
+installer from both builds. It produces temporary Actions artifacts with the
+tarballs, checksums, and installer. Cargo packages remain private. GitHub release
+creation and tag handling are outside the rehearsal.
+
+Each smoke job verifies its host, downloaded tarball checksum, archive contents,
+build identity, and features. It runs offline help and loads the embedded MCP
+guide with an empty `PATH`. The binary includes the default RPC and JavaScript
+features and the stdio MCP adapter. The tarball also carries both licenses and
+the README.
+
+The installer smoke uses the same downloaded tarball through a local `file://`
+URL and an empty temporary home. It compares the installed `~/.local/bin/due`
+with the archived binary and verifies the installer's shell profile changes.
+The generated installer checks the embedded SHA-256 when `sha256sum` is on the
+system `PATH`. Those smoke jobs also check that the installer rejects a tampered
+tarball. Every job verifies the separate checksum with `shasum`.
 
 | Target | Build host | Download smoke tests and planned support |
 | --- | --- | --- |
@@ -66,7 +77,7 @@ adapter. Both licenses are in the archive.
 The support plan assumes current OS updates. The `xcode-27` runner uses the
 [macOS 27 preview image](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md).
 
-To rehearse on your machine from a clean checkout, run:
+For a local archive check using Cargo from a clean checkout, run:
 
 ```sh
 output_dir=$(mktemp -d)
@@ -74,10 +85,14 @@ bash scripts/rehearse-package.sh "$output_dir"
 ```
 
 To check a downloaded tarball with its checksum alongside it, pass the target
-and the full build revision reported by the workflow.
+and the full build revision reported by the workflow. For a `dist` tarball,
+also pass the version from the downloaded `dist-manifest.json` and run the
+installer smoke with the matching generated script.
 
 ```sh
 bash scripts/smoke-package.sh "$target" "$revision" "$archive"
+bash scripts/smoke-package.sh "$target" "$revision" "$dist_archive" "$version"
+bash scripts/smoke-dist-installer.sh "$dist_archive" "$installer"
 ```
 
 Before proposing a release, rehearse the chosen packaging path from a clean
