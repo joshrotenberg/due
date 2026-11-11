@@ -288,11 +288,13 @@ other provider check the plan before the author starts.
 
 When the finish line holds and review has passed, commit and push from the
 piece's worktree, or confirm what the worker pushed if the order gave that to
-workers. Follow the repository's rules, and open or update the pull request. Then start the wait as a background command, for example
-`gh pr checks NUMBER --watch`, mark the piece `waiting`, and continue. When
-the wait exits, a failed check goes back to the author as a retry with the
-log as evidence. A passing check makes the piece `done` if the order stops
-at a ready pull request, or creates an inbox item if merging is next.
+workers. Follow the repository's rules, and open or update the pull request.
+Then hand the wait to the host's own CI watcher if it has one, or start it as
+a background command such as `gh pr checks NUMBER --watch`. Mark the piece
+`waiting` and continue. When the wait ends, a failed check goes back to the
+author as a retry with the log as evidence. A passing check makes the piece
+`done` if the order stops at a ready pull request, or creates an inbox item
+if merging is next.
 
 ## The inbox
 
