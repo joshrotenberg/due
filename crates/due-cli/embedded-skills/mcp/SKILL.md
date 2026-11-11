@@ -70,9 +70,9 @@ When done with a worker, wait for it to finish or interrupt it. Collect results
 and session items and finish any waits that refer to its runs before calling
 `release_session` with `{"session":"<session reference>"}`. Success returns
 `{"released":true}` and expires the session and its run references. Other
-workers on the connection remain available. A settlement error retains the
-records and capacity reservation. A nonzero provider exit can cause this error
-even after the provider process exits.
+workers on the connection remain available. When the wrapper confirms an
+abnormal provider exit, release still succeeds and includes the diagnostic in
+`exit_error`. A settlement error retains the records and capacity reservation.
 
 To end the whole stdio connection, close stdin, keep reading stdout through
 EOF, and await the Due process. Disconnect starts cleanup for all workers still

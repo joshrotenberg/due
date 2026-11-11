@@ -205,8 +205,10 @@ session items you need, then call `release_session` once the worker is idle.
 Successful release frees the session slot and its retained run slots. Further
 lookups with those references fail. Existing stream readers can drain retained
 items through closure, and saved native history follows the provider's own
-retention rules. Active runs return `Busy`. If cleanup fails, the engine retains
-the records and capacity reservation.
+retention rules. Active runs return `Busy`. A confirmed abnormal provider exit
+still frees capacity. Use `release_session_with_report` to retrieve its exit
+diagnostic. If cleanup is unconfirmed, the engine retains the records and
+capacity reservation.
 
 Native transport output/event limits remain enforced by the reused backends.
 Prompts and native argument bytes are bounded to 1 MiB; native arguments also

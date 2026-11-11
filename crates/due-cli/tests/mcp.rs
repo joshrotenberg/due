@@ -1120,3 +1120,66 @@ async fn invalid_catalog_is_rejected_before_mcp_startup() {
         assert!(stderr.contains(expected), "{stderr}");
     }
 }
+
+#[tokio::test]
+async fn stdio_releases_an_abnormally_exited_worker_and_reports_its_diagnostic() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut peer = Peer::start(workspace.path(), None);
+    peer.initialize().await;
+    let crashed = peer
+        .tool(
+            "spawn",
+            json!({"provider":"codex","prompt":"native-exit-error"}),
+        )
+        .await;
+    let sibling = peer
+        .tool("spawn", json!({"provider":"claude","prompt":"first"}))
+        .await;
+    let done = peer
+        .tool(
+            "wait",
+            json!({"runs":[crashed["run"],sibling["run"]],"timeout_ms":10000}),
+        )
+        .await;
+    assert_eq!(done["condition_met"], true, "{done}");
+    assert_eq!(done["runs"][0]["result"]["status"], "failed");
+    assert_eq!(done["runs"][1]["result"]["status"], "succeeded");
+
+    let release = peer
+        .tool("release_session", json!({"session":crashed["session"]}))
+        .await;
+    assert_eq!(release["released"], true);
+    assert!(
+        release["exit_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("exit code 17")),
+        "{release}"
+    );
+    let stale = peer
+        .call(
+            "tools/call",
+            json!({"name":"inspect","arguments":{"run":crashed["run"]}}),
+        )
+        .await;
+    assert_eq!(stale["structuredContent"]["error"]["kind"], "unknown_run");
+    let follow = peer
+        .tool(
+            "follow_up",
+            json!({"session":sibling["session"],"prompt":"second"}),
+        )
+        .await;
+    let done = peer
+        .tool("wait", json!({"runs":[follow["run"]],"timeout_ms":10000}))
+        .await;
+    assert_eq!(done["runs"][0]["result"]["text"], "turn 2");
+
+    drop(peer.input);
+    assert!(
+        timeout(DEADLINE, peer.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(peer.output.next_line().await.unwrap().is_none());
+}
