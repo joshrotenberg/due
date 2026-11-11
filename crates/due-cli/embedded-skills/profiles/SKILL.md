@@ -170,6 +170,12 @@ installed Claude CLI parses it:
 }
 ```
 
+A Claude worker limited to file tools and a Bash allowlist of build and test
+commands cannot delete a file: the file tools have no delete and `rm` is not
+allowed. When the task removes tracked files, add `git rm` to the allowlist
+(for example `Bash(git rm:*)`) and name the paths in the assignment. It stages
+each deletion.
+
 Use the profile from each surface:
 
 ```sh
