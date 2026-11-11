@@ -1551,7 +1551,7 @@ fn codex_startup_interrupt_does_not_block_read_close_or_eof() {
 }
 
 #[test]
-fn codex_pending_interrupt_allows_permission_reply_and_followup() {
+fn codex_pending_interrupt_allows_sibling_deadline_permission_reply_and_followup() {
     let mut client = Client::new(false);
     let session = client.open("codex", true, None);
     let turn = client.start(&session, "startup-ask");
@@ -1567,6 +1567,15 @@ fn codex_pending_interrupt_allows_permission_reply_and_followup() {
     client.pushed_until(|i| {
         i["kind"] == "native" && i["data"]["method"] == "fixture/interrupt-waiting"
     });
+    let mut sibling = Client::new(false);
+    let sibling_session = sibling.open("claude", true, Some("200ms"));
+    let sibling_turn = sibling.start(&sibling_session, "hold");
+    let expired = sibling.finished(&sibling_session, &sibling_turn);
+    assert_eq!(expired["status"], "timed_out", "{expired}");
+    assert!(sibling.dir.path().join("exited").is_file());
+    sibling.call("session.close", json!({"session_id":sibling_session}));
+    sibling.eof();
+
     let read = client.request("session.read", json!({"session_id":session}));
     assert!(
         client

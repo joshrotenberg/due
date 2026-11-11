@@ -428,7 +428,7 @@ async fn saturated_waits_leave_room_to_interrupt() {
             }
         }
         assert!(interrupted);
-        assert_eq!(busy, 1);
+        assert_eq!(busy, 2);
         assert!(waits.is_empty());
     })
     .await
@@ -525,6 +525,177 @@ async fn stdio_releases_settled_workers_and_handles_eof_during_release() {
     .expect("release did not close provider stdin");
     drop(peer.input);
     fs::write(fixture.join("release-close"), "").unwrap();
+    assert!(
+        timeout(DEADLINE, peer.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(fixture.join("exited").is_file());
+}
+
+async fn finished_by_polling(peer: &mut Peer, run: &Value) -> Value {
+    timeout(DEADLINE, async {
+        loop {
+            let observation = peer
+                .tool("wait", json!({"runs":[run],"timeout_ms":0}))
+                .await;
+            if observation["condition_met"] == true {
+                return observation["runs"][0]["result"].clone();
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("run did not finish")
+}
+
+#[tokio::test]
+async fn stalled_interrupt_does_not_block_sibling_approval_or_deadline() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut peer = Peer::start(workspace.path(), None);
+    peer.initialize().await;
+    let fixture = workspace.path().join("codex");
+    fs::write(fixture.join("release-start"), "").unwrap();
+    let codex = peer
+        .tool("spawn", json!({"provider":"codex","prompt":"startup-ask"}))
+        .await;
+    let claude = peer
+        .tool("spawn", json!({"provider":"claude","prompt":"ask"}))
+        .await;
+    let codex_pending = peer.awaiting_input(&codex["run"]).await;
+    let claude_pending = peer.awaiting_input(&claude["run"]).await;
+    let waiting = peer
+        .tool(
+            "wait",
+            json!({"runs":[codex["run"],claude["run"]],"timeout_ms":1}),
+        )
+        .await;
+    assert_eq!(waiting["condition_met"], false);
+    let interrupt = peer
+        .request(
+            "tools/call",
+            json!({"name":"interrupt","arguments":{"run":codex["run"]}}),
+        )
+        .await;
+    // The fixture withholds acknowledgement until its exact approval is answered.
+    timeout(DEADLINE, async {
+        let mut cursor = 0;
+        loop {
+            if peer
+                .read_all(&codex["session"], &mut cursor)
+                .await
+                .iter()
+                .any(|item| item["data"]["method"] == "fixture/interrupt-waiting")
+            {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fixture did not receive interrupt");
+
+    let mut waits = Vec::new();
+    for _ in 0..15 {
+        waits.push(
+            peer.request(
+                "tools/call",
+                json!({
+                    "name":"wait","arguments":{"runs":[codex["run"]],"timeout_ms":10000}
+                }),
+            )
+            .await,
+        );
+    }
+    // An interrupt is itself a long request. Reserve space for responses even
+    // when all observation slots are occupied.
+    let busy = timeout(Duration::from_secs(3), peer.receive())
+        .await
+        .expect("stalled interrupt and waits consumed every request slot");
+    let busy_id = busy["id"].as_u64().unwrap();
+    waits.retain(|id| *id != busy_id);
+    assert_eq!(waits.len(), 14, "{busy}");
+    assert_eq!(
+        busy["result"]["structuredContent"]["error"]["kind"], "busy",
+        "{busy}"
+    );
+
+    peer.tool(
+        "respond",
+        json!({
+            "interaction":claude_pending["interactions"][0]["id"],
+            "response":{"behavior":"deny","message":"fixture denial"}
+        }),
+    )
+    .await;
+    let done = finished_by_polling(&mut peer, &claude["run"]).await;
+    assert_eq!(done["text"], "permission denied");
+
+    let held = peer
+        .tool(
+            "follow_up",
+            json!({"session":claude["session"],"prompt":"hold","timeout_ms":500}),
+        )
+        .await;
+    let expired = finished_by_polling(&mut peer, &held["run"]).await;
+    assert_eq!(expired["status"], "timed_out", "{expired}");
+
+    let release = peer
+        .call(
+            "tools/call",
+            json!({
+                "name":"release_session","arguments":{"session":claude["session"]}
+            }),
+        )
+        .await;
+    assert_eq!(
+        release["structuredContent"]["error"]["kind"], "busy",
+        "{release}"
+    );
+
+    let reply = peer
+        .request(
+            "tools/call",
+            json!({
+                "name":"respond","arguments":{
+                    "interaction":codex_pending["interactions"][0]["id"],
+                    "response":{"decision":"cancel"}
+                }
+            }),
+        )
+        .await;
+    let mut ids = waits.clone();
+    ids.extend([interrupt, reply]);
+    for _ in 0..ids.len() {
+        let response = peer.receive().await;
+        let id = response["id"].as_u64().unwrap();
+        let before = ids.len();
+        ids.retain(|expected| *expected != id);
+        assert_eq!(ids.len() + 1, before, "{response}");
+        let result = &response["result"]["structuredContent"];
+        if id == interrupt {
+            assert_eq!(result["result"]["status"], "cancelled", "{response}");
+        } else if id == reply {
+            assert_eq!(
+                result["interaction"], codex_pending["interactions"][0]["id"],
+                "{response}"
+            );
+        } else {
+            assert_eq!(result["condition_met"], true, "{response}");
+        }
+    }
+
+    for worker in [claude, codex] {
+        assert_eq!(
+            peer.tool("release_session", json!({"session":worker["session"]}))
+                .await,
+            json!({"released":true})
+        );
+    }
+    assert!(workspace.path().join("claude/exited").is_file());
+    drop(peer.input);
     assert!(
         timeout(DEADLINE, peer.child.wait())
             .await

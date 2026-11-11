@@ -181,9 +181,11 @@ Recovery and polling:
 Advance `after` to the returned `cursor` and repeat while `has_more` is true.
 `turn.read` has its own turn-local cursor; do not mix the two. `state` is
 `running`, `awaiting_input` or `finished`; a read returns at once when input is
-pending or the turn is finished, otherwise waits up to `wait_ms`. `turn.read`
-keeps only the latest turn; asking for an earlier turn is an error. Polling works
-without `stream: true`.
+pending or the turn is finished, otherwise waits up to `wait_ms`. This is an
+observation budget; the `session.open` timeout sets the execution deadline for
+each turn and expiry makes that session unusable. `turn.read` keeps only the
+latest turn; asking for an earlier turn is an error. Polling works without
+`stream: true`.
 
 ## Interactions (permission and question requests)
 
@@ -263,9 +265,12 @@ provider acknowledges. Then keep reading until that turn's `turn_finished`
 (usually `cancelled`) before starting another turn. Interrupting a finished turn
 is an error. For Codex, an interrupt sent before its native turn ID exists is held
 and an `interrupt_pending` item records intent only; one interruption can be
-pending, and the control deadline is 30 seconds. After a timeout the stop may
-already have been delivered. Interruption does not undo edits or prove every
-native subprocess stopped.
+pending, and the control deadline is 30 seconds. Keep reading stdout while the
+interrupt is pending. If the provider is waiting for a decision, the client
+can send an authorized `interaction.reply` without waiting for the interrupt
+response. Other RPC children can continue independently. After a control timeout
+the stop may already have been delivered. Interruption does not undo edits or
+prove every native subprocess stopped.
 
 ## Retention and limits
 

@@ -758,50 +758,42 @@ impl Inner {
             tokio::select! { _ = changed => {}, _ = at(deadline) => {} }
         }
     }
-    async fn shutdown(&self) -> Result<(), Error> {
+    async fn shutdown(self: &Arc<Self>) -> Result<(), Error> {
         let _closing = self.shutdown.lock().await;
-        let (runs, workers) = {
+        let workers = {
             let mut state = self.state.lock().unwrap();
             state.closing = true;
             for run in state.runs.values() {
                 run.cancel.send_replace(true);
             }
-            (
-                // Releases admitted before shutdown own only idle sessions.
-                // Waiting on active runs avoids racing with their record removal.
-                state
-                    .sessions
-                    .values()
-                    .filter_map(|entry| entry.active.clone())
-                    .collect::<Vec<_>>(),
-                state
-                    .sessions
-                    .values()
-                    .map(|entry| Arc::clone(&entry.worker))
-                    .collect::<Vec<_>>(),
-            )
+            state
+                .sessions
+                .values()
+                .map(|entry| (Arc::clone(&entry.worker), entry.active.clone()))
+                .collect::<Vec<_>>()
         };
-        if !runs.is_empty()
-            && !self
-                .wait(
-                    &runs,
-                    WaitOptions {
-                        until: WaitUntil::All,
-                        timeout: Some(self.limits.settlement_timeout),
-                    },
-                )
-                .await?
-                .condition_met
-        {
-            return Err(Error::new(
-                ErrorKind::Settlement,
-                "shutdown requested; active runs have not settled",
-            ));
-        }
         let mut tasks = tokio::task::JoinSet::new();
-        for worker in workers {
+        for (worker, active) in workers {
+            let inner = Arc::clone(self);
             let bound = self.limits.settlement_timeout;
             tasks.spawn(async move {
+                // Only wait for this worker. Releases already admitted own idle
+                // sessions, so they cannot remove the active run being waited on.
+                if let Some(run) = active
+                    && !inner
+                        .wait(
+                            std::slice::from_ref(&run),
+                            WaitOptions {
+                                until: WaitUntil::All,
+                                timeout: Some(bound),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .condition_met
+                {
+                    return Err(format!("shutdown requested; run {} has not settled", run.0));
+                }
                 let result = close_worker(&worker, bound).await;
                 worker.items.finish(result.as_ref().err().cloned());
                 result

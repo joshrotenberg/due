@@ -42,10 +42,21 @@ Observe several runs in one call, for example with
 `{"runs":["<first run>","<second run>"],"any":true,"timeout_ms":1000}`. Remove
 finished runs from the next `any` wait. Check pending interactions with `inspect`
 and respond only within your authority. The caller verifies each result against
-the work. At most 15 `wait` calls with a positive budget can be pending on one
-connection, including waits that use the default budget. Extra waits return a
-`busy` tool error so the connection can still handle controls. Use a grouped
-wait or `timeout_ms: 0` to poll.
+the work. The connection allows at most 14
+positive-duration waits and 15 calls total across those waits, `interrupt`, and
+`release_session`. Extra calls return `busy` so a control awaiting settlement
+doesn't use the last slot needed by `respond`. Use `timeout_ms: 0` to poll, or
+retry a control rejected as `busy` after an admitted call settles.
+
+A `wait` timeout only ends the observation. Use `timeout_ms` on `spawn` or
+`follow_up` to set an execution deadline for that assignment. If a run is
+waiting for approval, respond with the exact interaction token or interrupt
+that run. Submit an authorized response independently if the provider is still
+waiting for it during an interrupt. A response receipt confirms acceptance for
+delivery; check subsequent items and the run result. If an interrupt returns
+`settlement`, use `inspect` to track the run until it finishes. Check the run's
+terminal status even if the interrupt call succeeded. Continue monitoring other
+workers while one is waiting for input or settlement.
 
 When done with a worker, wait for it to finish or interrupt it. Collect results
 and session items and finish any waits that refer to its runs before calling
@@ -57,7 +68,8 @@ even after the provider process exits.
 
 To end the whole stdio connection, close stdin, keep reading stdout through
 EOF, and await the Due process. Disconnect starts cleanup for all workers still
-owned by the connection.
+owned by the connection. An unsettled worker does not prevent cleanup of its
+siblings.
 
 ## Named worker profiles
 
