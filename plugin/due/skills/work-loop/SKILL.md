@@ -393,7 +393,16 @@ resume workers. Nothing else from the earlier conversation is needed.
 ## Finishing
 
 The order is finished when every piece is `done`, `failed`, or `parked`.
-Report once: each piece with its state and pull request, the assumptions you
-made, the open inbox items, and what you could not verify. Remove the
-worktrees of `done` pieces whose changes are pushed. Leave the rest in place
-and name them in the report.
+Report once: each piece with its state and pull request, every run with its
+provider and outcome, the assumptions you made, the open inbox items, and
+what you could not verify.
+
+An order can also pause: every remaining piece is `waiting` on the same
+outside event, and nothing you are allowed to run will continue you when it
+happens. Say that the order is paused, name the event and the inbox item that
+asks for a message, and end the turn. The board holds the next step for
+whoever continues.
+
+Remove the worktree of a `done` piece only after checking that it is clean
+and that its head is the pushed branch head. Keep the local branches. Leave
+the other worktrees in place and name them in the report.
