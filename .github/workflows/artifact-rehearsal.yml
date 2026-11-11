@@ -7,6 +7,9 @@ on:
       - .github/workflows/artifact-rehearsal.yml
       - Cargo.toml
       - Cargo.lock
+      - LICENSE-APACHE
+      - LICENSE-MIT
+      - README.md
       - crates/due-cli/Cargo.toml
       - scripts/install-rehearsal-dist.sh
       - scripts/smoke-package.sh
@@ -72,6 +75,7 @@ jobs:
           "$RUNNER_TEMP/bin/dist" build --artifacts=global --output-format=json > "$RUNNER_TEMP/dist-manifest.json"
           git diff HEAD --exit-code -- Cargo.lock
           sh -n target/distrib/due-cli-installer.sh
+          (cd target/distrib && sed '/^$/d' sha256.sum | shasum -a 256 --strict -c -)
           cp "$RUNNER_TEMP/dist-manifest.json" target/distrib/dist-manifest.json
       - uses: actions/upload-artifact@v7
         with:
@@ -142,6 +146,15 @@ jobs:
           fi
           archive="$RUNNER_TEMP/due-artifacts/due-cli-$EXPECTED_TARGET.tar.gz"
           installer="$RUNNER_TEMP/due-installer"
-          version=$(jq -er '.releases[] | select(.app_name == "due-cli") | .app_version' "$installer/dist-manifest.json")
+          version=$(python3 -I - "$installer/dist-manifest.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          [release] = json.loads(Path(sys.argv[1]).read_text())["releases"]
+          assert release["app_name"] == "due-cli", release
+          print(release["app_version"])
+          PY
+          )
           bash scripts/smoke-package.sh "$EXPECTED_TARGET" "$GITHUB_SHA" "$archive" "$version"
           bash scripts/smoke-dist-installer.sh "$archive" "$installer/due-cli-installer.sh"

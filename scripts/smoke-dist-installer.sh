@@ -49,6 +49,9 @@ if PATH="$system_path" command -v sha256sum >/dev/null; then
   fi
   test ! -e "$scratch/rejected/.local/bin/due"
   echo "Installer rejected a corrupted archive"
+elif [ "$(uname -s)" = Linux ]; then
+  echo "sha256sum is required on Ubuntu to test installer checksum rejection." >&2
+  exit 1
 else
   echo "Installer checksum rejection skipped because stock PATH has no sha256sum"
 fi
