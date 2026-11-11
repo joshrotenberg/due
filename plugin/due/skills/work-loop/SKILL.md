@@ -270,13 +270,19 @@ other provider check the plan before the author starts.
   count. Have the result list the commands run and files read, and compare
   that with the activity counts from `due trace summarize`. Run the review
   again at higher effort if they show nothing.
-- A reviewer whose commands were denied has not seen the change. Its verdict
-  is not a review. Fix the profile and run it again.
-- For a second round, give a fresh reviewer the new diff. A resumed reviewer
-  tends to approve without looking.
+- A reviewer whose command for reading the change was denied has not seen
+  it. Its verdict is not a review. Fix the profile and run it again.
 - Check a finding before acting on it. Send confirmed findings to the author
-  by resuming its session. Set a limit on rounds, two unless the order says
-  otherwise, then take what remains to the inbox.
+  by resuming its session. Reject a finding only with evidence, and record
+  the evidence.
+- For a second round, give a fresh reviewer the new diff. A resumed reviewer
+  tends to approve without looking. Tell the fresh reviewer what the earlier
+  round raised and how each point was settled, including evidence you
+  gathered since. Without that it raises the same points again.
+- Set a limit on rounds, two unless the order says otherwise. After the last
+  round, have the author apply confirmed findings that are small and local,
+  run the finish line, and record them on the board. Take to the inbox only a
+  disagreement you cannot settle with evidence.
 
 ## Publish and wait
 
