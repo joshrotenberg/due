@@ -917,10 +917,11 @@ mod tests {
         sink.native_session("native".into());
         sink.failed("original provider failure".into());
         sink.failed("later provider failure".into());
-        assert_eq!(
-            sink.closed(Err("cleanup failed".into())).unwrap_err(),
-            "cleanup failed"
-        );
+        let cleanup = CloseError::Unconfirmed("cleanup failed".into());
+        assert!(matches!(
+            sink.closed(Err(cleanup)).unwrap_err(),
+            CloseError::Unconfirmed(message) if message == "cleanup failed"
+        ));
         let journal = sink.items.read(0, 10).unwrap();
         let items = journal["items"].as_array().unwrap();
         assert_eq!(items.len(), 2, "only the first failure emits an item");
