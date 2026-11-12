@@ -153,6 +153,7 @@ changes.
 | Exit 124 | `--timeout` elapsed; it is absolute and not extended by activity |
 | Exit 130 | Cancelled by SIGINT, SIGTERM or SIGHUP |
 | Task command denied | Native permissions blocked it; report the check as blocked rather than widening grants |
+| Claude allowlist denial | Workers use account settings/hooks; allowlists must match hook rewrites. In `due run`, `permission_denials` names the denied tool. Allow only assignment-permitted commands as run |
 | Codex worker follows instructions absent from the assignment | Codex loads the account's global `$CODEX_HOME/AGENTS.md` into every run, delegated ones included (seen on codex-cli 0.165). Read it. If it tells the agent to read another file that the sandbox blocks, a command that chains that read with the task command can fail, for example `git diff` in a review |
 | Resume fails | Wrong provider, wrong workspace, or a session that was ephemeral |
 
