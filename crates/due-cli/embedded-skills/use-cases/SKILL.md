@@ -194,3 +194,7 @@ authentication and permissions apply as configured. The caller writes the
 scope, chooses the provider, decides concurrency, verifies effects and decides
 whether to follow up. Preserve results, stderr and partial edits from failed or
 cancelled runs before acting on them.
+
+For an order larger than one assignment, `due skills show work-loop` is a
+procedure a caller can follow: pieces with finish lines, a worker per piece,
+retries, review, and a board and an inbox on disk.

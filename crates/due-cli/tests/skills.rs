@@ -29,6 +29,7 @@ const SKILLS: &[&str] = &[
     "mcp",
     "overview",
     "use-cases",
+    "work-loop",
     "profiles",
     "run",
     "contracts",

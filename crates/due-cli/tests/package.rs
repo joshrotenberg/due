@@ -199,6 +199,7 @@ fn source_distribution_has_its_docs_contracts_and_no_plugin_services() {
         "docs/rpc.md",
         "crates/due-cli/embedded-skills/overview/SKILL.md",
         "crates/due-cli/embedded-skills/use-cases/SKILL.md",
+        "crates/due-cli/embedded-skills/work-loop/SKILL.md",
         "crates/due-cli/embedded-skills/profiles/SKILL.md",
         "crates/due-cli/embedded-skills/rpc/SKILL.md",
         "crates/due-cli/embedded-skills/run/SKILL.md",

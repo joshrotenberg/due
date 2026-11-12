@@ -219,6 +219,7 @@ pub const SKILLS: &str = r#"GETTING STARTED
 GUIDES
   overview    Getting started, mode selection, setup and troubleshooting
   use-cases   Task fit and patterns for delegation, review, extraction and embedding
+  work-loop   Carry out a larger order through several workers, asking only when needed
   run         Scope, execute and verify one foreground assignment
   profiles    JSON configuration, overrides, native options and path resolution
   contracts   Structured answers and one-shot result/error semantics

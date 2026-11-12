@@ -16,10 +16,11 @@ installed and authenticated provider CLI. Installation starts no model work.
 The former source-trial and A/B requirements are retired.
 
 The work-loop skill is for an order larger than one assignment, such as a
-backlog of issues or one change with independent review. The calling agent
-splits the order into pieces, runs each piece through a Due worker in its own
-workspace, checks every result, and keeps a board and an inbox on disk. It asks
-the person only for decisions that cannot be undone or are out of scope.
+backlog of issues or one change with independent review. It is a short entry
+that sends the calling agent to `due skills show work-loop`, where the
+procedure lives: split the order into pieces, run each piece through a Due
+worker in its own workspace, check every result, and keep a board and an inbox
+on disk.
 
 Use `due init --dry-run`, then `due init` to install for both hosts, or select
 `--host claude` or `--host codex`. Reload plugins or start a fresh host session

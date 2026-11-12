@@ -66,10 +66,11 @@ versioned setup report. See [installation and recovery](install.md#install-the-b
 for paths, partial failures, update and migration rules.
 
 
-The skills-only plugin in [`plugin/due`](../plugin/due) provides a short
-[`delegate` skill](../plugin/due/skills/delegate/SKILL.md) and a
-[`work-loop` skill](../plugin/due/skills/work-loop/SKILL.md) for orders larger
-than one assignment. The `delegate` skill frames Due as an
+The skills-only plugin in [`plugin/due`](../plugin/due) provides two short
+entry skills: [`delegate`](../plugin/due/skills/delegate/SKILL.md) and
+[`work-loop`](../plugin/due/skills/work-loop/SKILL.md), for orders larger
+than one assignment. Each routes to the guides in the binary; the `work-loop`
+procedure is `due skills show work-loop`. The `delegate` skill frames Due as an
 independent worker and starts an agent with `due -h`, `due --help`,
 `due COMMAND --help`, `due skills list --output json` and `due skills show NAME`. The plugin requires local command
 execution, Due on PATH, and the selected provider CLI installed and authenticated.

@@ -40,6 +40,7 @@ Guides in the full catalog:
 | --- | --- |
 | `overview` | Choose a mode, set up, troubleshoot, report (this guide) |
 | `use-cases` | Decide whether Due fits a task and pick a pattern, with one provider or two |
+| `work-loop` | Carry out an order larger than one assignment through several workers |
 | `run` | Run one bounded turn, resume it, verify the effects |
 | `profiles` | Write a JSON profile and reuse it across run, script and RPC |
 | `contracts` | Interpret the result envelope, typed errors and exit codes |
