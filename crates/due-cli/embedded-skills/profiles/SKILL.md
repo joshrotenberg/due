@@ -154,6 +154,18 @@ its own temporary schema/output files.
 It grants workspace edits and sandboxed commands, not a single file. Provider API
 access, inherited native rules and managed requirements remain separate.
 
+In a git worktree, `.git` is a file naming the worktree's own git directory,
+`<base>/.git/worktrees/<name>`, which holds its index and `HEAD`. Objects and refs
+are in the shared `<base>/.git`. Both directories are outside the workspace, so
+this profile lets the worker edit files but not record them in git. To let the
+worker commit, replace the empty `sandbox_workspace_write.writable_roots` array
+with both directories printed by
+`git rev-parse --path-format=absolute --git-common-dir --git-dir`. The worktree's
+own git directory alone is not enough: the commit fails writing its object to
+the shared directory. Granting both makes the shared repository's git directory
+writable by the worker, so grant them only when the assignment has the worker
+commit.
+
 Claude profile that permits reading and one test command, and
 denies anything else that would need approval. Resident sessions require one
 comma-joined value per option, as here; check the provider's help for how your
