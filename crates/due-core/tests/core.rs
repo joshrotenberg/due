@@ -134,12 +134,28 @@ exec /bin/bash "$DUE_SESSION_FIXTURE_DIR/native" "$@"
     fn assignment(&self, prompt: &str) -> Assignment {
         Assignment::new(self.options(), prompt)
     }
+    // The fixture publishes its PID by atomic rename, so a present file is
+    // always complete. Use this once a finished run proves the launch happened.
     fn pid(&self) -> i32 {
         fs::read_to_string(self.directory.path().join("pid"))
             .unwrap()
             .trim()
             .parse()
             .unwrap()
+    }
+    // For a run that is only known to be running: its fixture may not have
+    // published yet, so wait without blocking the runtime.
+    async fn launched_pid(&self) -> i32 {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(text) = fs::read_to_string(self.directory.path().join("pid")) {
+                    break text.trim().parse().unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("fixture did not publish its PID")
     }
     fn input(&self) -> String {
         fs::read_to_string(self.directory.path().join("input.jsonl")).unwrap()
@@ -884,17 +900,22 @@ async fn shutdown_cancels_all_workers_and_drop_also_requests_cleanup() {
     let b = engine.spawn(second.assignment("hold")).await.unwrap();
     running(&engine, &a).await;
     running(&engine, &b).await;
+    // Capture both PIDs before shutdown: running() does not prove publication.
+    let first_pid = first.launched_pid().await;
+    let second_pid = second.launched_pid().await;
     let (one, two) = tokio::join!(engine.shutdown(), engine.shutdown());
     one.unwrap();
     two.unwrap();
     assert_eq!(engine.inspect(&a).unwrap().state, RunState::Finished);
     assert_eq!(engine.inspect(&b).unwrap().state, RunState::Finished);
-    reaped(first.pid()).await;
-    reaped(second.pid()).await;
+    reaped(first_pid).await;
+    reaped(second_pid).await;
+    // Discard the first launch's PID so the read below is the dropped launch.
+    fs::remove_file(first.directory.path().join("pid")).unwrap();
     let dropping = self::engine();
     let run = dropping.spawn(first.assignment("hold")).await.unwrap();
     running(&dropping, &run).await;
-    let pid = first.pid();
+    let pid = first.launched_pid().await;
     drop(dropping);
     reaped(pid).await;
 }

@@ -14,7 +14,10 @@ for arg in "$@"; do
   [ "$arg" != app-server ] || provider=codex
   [ "$arg" != --include-partial-messages ] || partial_messages=1
 done
-printf '%s\n' "$$" > "$DUE_SESSION_FIXTURE_DIR/pid"
+# Publish the PID atomically: a reader sees no file or a complete one, never
+# a truncated file.
+printf '%s\n' "$$" > "$DUE_SESSION_FIXTURE_DIR/pid.$$"
+mv -f "$DUE_SESSION_FIXTURE_DIR/pid.$$" "$DUE_SESSION_FIXTURE_DIR/pid"
 trap 'touch "$DUE_SESSION_FIXTURE_DIR/exited"' EXIT
 count=0
 active=0

@@ -93,14 +93,18 @@ case "$DUE_TEST_MODE" in
         trap 'printf "SIGINT\n" > "$DUE_TEST_DIR/interrupt"; /bin/kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; exit 0' INT
         /bin/sleep 30 &
         child=$!
-        printf '%s\n%s\n' "$$" "$child" > "$DUE_TEST_DIR/pids"
+        # Publish by rename: tests treat the file's existence as readiness,
+        # so it must never be observable empty or partial.
+        printf '%s\n%s\n' "$$" "$child" > "$DUE_TEST_DIR/pids.$$"
+        /bin/mv -f "$DUE_TEST_DIR/pids.$$" "$DUE_TEST_DIR/pids"
         wait "$child"
         exit 0
         ;;
     blocked)
         /bin/sleep 30 &
         child=$!
-        printf '%s\n%s\n' "$$" "$child" > "$DUE_TEST_DIR/pids"
+        printf '%s\n%s\n' "$$" "$child" > "$DUE_TEST_DIR/pids.$$"
+        /bin/mv -f "$DUE_TEST_DIR/pids.$$" "$DUE_TEST_DIR/pids"
         wait "$child"
         exit 0
         ;;
