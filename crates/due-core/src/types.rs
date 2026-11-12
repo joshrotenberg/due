@@ -74,6 +74,46 @@ pub fn parse_timeout(value: &str) -> Result<Duration, String> {
     Ok(duration)
 }
 
+/// Largest prompt, model, or combined native argument payload.
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+pub(crate) const MAX_INPUT: usize = 1024 * 1024;
+
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+const MAX_NATIVE_ARGS: usize = 4096;
+
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+pub(crate) fn validate_prompt(prompt: &str) -> Result<(), &'static str> {
+    if prompt.trim().is_empty() || prompt.len() > MAX_INPUT {
+        return Err("prompt must be nonempty and at most 1 MiB");
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+pub(crate) fn validate_model(model: Option<&str>) -> Result<(), &'static str> {
+    if model.is_some_and(|value| value.trim().is_empty()) {
+        return Err("model must not be empty");
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+pub(crate) fn validate_native_input(
+    model: Option<&str>,
+    native_args: &[String],
+) -> Result<(), &'static str> {
+    if native_args.len() > MAX_NATIVE_ARGS
+        || model.is_some_and(|value| value.len() > MAX_INPUT)
+        || native_args
+            .iter()
+            .try_fold(0usize, |total, value| total.checked_add(value.len()))
+            .is_none_or(|bytes| bytes > MAX_INPUT)
+    {
+        return Err("native arguments exceed 1 MiB");
+    }
+    Ok(())
+}
+
 /// Largest native session or thread ID accepted for resume or fork.
 #[cfg(any(feature = "oneshot", feature = "resident"))]
 const MAX_NATIVE_ID: usize = 1024 * 1024;

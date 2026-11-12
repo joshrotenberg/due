@@ -17,7 +17,10 @@ use std::{
 
 use crate::{
     result::{ErrorKind, Invocation, RunError, RunResult},
-    types::{Effort, Provider, validate_native_id, validate_timeout},
+    types::{
+        Effort, MAX_INPUT, Provider, validate_model, validate_native_id, validate_native_input,
+        validate_prompt, validate_timeout,
+    },
 };
 use schema::Schema;
 
@@ -151,7 +154,12 @@ where
 {
     let result = execute_turn(run, prompt, &progress, cancel).await;
     result
-        .with_requested(run.model.as_deref(), run.effort)
+        .with_requested(
+            run.model
+                .as_deref()
+                .filter(|model| model.len() <= MAX_INPUT),
+            run.effort,
+        )
         .with_schema_requested(run.schema.is_some())
 }
 
@@ -164,19 +172,22 @@ async fn execute_turn<C>(
 where
     C: Future<Output = ()> + Send,
 {
-    let validation = run.validate_native_args().and_then(|()| {
-        if prompt.trim().is_empty() {
-            Err(RunError::invalid("prompt must not be empty"))
-        } else if let Some(Err(message)) = run.resume.as_deref().map(validate_native_id) {
-            Err(RunError::invalid(message))
-        } else if run.resume.is_some() && run.ephemeral {
-            Err(RunError::invalid("resume conflicts with ephemeral"))
-        } else if let Some(timeout) = run.timeout {
-            validate_timeout(timeout).map_err(RunError::invalid)
-        } else {
-            Ok(())
-        }
-    });
+    let validation = validate_native_input(run.model.as_deref(), &run.native_args)
+        .map_err(RunError::invalid)
+        .and_then(|()| run.validate_native_args())
+        .and_then(|()| {
+            validate_prompt(prompt).map_err(RunError::invalid)?;
+            validate_model(run.model.as_deref()).map_err(RunError::invalid)?;
+            if let Some(Err(message)) = run.resume.as_deref().map(validate_native_id) {
+                Err(RunError::invalid(message))
+            } else if run.resume.is_some() && run.ephemeral {
+                Err(RunError::invalid("resume conflicts with ephemeral"))
+            } else if let Some(timeout) = run.timeout {
+                validate_timeout(timeout).map_err(RunError::invalid)
+            } else {
+                Ok(())
+            }
+        });
     let context = match validation.and_then(|()| Context::resolve(run)) {
         Ok(context) => context,
         Err(error) => {
@@ -200,6 +211,91 @@ where
 mod tests {
     use super::*;
     use crate::result::Status;
+
+    #[test]
+    fn dry_run_validates_models_and_input_limits() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let check = |options: &RunOptions, prompt: &str, accepted: bool| {
+            let result = runtime.block_on(execute(
+                options,
+                prompt,
+                Arc::new(()),
+                std::future::pending(),
+            ));
+            if accepted {
+                assert!(
+                    matches!(result.status, Status::Planned),
+                    "{:?}: {:?}",
+                    options.provider,
+                    result.error
+                );
+                assert!(result.invocation.is_some());
+                assert!(result.error.is_none());
+            } else {
+                assert!(
+                    matches!(result.status, Status::Failed),
+                    "{:?}",
+                    options.provider
+                );
+                assert_eq!(result.error.as_ref().unwrap().kind, ErrorKind::InvalidInput);
+                assert!(result.invocation.is_none());
+            }
+            result
+        };
+        let limit = 1024 * 1024;
+        for provider in [Provider::Claude, Provider::Codex] {
+            let mut options = RunOptions::new(provider);
+            options.dry_run = true;
+            options.binary = Some(PathBuf::from("/bin/echo"));
+            for model in ["", " \t\n"] {
+                options.model = Some(model.into());
+                check(&options, "Hi", false);
+            }
+            options.model = None;
+            for bytes in [limit, limit + 1] {
+                let value = "\u{e9}".repeat(limit / 2) + &"x".repeat(bytes - limit);
+                check(&options, &value, bytes == limit);
+                options.model = Some(value);
+                let result = check(&options, "Hi", bytes == limit);
+                if bytes > limit {
+                    assert!(result.provenance.requested.unwrap().model.is_none());
+                }
+                options.model = None;
+            }
+
+            let (flag, prefix) = match provider {
+                Provider::Claude => ("--verbose", "--append-system-prompt="),
+                Provider::Codex => ("--skip-git-repo-check", "--config=developer_instructions="),
+            };
+            for bytes in [limit, limit + 1] {
+                options.native_args = vec![
+                    flag.into(),
+                    format!("{prefix}{}", "x".repeat(bytes - flag.len() - prefix.len())),
+                ];
+                options.validate_native_args().unwrap();
+                check(&options, "Hi", bytes == limit);
+            }
+            for count in [4096, 4097] {
+                options.native_args = vec![flag.into(); count];
+                options.validate_native_args().unwrap();
+                check(&options, "Hi", count == 4096);
+            }
+
+            options.native_args.clear();
+            options.cwd = Some(PathBuf::from("/nonexistent-due-path"));
+            options.model = Some("".into());
+            let result = check(&options, "Hi", false);
+            assert_eq!(result.error.unwrap().message, "model must not be empty");
+            options.model = None;
+            let result = check(&options, &"x".repeat(limit + 1), false);
+            assert_eq!(
+                result.error.unwrap().message,
+                "prompt must be nonempty and at most 1 MiB"
+            );
+        }
+    }
 
     #[test]
     fn dry_run_rejects_resume_ids_parsed_as_native_options() {

@@ -17,6 +17,7 @@ use super::*;
 use crate::{
     result::{ErrorKind as RunErrorKind, RunError, RunResult, Status},
     session::{CloseError, Manager, OpenOptions, SessionItems},
+    types::{MAX_INPUT, validate_native_input, validate_prompt},
 };
 
 // The wrapper open operation includes pipe creation and native initialization.
@@ -24,7 +25,6 @@ use crate::{
 // Active turns do not hold this guard. Never use a blocking lock across await.
 #[cfg(target_os = "macos")]
 static OPEN_NATIVE: AsyncMutex<()> = AsyncMutex::const_new(());
-const MAX_INPUT: usize = 1024 * 1024;
 
 enum SessionStart {
     Fresh,
@@ -162,12 +162,8 @@ impl Engine {
         fresh: Option<(WorkerOptions, SessionStart)>,
         assignment: FollowUp,
     ) -> Result<RunRef, Error> {
-        if assignment.prompt.trim().is_empty() || assignment.prompt.len() > MAX_INPUT {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "prompt must be nonempty and at most 1 MiB",
-            ));
-        }
+        validate_prompt(&assignment.prompt)
+            .map_err(|message| Error::new(ErrorKind::InvalidInput, message))?;
         validate_duration(assignment.timeout)?;
         let deadline = assignment
             .timeout
@@ -892,22 +888,8 @@ fn validate_worker(
     } else {
         which::which(&requested).unwrap_or(requested)
     });
-    if worker.native_args.len() > 4096
-        || worker
-            .model
-            .as_ref()
-            .is_some_and(|value| value.len() > MAX_INPUT)
-        || worker
-            .native_args
-            .iter()
-            .try_fold(0usize, |total, value| total.checked_add(value.len()))
-            .is_none_or(|bytes| bytes > MAX_INPUT)
-    {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "native arguments exceed 1 MiB",
-        ));
-    }
+    validate_native_input(worker.model.as_deref(), &worker.native_args)
+        .map_err(|message| Error::new(ErrorKind::InvalidInput, message))?;
     let mut options = open_options(&worker, resume);
     options
         .validate()
