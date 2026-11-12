@@ -69,6 +69,9 @@ impl OpenOptions {
                 return Err(format!("{name} must not be empty"));
             }
         }
+        if let Some(resume) = &self.resume {
+            crate::types::validate_native_id(resume)?;
+        }
         if self.resume.is_some() && self.ephemeral {
             return Err("resume conflicts with ephemeral".into());
         }

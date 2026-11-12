@@ -1070,6 +1070,38 @@ async fn fork_branches_saved_history_and_preserves_the_source() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_sessions_reject_ids_parsed_as_native_options() {
+    for provider in [Provider::Claude, Provider::Codex] {
+        let fixture = Fixture::new(provider);
+        let engine = engine();
+        for native_id in ["--dangerously-skip-permissions", "-c", "native\nid", " "] {
+            let saved = SavedSession {
+                native_id: native_id.into(),
+                worker: fixture.options(),
+            };
+            for error in [
+                engine
+                    .follow_up(saved.clone(), FollowUp::new("continue"))
+                    .await
+                    .unwrap_err(),
+                engine
+                    .fork(saved, FollowUp::new("branch"))
+                    .await
+                    .unwrap_err(),
+            ] {
+                assert_eq!(
+                    error.kind,
+                    ErrorKind::InvalidInput,
+                    "{provider:?} {native_id:?}"
+                );
+            }
+        }
+        assert!(!fixture.directory.path().join("pid").exists());
+        engine.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_rejects_an_alias_and_retains_native_unsupported_errors() {
     let fixture = Fixture::new(Provider::Claude);
     let invalid = SavedSession {

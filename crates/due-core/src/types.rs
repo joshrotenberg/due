@@ -74,6 +74,32 @@ pub fn parse_timeout(value: &str) -> Result<Duration, String> {
     Ok(duration)
 }
 
+/// Largest native session or thread ID accepted for resume or fork.
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+const MAX_NATIVE_ID: usize = 1024 * 1024;
+
+/// Check a native session or thread ID before it reaches a provider.
+///
+/// Native CLIs receive the ID as its own argument. Claude declares
+/// `--resume [value]` with an optional value and Codex takes the ID as a
+/// positional, so an ID that starts with `-` would be parsed as an option.
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+pub(crate) fn validate_native_id(id: &str) -> Result<(), &'static str> {
+    if id.trim().is_empty() {
+        return Err("resume ID must not be empty");
+    }
+    if id.len() > MAX_NATIVE_ID {
+        return Err("resume ID exceeds 1 MiB");
+    }
+    if id.starts_with('-') {
+        return Err("resume ID must not start with '-'");
+    }
+    if id.chars().any(char::is_control) {
+        return Err("resume ID must not contain control characters");
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_timeout(duration: Duration) -> Result<(), &'static str> {
     if duration.is_zero() {
         return Err("duration must be greater than zero");
@@ -82,4 +108,32 @@ pub(crate) fn validate_timeout(duration: Duration) -> Result<(), &'static str> {
         return Err("duration exceeds this platform's scheduling range");
     }
     Ok(())
+}
+
+#[cfg(all(test, any(feature = "oneshot", feature = "resident")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_ids_are_bounded_and_cannot_look_like_options() {
+        for valid in [
+            "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "thread name with spaces",
+            "fix-\u{e9}t\u{e9}",
+            &"a".repeat(MAX_NATIVE_ID),
+        ] {
+            assert_eq!(validate_native_id(valid), Ok(()), "{:.40}", valid);
+        }
+        for invalid in [
+            "",
+            " \t",
+            "-c",
+            "--dangerously-skip-permissions",
+            "native\nid",
+            "native\u{7f}id",
+            &"a".repeat(MAX_NATIVE_ID + 1),
+        ] {
+            assert!(validate_native_id(invalid).is_err(), "{:.40}", invalid);
+        }
+    }
 }

@@ -793,6 +793,31 @@ fn early_completion_and_pagination_keep_both_turns_and_unknown_native_fields() {
 }
 
 #[test]
+fn session_open_rejects_resume_ids_parsed_as_native_options() {
+    for provider in ["claude", "codex"] {
+        let mut client = Client::new(false);
+        for resume in ["--dangerously-skip-permissions", "-c", "native\nid"] {
+            let options = json!({
+                "provider":provider,"binary":client.dir.path().join("provider"),
+                "cwd":client.dir.path(),"resume":resume,
+            });
+            let reply = client.call("session.open", options);
+            assert_eq!(
+                reply["error"]["code"], -32000,
+                "{provider} {resume:?}: {reply}"
+            );
+            assert!(
+                !client.dir.path().join("pid").exists(),
+                "{provider} {resume:?}"
+            );
+        }
+        let session = client.open(provider, false, None);
+        client.close(&session);
+        client.eof();
+    }
+}
+
+#[test]
 fn protocol_errors_are_structured_and_connection_remains_usable() {
     let mut client = Client::new(false);
     client.raw(b"{broken\n");
