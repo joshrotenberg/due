@@ -762,6 +762,51 @@ mod tests {
         }
     }
 
+    /// Every file under `plugin/due` must be in the package list, with the
+    /// same bytes, so a new asset cannot be left out of the managed install.
+    #[test]
+    fn package_lists_every_source_plugin_file() {
+        fn walk(dir: &Path, root: &Path, found: &mut Vec<(String, Vec<u8>)>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, root, found);
+                } else {
+                    let relative = path.strip_prefix(root).unwrap();
+                    let name = relative
+                        .components()
+                        .map(|part| part.as_os_str().to_str().unwrap())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    found.push((format!("plugin/due/{name}"), fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin/due");
+        let mut source = Vec::new();
+        walk(&root, &root, &mut source);
+        source.sort();
+        // The native manifests are generated from `plugin.json` at install time.
+        let generated = [
+            "plugin/due/.claude-plugin/plugin.json",
+            "plugin/due/.codex-plugin/plugin.json",
+        ];
+        let mut packaged: Vec<(String, Vec<u8>)> = package()
+            .into_iter()
+            .filter(|(path, _)| path.starts_with("plugin/due/") && !generated.contains(path))
+            .map(|(path, bytes)| (path.to_owned(), bytes))
+            .collect();
+        packaged.sort();
+        let names = |files: &[(String, Vec<u8>)]| -> Vec<String> {
+            files.iter().map(|(path, _)| path.clone()).collect()
+        };
+        assert_eq!(names(&source), names(&packaged));
+        assert!(
+            source == packaged,
+            "a packaged file differs from its source"
+        );
+    }
+
     #[tokio::test]
     async fn native_stdout_and_stderr_are_captured_separately_on_failure() {
         let step = run_host(

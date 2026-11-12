@@ -36,6 +36,11 @@ const SKILLS: &[Skill] = &[
         content: include_str!("../embedded-skills/use-cases/SKILL.md"),
     },
     Skill {
+        name: "work-loop",
+        description: "Carry out an order larger than one assignment (a backlog of issues, one hard change with independent review, recurring upkeep) by splitting it into pieces, running each piece through Due workers, checking every result, and asking the person only for decisions that cannot be undone or are out of scope.",
+        content: include_str!("../embedded-skills/work-loop/SKILL.md"),
+    },
+    Skill {
         name: "run",
         description: "Scope, execute and independently verify one bounded Claude Code or Codex assignment, with optional native-session resume.",
         content: include_str!("../embedded-skills/run/SKILL.md"),
