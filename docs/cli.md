@@ -113,6 +113,9 @@ committed for reproducible application builds.
 | `--trace-interval 5s` | Heartbeat period while tracing, after reading the prompt. Must be positive. |
 | `--trace-detail` | Opt into bounded command/file/tool labels and assistant messages when a trace sink is enabled. May contain provider content. |
 
+Prompts from `--prompt`, `--stdin`, or a request file must be at most 1 MiB.
+Larger prompts are rejected as invalid input (exit status 2).
+
 Prompts always travel to the child through stdin. A prompt supplied on Due's own
 command line is still visible in Due's argv; use `--stdin` when that matters.
 

@@ -64,10 +64,13 @@ impl OpenOptions {
     pub(crate) fn validate(&mut self) -> Result<(), String> {
         self.timeout_duration()?;
         policy::validate_native_args(self.provider, &self.native_args)?;
-        for (name, value) in [("model", &self.model), ("resume", &self.resume)] {
-            if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
-                return Err(format!("{name} must not be empty"));
-            }
+        crate::types::validate_model(self.model.as_deref())?;
+        if self
+            .resume
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err("resume must not be empty".into());
         }
         if let Some(resume) = &self.resume {
             crate::types::validate_native_id(resume)?;
