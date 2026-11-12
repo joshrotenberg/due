@@ -17,7 +17,7 @@ use std::{
 
 use crate::{
     result::{ErrorKind, Invocation, RunError, RunResult},
-    types::{Effort, Provider, validate_timeout},
+    types::{Effort, Provider, validate_native_id, validate_timeout},
 };
 use schema::Schema;
 
@@ -167,6 +167,8 @@ where
     let validation = run.validate_native_args().and_then(|()| {
         if prompt.trim().is_empty() {
             Err(RunError::invalid("prompt must not be empty"))
+        } else if let Some(Err(message)) = run.resume.as_deref().map(validate_native_id) {
+            Err(RunError::invalid(message))
         } else if run.resume.is_some() && run.ephemeral {
             Err(RunError::invalid("resume conflicts with ephemeral"))
         } else if let Some(timeout) = run.timeout {
@@ -198,6 +200,42 @@ where
 mod tests {
     use super::*;
     use crate::result::Status;
+
+    #[test]
+    fn dry_run_rejects_resume_ids_parsed_as_native_options() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for provider in [Provider::Claude, Provider::Codex] {
+            let mut options = RunOptions::new(provider);
+            options.dry_run = true;
+            options.binary = Some(PathBuf::from("/bin/echo"));
+            for id in ["--dangerously-skip-permissions", "-c", "native\nid", " "] {
+                options.resume = Some(id.into());
+                let result = runtime.block_on(execute(
+                    &options,
+                    "Continue",
+                    Arc::new(()),
+                    std::future::pending(),
+                ));
+                assert!(
+                    matches!(result.status, Status::Failed),
+                    "{provider:?}, {id:?}: {:?}",
+                    result.status
+                );
+                assert_eq!(result.error.unwrap().kind, ErrorKind::InvalidInput);
+                assert!(result.invocation.is_none());
+            }
+            options.resume = Some("0199a1b2-thread".into());
+            let result = runtime.block_on(execute(
+                &options,
+                "Continue",
+                Arc::new(()),
+                std::future::pending(),
+            ));
+            assert!(matches!(result.status, Status::Planned), "{provider:?}");
+        }
+    }
 
     #[test]
     fn dry_run_rejects_invalid_typed_timeouts() {

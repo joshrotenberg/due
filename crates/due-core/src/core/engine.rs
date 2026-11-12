@@ -135,12 +135,6 @@ impl Engine {
     /// resulting worker gets a distinct logical and native identity. Native
     /// startup or history failures become terminal result data.
     pub async fn fork(&self, source: SavedSession, assignment: FollowUp) -> Result<RunRef, Error> {
-        if source.native_id.starts_with('-') || source.native_id.chars().any(char::is_control) {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "invalid native fork source ID",
-            ));
-        }
         self.admit_saved(source, assignment, SessionStart::Fork)
     }
 
@@ -150,15 +144,14 @@ impl Engine {
         assignment: FollowUp,
         start: impl FnOnce(String) -> SessionStart,
     ) -> Result<RunRef, Error> {
-        if saved.worker.ephemeral
-            || saved.native_id.trim().is_empty()
-            || saved.native_id.len() > MAX_INPUT
-        {
+        if saved.worker.ephemeral {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
-                "saved session requires a native ID and persisted history",
+                "saved session requires persisted history",
             ));
         }
+        crate::types::validate_native_id(&saved.native_id)
+            .map_err(|message| Error::new(ErrorKind::InvalidInput, message))?;
         let options = validate_worker(saved.worker, Some(saved.native_id.clone()))?;
         self.admit(None, Some((options, start(saved.native_id))), assignment)
     }

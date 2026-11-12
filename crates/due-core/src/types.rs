@@ -74,6 +74,32 @@ pub fn parse_timeout(value: &str) -> Result<Duration, String> {
     Ok(duration)
 }
 
+/// Largest native session or thread ID accepted for resume or fork.
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+const MAX_NATIVE_ID: usize = 1024 * 1024;
+
+/// Check a native session or thread ID before it reaches a provider.
+///
+/// Native CLIs receive the ID as its own argument. Claude declares
+/// `--resume [value]` with an optional value and Codex takes the ID as a
+/// positional, so an ID that starts with `-` would be parsed as an option.
+#[cfg(any(feature = "oneshot", feature = "resident"))]
+pub(crate) fn validate_native_id(id: &str) -> Result<(), &'static str> {
+    if id.trim().is_empty() {
+        return Err("resume ID must not be empty");
+    }
+    if id.len() > MAX_NATIVE_ID {
+        return Err("resume ID exceeds 1 MiB");
+    }
+    if id.starts_with('-') {
+        return Err("resume ID must not start with '-'");
+    }
+    if id.chars().any(char::is_control) {
+        return Err("resume ID must not contain control characters");
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_timeout(duration: Duration) -> Result<(), &'static str> {
     if duration.is_zero() {
         return Err("duration must be greater than zero");
