@@ -109,3 +109,31 @@ pub(crate) fn validate_timeout(duration: Duration) -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+#[cfg(all(test, any(feature = "oneshot", feature = "resident")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_ids_are_bounded_and_cannot_look_like_options() {
+        for valid in [
+            "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "thread name with spaces",
+            "fix-\u{e9}t\u{e9}",
+            &"a".repeat(MAX_NATIVE_ID),
+        ] {
+            assert_eq!(validate_native_id(valid), Ok(()), "{:.40}", valid);
+        }
+        for invalid in [
+            "",
+            " \t",
+            "-c",
+            "--dangerously-skip-permissions",
+            "native\nid",
+            "native\u{7f}id",
+            &"a".repeat(MAX_NATIVE_ID + 1),
+        ] {
+            assert!(validate_native_id(invalid).is_err(), "{:.40}", invalid);
+        }
+    }
+}
