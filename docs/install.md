@@ -157,7 +157,9 @@ entry point is `due:delegate`, a short skill that routes agents to `due -h`,
 `due --help`, `due COMMAND --help` and `due skills` in the installed binary. Its
 guides (`overview`, `run`, `profiles`, `contracts`, `observe`, and `rpc` and
 `supervise` where built) cover one-shot work, profiles, raw RPC clients and
-supervised assignments without a source checkout or website.
+supervised assignments without a source checkout or website. The package also
+installs `due:work-loop`, a procedure for carrying out a larger order by running
+its pieces through Due workers.
 Native host registration succeeding is distinct from verifying skill discovery in
 a fresh session. Codex uses the [official local-plugin workflow](https://developers.openai.com/plugins/build/plugins).
 

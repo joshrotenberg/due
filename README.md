@@ -46,7 +46,7 @@ plugin setup, updates, and rollback.
 | `due mcp` | Give an MCP client multiple live workers, named profiles, follow-ups, session items, and approval handling over stdio. See the [MCP guide](crates/due-cli/embedded-skills/mcp/SKILL.md). |
 | `due rpc` | Control a single resident worker from a custom JSON-RPC stdio client. See the [wire reference](docs/rpc.md). |
 | `due script` | Supervise resident assignments, permission requests, and independent checks in JavaScript. See the [harness guide](docs/harness.md) and [runnable example](examples/harness/supervision.js). |
-| `due init` | Install the bundled `due:delegate` skill in Claude Code, Codex, or both. See the [plugin setup guide](docs/install.md#install-the-bundled-plugin). |
+| `due init` | Install the bundled `due:delegate` and `due:work-loop` skills in Claude Code, Codex, or both. See the [plugin setup guide](docs/install.md#install-the-bundled-plugin). |
 
 The default build includes RPC and JavaScript. To add the stdio MCP command,
 install with `cargo install --path crates/due-cli --locked --features mcp-stdio`,

@@ -91,17 +91,23 @@ fn plugin_identity_version_and_entry_skill_match_the_source_package() {
             <= 30
     );
 
-    let skill = document(&plugin_root, "skills/delegate/SKILL.md");
-    let (frontmatter, body) = skill
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---\n"))
-        .expect("entry skill needs YAML frontmatter and a body");
-    assert!(frontmatter.lines().any(|line| line == "name: delegate"));
-    assert!(frontmatter.lines().any(|line| {
-        line.strip_prefix("description:")
-            .is_some_and(|text| !text.trim().is_empty())
-    }));
-    assert!(!body.trim().is_empty());
+    for name in ["delegate", "work-loop"] {
+        let skill = document(&plugin_root, &format!("skills/{name}/SKILL.md"));
+        let (frontmatter, body) = skill
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .expect("plugin skill needs YAML frontmatter and a body");
+        assert!(
+            frontmatter
+                .lines()
+                .any(|line| line == format!("name: {name}"))
+        );
+        assert!(frontmatter.lines().any(|line| {
+            line.strip_prefix("description:")
+                .is_some_and(|text| !text.trim().is_empty())
+        }));
+        assert!(!body.trim().is_empty());
+    }
 }
 
 #[test]
@@ -133,6 +139,7 @@ fn local_marketplace_resolves_the_real_contained_plugin() {
     assert_eq!(manifest["name"], matching[0]["name"]);
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     document(&plugin_root, "skills/delegate/SKILL.md");
+    document(&plugin_root, "skills/work-loop/SKILL.md");
 }
 
 fn assert_no_service_declarations(value: &Value) {
