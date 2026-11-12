@@ -13,6 +13,8 @@ consumer example in `due-core-compare`.
 The current workspace packages set `publish = false`. The library API may
 change between commits. [Issue #95](https://github.com/joshrotenberg/due/issues/95)
 tracks the decision about a supported public API and crates.io publication.
+The [library API audit](library-api.md) compares the one-shot and resident
+entry points and proposes a stable surface.
 
 ### Depending on `due-core` from source
 
